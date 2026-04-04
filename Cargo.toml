@@ -1,0 +1,24 @@
+[package]
+name = "ottyel"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+anyhow = "1.0"
+axum = "0.8"
+clap = { version = "4.5", features = ["derive"] }
+crossterm = { version = "0.29", features = ["event-stream"] }
+futures = "0.3"
+opentelemetry-proto = { version = "0.31", features = ["full", "with-serde"] }
+prost = "0.14"
+ratatui = "0.29"
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "2.0"
+tokio = { version = "1.48", features = ["full"] }
+tower = { version = "0.5", features = ["util"] }
+
+[dev-dependencies]
+tempfile = "3.21"

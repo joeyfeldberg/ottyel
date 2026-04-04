@@ -1,0 +1,366 @@
+use std::collections::BTreeMap;
+
+use opentelemetry_proto::tonic::common::v1::{AnyValue, KeyValue, any_value};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+pub type AttributeMap = BTreeMap<String, Value>;
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct LlmAttributes {
+    pub provider: Option<String>,
+    pub model: Option<String>,
+    pub operation: Option<String>,
+    pub span_kind: Option<String>,
+    pub prompt_preview: Option<String>,
+    pub output_preview: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_args: Option<String>,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cost: Option<f64>,
+    pub latency_ms: Option<f64>,
+    pub status: Option<String>,
+}
+
+impl LlmAttributes {
+    pub fn is_present(&self) -> bool {
+        self.provider.is_some()
+            || self.model.is_some()
+            || self.operation.is_some()
+            || self.span_kind.is_some()
+            || self.prompt_preview.is_some()
+            || self.output_preview.is_some()
+            || self.tool_name.is_some()
+            || self.input_tokens.is_some()
+            || self.output_tokens.is_some()
+            || self.total_tokens.is_some()
+            || self.cost.is_some()
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TraceSummary {
+    pub trace_id: String,
+    pub service_name: String,
+    pub root_name: String,
+    pub span_count: i64,
+    pub error_count: i64,
+    pub duration_ms: f64,
+    pub started_at_unix_nano: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpanEventDetail {
+    pub name: String,
+    pub timestamp_unix_nano: i64,
+    pub attributes: AttributeMap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpanLinkDetail {
+    pub trace_id: String,
+    pub span_id: String,
+    pub trace_state: String,
+    pub attributes: AttributeMap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpanDetail {
+    pub trace_id: String,
+    pub span_id: String,
+    pub parent_span_id: String,
+    pub service_name: String,
+    pub span_name: String,
+    pub span_kind: String,
+    pub status_code: String,
+    pub start_time_unix_nano: i64,
+    pub end_time_unix_nano: i64,
+    pub duration_ms: f64,
+    pub resource_attributes: AttributeMap,
+    pub attributes: AttributeMap,
+    pub events: Vec<SpanEventDetail>,
+    pub links: Vec<SpanLinkDetail>,
+    pub llm: Option<LlmAttributes>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LogSummary {
+    pub service_name: String,
+    pub timestamp_unix_nano: i64,
+    pub severity: String,
+    pub body: String,
+    pub trace_id: String,
+    pub span_id: String,
+    pub resource_attributes: AttributeMap,
+    pub attributes: AttributeMap,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MetricSummary {
+    pub service_name: String,
+    pub metric_name: String,
+    pub instrument_kind: String,
+    pub timestamp_unix_nano: i64,
+    pub value: Option<f64>,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmSummary {
+    pub trace_id: String,
+    pub span_id: String,
+    pub service_name: String,
+    pub provider: String,
+    pub model: String,
+    pub operation: String,
+    pub input_tokens: Option<u64>,
+    pub output_tokens: Option<u64>,
+    pub total_tokens: Option<u64>,
+    pub cost: Option<f64>,
+    pub latency_ms: Option<f64>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OverviewStats {
+    pub service_count: usize,
+    pub trace_count: usize,
+    pub error_span_count: usize,
+    pub log_count: usize,
+    pub metric_count: usize,
+    pub llm_count: usize,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DashboardSnapshot {
+    pub services: Vec<String>,
+    pub overview: OverviewStats,
+    pub traces: Vec<TraceSummary>,
+    pub selected_trace: Vec<SpanDetail>,
+    pub logs: Vec<LogSummary>,
+    pub metrics: Vec<MetricSummary>,
+    pub llm: Vec<LlmSummary>,
+}
+
+pub fn attributes_to_map(attributes: &[KeyValue]) -> AttributeMap {
+    attributes
+        .iter()
+        .map(|item| (item.key.clone(), any_value_to_json(item.value.as_ref())))
+        .collect()
+}
+
+pub fn any_value_to_json(value: Option<&AnyValue>) -> Value {
+    match value.and_then(|inner| inner.value.as_ref()) {
+        Some(any_value::Value::StringValue(text)) => Value::String(text.clone()),
+        Some(any_value::Value::BoolValue(flag)) => Value::Bool(*flag),
+        Some(any_value::Value::IntValue(number)) => Value::Number((*number).into()),
+        Some(any_value::Value::DoubleValue(number)) => {
+            serde_json::Number::from_f64(*number).map_or(Value::Null, Value::Number)
+        }
+        Some(any_value::Value::BytesValue(bytes)) => Value::String(hex::encode(bytes)),
+        Some(any_value::Value::ArrayValue(array)) => Value::Array(
+            array
+                .values
+                .iter()
+                .map(|entry| any_value_to_json(Some(entry)))
+                .collect(),
+        ),
+        Some(any_value::Value::KvlistValue(list)) => {
+            let mut obj = serde_json::Map::new();
+            for entry in &list.values {
+                obj.insert(entry.key.clone(), any_value_to_json(entry.value.as_ref()));
+            }
+            Value::Object(obj)
+        }
+        None => Value::Null,
+    }
+}
+
+pub fn extract_service_name(resource_attrs: &AttributeMap) -> String {
+    resource_attrs
+        .get("service.name")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown-service")
+        .to_string()
+}
+
+pub fn extract_llm_attributes(
+    attrs: &AttributeMap,
+    status_code: Option<&str>,
+    duration_ms: Option<f64>,
+) -> Option<LlmAttributes> {
+    let provider = first_string(
+        attrs,
+        &["llm.provider", "gen_ai.system", "openinference.provider"],
+    );
+    let model = first_string(
+        attrs,
+        &[
+            "llm.model_name",
+            "gen_ai.request.model",
+            "gen_ai.response.model",
+            "openinference.model",
+        ],
+    );
+    let operation = first_string(
+        attrs,
+        &[
+            "openinference.span.kind",
+            "llm.operation",
+            "gen_ai.operation.name",
+        ],
+    );
+    let span_kind = first_string(attrs, &["openinference.span.kind", "llm.span.kind"]);
+    let prompt_preview = first_string(
+        attrs,
+        &[
+            "input.value",
+            "llm.prompt",
+            "llm.prompts.0.content",
+            "gen_ai.prompt.0.content",
+        ],
+    );
+    let output_preview = first_string(
+        attrs,
+        &[
+            "output.value",
+            "llm.response",
+            "llm.completions.0.content",
+            "gen_ai.completion.0.content",
+        ],
+    );
+    let tool_name = first_string(attrs, &["tool.name", "llm.tool.name"]);
+    let tool_args = first_string(attrs, &["tool.arguments", "llm.tool.arguments"]);
+    let input_tokens = first_u64(
+        attrs,
+        &[
+            "llm.token_count.prompt",
+            "gen_ai.usage.input_tokens",
+            "usage.prompt_tokens",
+        ],
+    );
+    let output_tokens = first_u64(
+        attrs,
+        &[
+            "llm.token_count.completion",
+            "gen_ai.usage.output_tokens",
+            "usage.completion_tokens",
+        ],
+    );
+    let total_tokens = first_u64(
+        attrs,
+        &[
+            "llm.token_count.total",
+            "gen_ai.usage.total_tokens",
+            "usage.total_tokens",
+        ],
+    )
+    .or_else(|| match (input_tokens, output_tokens) {
+        (Some(input), Some(output)) => Some(input + output),
+        _ => None,
+    });
+    let cost = first_f64(
+        attrs,
+        &[
+            "llm.cost.total",
+            "gen_ai.usage.cost",
+            "usage.cost",
+            "cost.total",
+        ],
+    );
+
+    let llm = LlmAttributes {
+        provider,
+        model,
+        operation,
+        span_kind,
+        prompt_preview,
+        output_preview,
+        tool_name,
+        tool_args,
+        input_tokens,
+        output_tokens,
+        total_tokens,
+        cost,
+        latency_ms: duration_ms,
+        status: status_code.map(ToString::to_string),
+    };
+
+    llm.is_present().then_some(llm)
+}
+
+fn first_string(attrs: &AttributeMap, keys: &[&str]) -> Option<String> {
+    keys.iter().find_map(|key| {
+        attrs.get(*key).and_then(|value| match value {
+            Value::String(text) if !text.is_empty() => Some(text.clone()),
+            Value::Number(number) => Some(number.to_string()),
+            _ => None,
+        })
+    })
+}
+
+fn first_u64(attrs: &AttributeMap, keys: &[&str]) -> Option<u64> {
+    keys.iter().find_map(|key| {
+        attrs.get(*key).and_then(|value| match value {
+            Value::Number(number) => number.as_u64(),
+            Value::String(text) => text.parse().ok(),
+            _ => None,
+        })
+    })
+}
+
+fn first_f64(attrs: &AttributeMap, keys: &[&str]) -> Option<f64> {
+    keys.iter().find_map(|key| {
+        attrs.get(*key).and_then(|value| match value {
+            Value::Number(number) => number.as_f64(),
+            Value::String(text) => text.parse().ok(),
+            _ => None,
+        })
+    })
+}
+
+pub fn truncate(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    format!("{truncated}…")
+}
+
+mod hex {
+    pub fn encode(bytes: &[u8]) -> String {
+        bytes.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::{AttributeMap, extract_llm_attributes};
+
+    #[test]
+    fn llm_attributes_normalize_openinference_keys() {
+        let attrs = AttributeMap::from([
+            ("llm.provider".to_string(), json!("openai")),
+            ("llm.model_name".to_string(), json!("gpt-5.4")),
+            ("llm.token_count.prompt".to_string(), json!(11)),
+            ("llm.token_count.completion".to_string(), json!(7)),
+            ("input.value".to_string(), json!("hello")),
+            ("output.value".to_string(), json!("world")),
+        ]);
+
+        let llm = extract_llm_attributes(&attrs, Some("STATUS_CODE_OK"), Some(42.5)).unwrap();
+
+        assert_eq!(llm.provider.as_deref(), Some("openai"));
+        assert_eq!(llm.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(llm.input_tokens, Some(11));
+        assert_eq!(llm.output_tokens, Some(7));
+        assert_eq!(llm.total_tokens, Some(18));
+        assert_eq!(llm.prompt_preview.as_deref(), Some("hello"));
+        assert_eq!(llm.output_preview.as_deref(), Some("world"));
+        assert_eq!(llm.latency_ms, Some(42.5));
+    }
+}
