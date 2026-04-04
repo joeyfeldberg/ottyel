@@ -81,6 +81,7 @@ impl Tab {
 #[derive(Debug, Clone)]
 pub struct UiState {
     pub active_tab: usize,
+    pub trace_view_mode: TraceViewMode,
     pub selected_trace: usize,
     pub selected_trace_span: usize,
     pub trace_tree_scroll: usize,
@@ -113,6 +114,7 @@ impl Default for UiState {
     fn default() -> Self {
         Self {
             active_tab: 0,
+            trace_view_mode: TraceViewMode::List,
             selected_trace: 0,
             selected_trace_span: 0,
             trace_tree_scroll: 0,
@@ -148,6 +150,12 @@ pub enum TraceFocus {
     TraceList,
     TraceTree,
     TraceDetail,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum TraceViewMode {
+    List,
+    Detail,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -226,11 +234,11 @@ pub fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &UiSta
 }
 
 pub fn sync_trace_tree_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut UiState) {
-    if Tab::ALL[state.active_tab] != Tab::Traces {
+    if Tab::ALL[state.active_tab] != Tab::Traces || state.trace_view_mode != TraceViewMode::Detail {
         return;
     }
 
-    let viewport_height = trace_tree_viewport_height(trace_tree_area(root));
+    let viewport_height = trace_tree_viewport_height(trace_tree_area(root, state));
     let tree_rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
     let selected_line = trace_tree_selected_line(state, &tree_rows);
     let total_lines = trace_tree_total_lines(&tree_rows, snapshot.traces.is_empty());
@@ -243,11 +251,15 @@ pub fn sync_trace_tree_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &
 }
 
 pub fn sync_detail_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut UiState) {
-    state.trace_detail_scroll = clamp_scroll(
-        state.trace_detail_scroll,
-        trace_detail_lines(snapshot, state).len(),
-        detail_viewport_height(trace_detail_area(root)),
-    );
+    if Tab::ALL[state.active_tab] == Tab::Traces && state.trace_view_mode == TraceViewMode::Detail {
+        state.trace_detail_scroll = clamp_scroll(
+            state.trace_detail_scroll,
+            trace_detail_lines(snapshot, state).len(),
+            detail_viewport_height(trace_detail_area(root, state)),
+        );
+    } else {
+        state.trace_detail_scroll = 0;
+    }
     state.log_detail_scroll = clamp_scroll(
         state.log_detail_scroll,
         log_detail_lines(snapshot, state).len(),
@@ -406,17 +418,6 @@ fn render_traces(
     state: &UiState,
     palette: Palette,
 ) {
-    let panels = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
-        .split(area);
-
-    let trace_list_border = if state.trace_focus == TraceFocus::TraceList {
-        palette.accent
-    } else {
-        palette.muted
-    };
-
     let rows: Vec<Row<'_>> = snapshot
         .traces
         .iter()
@@ -458,14 +459,23 @@ fn render_traces(
         Block::default()
             .title(trace_list_title(state))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(trace_list_border)),
+            .border_style(
+                Style::default().fg(if state.trace_view_mode == TraceViewMode::List {
+                    palette.accent
+                } else {
+                    palette.muted
+                }),
+            ),
     );
-    frame.render_widget(table, panels[0]);
+    if state.trace_view_mode == TraceViewMode::List {
+        frame.render_widget(table, area);
+        return;
+    }
 
     let right = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(panels[1]);
+        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .split(area);
 
     let trace_tree_border = if state.trace_focus == TraceFocus::TraceTree {
         palette.warning
@@ -474,6 +484,7 @@ fn render_traces(
     };
 
     let tree_rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
+    let trace_window = trace_window(&snapshot.selected_trace);
     let tree_lines = snapshot
         .traces
         .get(state.selected_trace)
@@ -501,6 +512,7 @@ fn render_traces(
                 &tree_rows,
                 state.selected_trace_span,
                 state.trace_focus == TraceFocus::TraceTree,
+                trace_window,
                 palette,
             ))
             .collect::<Vec<_>>()
@@ -848,6 +860,7 @@ fn build_trace_tree_lines(
     rows: &[TraceTreeRow],
     selected_index: usize,
     tree_focused: bool,
+    trace_window: TraceWindow,
     palette: Palette,
 ) -> Vec<Line<'static>> {
     if rows.is_empty() {
@@ -898,7 +911,12 @@ fn build_trace_tree_lines(
                 ),
                 Span::raw(" "),
                 Span::styled(
-                    truncate(&row.span.span_name, 44),
+                    waterfall_bar(trace_window, row, 16),
+                    Style::default().fg(palette.accent).patch(selection_style),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    truncate(&row.span.span_name, 28),
                     Style::default()
                         .fg(palette.foreground)
                         .patch(selection_style),
@@ -916,6 +934,12 @@ fn build_trace_tree_lines(
             ])
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TraceWindow {
+    start_unix_nano: i64,
+    end_unix_nano: i64,
 }
 
 #[derive(Debug, Clone)]
@@ -938,6 +962,45 @@ impl TraceTreeRow {
 
 fn selected_trace_row(rows: &[TraceTreeRow], selected_index: usize) -> Option<&TraceTreeRow> {
     rows.get(selected_index)
+}
+
+fn trace_window(spans: &[SpanDetail]) -> TraceWindow {
+    let start_unix_nano = spans
+        .iter()
+        .map(|span| span.start_time_unix_nano)
+        .min()
+        .unwrap_or_default();
+    let end_unix_nano = spans
+        .iter()
+        .map(|span| span.end_time_unix_nano)
+        .max()
+        .unwrap_or(start_unix_nano);
+
+    TraceWindow {
+        start_unix_nano,
+        end_unix_nano,
+    }
+}
+
+fn waterfall_bar(trace_window: TraceWindow, row: &TraceTreeRow, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let total = (trace_window.end_unix_nano - trace_window.start_unix_nano).max(1) as f64;
+    let start = (row.span.start_time_unix_nano - trace_window.start_unix_nano).max(0) as f64;
+    let end = (row.span.end_time_unix_nano - trace_window.start_unix_nano).max(0) as f64;
+
+    let mut cells = vec!['.'; width];
+    let left = ((start / total) * width as f64).floor() as usize;
+    let mut right = ((end / total) * width as f64).ceil() as usize;
+    right = right.clamp(left.saturating_add(1), width);
+
+    for cell in &mut cells[left.min(width.saturating_sub(1))..right] {
+        *cell = '=';
+    }
+
+    format!("[{}]", cells.into_iter().collect::<String>())
 }
 
 fn trace_tree_rows(
@@ -1501,8 +1564,9 @@ fn trace_list_title(state: &UiState) -> String {
     if state.errors_only {
         parts.push("errors-only".to_string());
     }
-    if state.trace_focus == TraceFocus::TraceList {
+    if state.trace_view_mode == TraceViewMode::List {
         parts.push("focus".to_string());
+        parts.push("enter=open".to_string());
     }
     titled(parts)
 }
@@ -1553,42 +1617,42 @@ fn footer_text(state: &UiState) -> String {
         }
         Tab::Traces => match state.trace_focus {
             TraceFocus::TraceList => {
-                "traces: j/k select trace | l tree | ? help | e errors | s service | t window | / search | q quit"
+                "traces: j/k select trace | enter open | ? help | e errors | s service | t window | / search | q quit"
                     .to_string()
             }
             TraceFocus::TraceTree => {
-                "trace tree: j/k move | h list | l detail | space toggle subtree | ? help | e errors | / search | q quit"
+                "trace tree: j/k move | l/right detail | esc list | space toggle subtree | ? help | e errors | / search | q quit"
                     .to_string()
             }
             TraceFocus::TraceDetail => {
-                "span detail: j/k scroll | h tree | ? help | e errors | / search | q quit"
+                "span detail: j/k scroll | h/left tree | esc list | ? help | e errors | / search | q quit"
                     .to_string()
             }
         },
         Tab::Logs => {
             if state.logs_focus == PaneFocus::Primary {
-                "logs: j/k move | l detail | f tail | x log search | v severity | c correlation | ? help | s service | t window | / global search | q quit"
+                "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation | ? help | s service | t window | / global search | q quit"
                     .to_string()
             } else {
-                "log detail: j/k scroll | h feed | ? help | s service | t window | / global search | q quit"
+                "log detail: j/k scroll | esc/h/left feed | ? help | s service | t window | / global search | q quit"
                     .to_string()
             }
         }
         Tab::Metrics => {
             if state.metrics_focus == PaneFocus::Primary {
-                "metrics: j/k move | l detail | ? help | s service | t window | / global search | q quit"
+                "metrics: j/k move | l/right detail | ? help | s service | t window | / global search | q quit"
                     .to_string()
             } else {
-                "metric detail: j/k scroll | h feed | ? help | s service | t window | / global search | q quit"
+                "metric detail: j/k scroll | esc/h/left feed | ? help | s service | t window | / global search | q quit"
                     .to_string()
             }
         }
         Tab::Llm => {
             if state.llm_focus == PaneFocus::Primary {
-                "llm: j/k move | l detail | ? help | s service | t window | / global search | q quit"
+                "llm: j/k move | l/right detail | ? help | s service | t window | / global search | q quit"
                     .to_string()
             } else {
-                "model detail: j/k scroll | h feed | ? help | s service | t window | / global search | q quit"
+                "model detail: j/k scroll | esc/h/left feed | ? help | s service | t window | / global search | q quit"
                     .to_string()
             }
         }
@@ -1648,7 +1712,7 @@ fn help_lines(state: &UiState) -> Vec<Line<'static>> {
             TraceFocus::TraceList => {
                 lines.push(Line::raw("trace list"));
                 lines.push(Line::raw("  j / k            move traces"));
-                lines.push(Line::raw("  l                focus trace tree"));
+                lines.push(Line::raw("  enter            open selected trace"));
                 lines.push(Line::raw("  e                toggle errors-only traces"));
             }
             TraceFocus::TraceTree => {
@@ -1658,8 +1722,8 @@ fn help_lines(state: &UiState) -> Vec<Line<'static>> {
                 lines.push(Line::raw("  p                jump to parent span"));
                 lines.push(Line::raw("  r                jump to root span"));
                 lines.push(Line::raw("  m                jump to first llm span"));
-                lines.push(Line::raw("  h                focus trace list"));
-                lines.push(Line::raw("  l                focus span detail"));
+                lines.push(Line::raw("  esc              back to trace list"));
+                lines.push(Line::raw("  l / right        focus span detail"));
                 lines.push(Line::raw("  space / enter    collapse or expand subtree"));
                 lines.push(Line::raw("  e                toggle errors-only traces"));
             }
@@ -1670,14 +1734,15 @@ fn help_lines(state: &UiState) -> Vec<Line<'static>> {
                 lines.push(Line::raw("  p                jump to parent span"));
                 lines.push(Line::raw("  r                jump to root span"));
                 lines.push(Line::raw("  m                jump to first llm span"));
-                lines.push(Line::raw("  h                focus trace tree"));
+                lines.push(Line::raw("  h / left         focus trace tree"));
+                lines.push(Line::raw("  esc              back to trace list"));
             }
         },
         Tab::Logs => {
             if state.logs_focus == PaneFocus::Primary {
                 lines.push(Line::raw("logs feed"));
                 lines.push(Line::raw("  j / k            move logs and disable tail"));
-                lines.push(Line::raw("  l                focus log detail"));
+                lines.push(Line::raw("  l / right        focus log detail"));
                 lines.push(Line::raw("  f                toggle tail/follow mode"));
                 lines.push(Line::raw("  x                log-only text search"));
                 lines.push(Line::raw("  v                cycle severity filter"));
@@ -1685,35 +1750,35 @@ fn help_lines(state: &UiState) -> Vec<Line<'static>> {
             } else {
                 lines.push(Line::raw("log detail"));
                 lines.push(Line::raw("  j / k            scroll detail"));
-                lines.push(Line::raw("  h                focus logs feed"));
+                lines.push(Line::raw("  esc / h / left   back to logs feed"));
             }
         }
         Tab::Metrics => {
             if state.metrics_focus == PaneFocus::Primary {
                 lines.push(Line::raw("metrics feed"));
                 lines.push(Line::raw("  j / k            move metric selection"));
-                lines.push(Line::raw("  l                focus metric detail"));
+                lines.push(Line::raw("  l / right        focus metric detail"));
                 lines.push(Line::raw(
                     "  right pane       shows trend and stats for selection",
                 ));
             } else {
                 lines.push(Line::raw("metric detail"));
                 lines.push(Line::raw("  j / k            scroll detail"));
-                lines.push(Line::raw("  h                focus metrics feed"));
+                lines.push(Line::raw("  esc / h / left   back to metrics feed"));
             }
         }
         Tab::Llm => {
             if state.llm_focus == PaneFocus::Primary {
                 lines.push(Line::raw("llm inspector"));
                 lines.push(Line::raw("  j / k            move normalized llm spans"));
-                lines.push(Line::raw("  l                focus model detail"));
+                lines.push(Line::raw("  l / right        focus model detail"));
                 lines.push(Line::raw(
                     "  right pane       shows model/provider/token detail",
                 ));
             } else {
                 lines.push(Line::raw("model detail"));
                 lines.push(Line::raw("  j / k            scroll detail"));
-                lines.push(Line::raw("  h                focus llm inspector"));
+                lines.push(Line::raw("  esc / h / left   back to llm inspector"));
             }
         }
     }
@@ -1905,7 +1970,7 @@ fn trace_tree_total_lines(tree_rows: &[TraceTreeRow], no_trace_selected: bool) -
     }
 }
 
-fn trace_tree_area(root: Rect) -> Rect {
+fn trace_tree_area(root: Rect, state: &UiState) -> Rect {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1916,17 +1981,17 @@ fn trace_tree_area(root: Rect) -> Rect {
         ])
         .split(root);
     let body = layout[2];
-    let panels = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
-        .split(body);
     Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(panels[1])[0]
+        .constraints(if state.trace_view_mode == TraceViewMode::Detail {
+            [Constraint::Percentage(62), Constraint::Percentage(38)]
+        } else {
+            [Constraint::Percentage(100), Constraint::Percentage(0)]
+        })
+        .split(body)[0]
 }
 
-fn trace_detail_area(root: Rect) -> Rect {
+fn trace_detail_area(root: Rect, state: &UiState) -> Rect {
     let layout = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -1937,14 +2002,14 @@ fn trace_detail_area(root: Rect) -> Rect {
         ])
         .split(root);
     let body = layout[2];
-    let panels = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
-        .split(body);
     Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
-        .split(panels[1])[1]
+        .constraints(if state.trace_view_mode == TraceViewMode::Detail {
+            [Constraint::Percentage(62), Constraint::Percentage(38)]
+        } else {
+            [Constraint::Percentage(0), Constraint::Percentage(100)]
+        })
+        .split(body)[1]
 }
 
 fn log_detail_area(root: Rect) -> Rect {
@@ -2065,10 +2130,10 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        TraceFocus, UiState, build_log_detail_lines, first_llm_trace_index, footer_text,
-        format_log_body, help_lines, help_title, metric_chart_values, next_error_trace_index,
-        parent_trace_index, previous_error_trace_index, root_trace_index, selected_trace_row,
-        trace_tree_rows, trace_tree_scroll_offset,
+        TraceFocus, TraceViewMode, UiState, build_log_detail_lines, first_llm_trace_index,
+        footer_text, format_log_body, help_lines, help_title, metric_chart_values,
+        next_error_trace_index, parent_trace_index, previous_error_trace_index, root_trace_index,
+        selected_trace_row, trace_tree_rows, trace_tree_scroll_offset, trace_window, waterfall_bar,
     };
     use crate::domain::{AttributeMap, LlmAttributes, LogSummary, MetricSummary, SpanDetail};
     use crate::query::TimeWindow;
@@ -2180,8 +2245,25 @@ mod tests {
     }
 
     #[test]
+    fn waterfall_bar_uses_relative_trace_timing() {
+        let span = span_with_parent("trace", "child", "root", "db.query", 25, 75);
+        let rows = trace_tree_rows(std::slice::from_ref(&span), &HashSet::new());
+        let bar = waterfall_bar(
+            trace_window(&[
+                span_with_parent("trace", "root", "", "request", 0, 100),
+                span.clone(),
+            ]),
+            &rows[0],
+            8,
+        );
+
+        assert_eq!(bar, "[..====..]");
+    }
+
+    #[test]
     fn ui_state_defaults_to_trace_list_focus() {
         let state = UiState::default();
+        assert_eq!(state.trace_view_mode, TraceViewMode::List);
         assert_eq!(state.trace_focus, TraceFocus::TraceList);
         assert_eq!(state.selected_trace_span, 0);
         assert_eq!(state.trace_tree_scroll, 0);

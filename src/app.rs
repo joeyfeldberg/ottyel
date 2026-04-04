@@ -16,7 +16,7 @@ use crate::{
         LogCorrelationFilter, LogFilters, LogSeverityFilter, QueryFilters, QueryService, TimeWindow,
     },
     store::Store,
-    ui::{PaneFocus, Tab, TraceFocus, UiState},
+    ui::{PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
 };
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -171,10 +171,18 @@ fn handle_key(
         KeyCode::BackTab => {
             state.active_tab = (state.active_tab + Tab::ALL.len() - 1) % Tab::ALL.len();
         }
+        KeyCode::Enter
+            if Tab::ALL[state.active_tab] == Tab::Traces
+                && state.trace_view_mode == TraceViewMode::List =>
+        {
+            open_selected_trace(state)
+        }
+        KeyCode::Esc => go_back(state),
         KeyCode::Left | KeyCode::Char('h') => move_focus_left(state),
         KeyCode::Right | KeyCode::Char('l') => move_focus_right(state),
         KeyCode::Enter | KeyCode::Char(' ')
             if Tab::ALL[state.active_tab] == Tab::Traces
+                && state.trace_view_mode == TraceViewMode::Detail
                 && state.trace_focus == TraceFocus::TraceTree =>
         {
             toggle_selected_trace_subtree(state, snapshot)
@@ -216,6 +224,9 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &crate::domain::D
         Tab::Overview => {}
         Tab::Traces => match state.trace_focus {
             TraceFocus::TraceList => {
+                if state.trace_view_mode != TraceViewMode::List {
+                    return;
+                }
                 let previous = state.selected_trace;
                 move_index(&mut state.selected_trace, snapshot.traces.len(), delta);
                 if state.selected_trace != previous {
@@ -226,6 +237,9 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &crate::domain::D
                 }
             }
             TraceFocus::TraceTree => {
+                if state.trace_view_mode != TraceViewMode::Detail {
+                    return;
+                }
                 let previous = state.selected_trace_span;
                 let visible_len = crate::ui::visible_trace_tree_len(snapshot, state);
                 move_index(&mut state.selected_trace_span, visible_len, delta);
@@ -233,7 +247,10 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &crate::domain::D
                     state.trace_detail_scroll = 0;
                 }
             }
-            TraceFocus::TraceDetail => scroll_detail(delta as i16, state),
+            TraceFocus::TraceDetail if state.trace_view_mode == TraceViewMode::Detail => {
+                scroll_detail(delta as i16, state)
+            }
+            TraceFocus::TraceDetail => {}
         },
         Tab::Logs => match state.logs_focus {
             PaneFocus::Primary => {
@@ -279,6 +296,8 @@ fn sync_selection(state: &mut UiState, snapshot: &crate::domain::DashboardSnapsh
         .selected_trace_span
         .min(crate::ui::visible_trace_tree_len(snapshot, state).saturating_sub(1));
     if snapshot.selected_trace.is_empty() {
+        state.trace_view_mode = TraceViewMode::List;
+        state.trace_focus = TraceFocus::TraceList;
         state.trace_tree_scroll = 0;
         state.trace_detail_scroll = 0;
         state.collapsed_trace_spans.clear();
@@ -381,6 +400,9 @@ fn scroll_detail(delta: i16, state: &mut UiState) {
 
 fn jump_to_trace_row(target: Option<usize>, state: &mut UiState) {
     if let Some(index) = target {
+        if state.trace_view_mode == TraceViewMode::List {
+            return;
+        }
         state.selected_trace_span = index;
         state.trace_detail_scroll = 0;
     }
@@ -389,13 +411,18 @@ fn jump_to_trace_row(target: Option<usize>, state: &mut UiState) {
 fn move_focus_left(state: &mut UiState) {
     match Tab::ALL[state.active_tab] {
         Tab::Overview => {}
-        Tab::Traces => {
-            state.trace_focus = match state.trace_focus {
-                TraceFocus::TraceList => TraceFocus::TraceList,
-                TraceFocus::TraceTree => TraceFocus::TraceList,
-                TraceFocus::TraceDetail => TraceFocus::TraceTree,
-            };
-        }
+        Tab::Traces => match state.trace_view_mode {
+            TraceViewMode::List => {
+                state.trace_focus = TraceFocus::TraceList;
+            }
+            TraceViewMode::Detail => {
+                state.trace_focus = match state.trace_focus {
+                    TraceFocus::TraceDetail => TraceFocus::TraceTree,
+                    TraceFocus::TraceTree => TraceFocus::TraceTree,
+                    TraceFocus::TraceList => TraceFocus::TraceList,
+                };
+            }
+        },
         Tab::Logs => state.logs_focus = PaneFocus::Primary,
         Tab::Metrics => state.metrics_focus = PaneFocus::Primary,
         Tab::Llm => state.llm_focus = PaneFocus::Primary,
@@ -406,15 +433,43 @@ fn move_focus_right(state: &mut UiState) {
     match Tab::ALL[state.active_tab] {
         Tab::Overview => {}
         Tab::Traces => {
-            state.trace_focus = match state.trace_focus {
-                TraceFocus::TraceList => TraceFocus::TraceTree,
-                TraceFocus::TraceTree => TraceFocus::TraceDetail,
-                TraceFocus::TraceDetail => TraceFocus::TraceDetail,
-            };
+            if state.trace_view_mode == TraceViewMode::Detail {
+                state.trace_focus = match state.trace_focus {
+                    TraceFocus::TraceTree => TraceFocus::TraceDetail,
+                    TraceFocus::TraceDetail => TraceFocus::TraceDetail,
+                    TraceFocus::TraceList => TraceFocus::TraceTree,
+                };
+            }
         }
         Tab::Logs => state.logs_focus = PaneFocus::Detail,
         Tab::Metrics => state.metrics_focus = PaneFocus::Detail,
         Tab::Llm => state.llm_focus = PaneFocus::Detail,
+    }
+}
+
+fn open_selected_trace(state: &mut UiState) {
+    state.trace_view_mode = TraceViewMode::Detail;
+    state.trace_focus = TraceFocus::TraceTree;
+    state.selected_trace_span = 0;
+    state.trace_tree_scroll = 0;
+    state.trace_detail_scroll = 0;
+}
+
+fn go_back(state: &mut UiState) {
+    match Tab::ALL[state.active_tab] {
+        Tab::Overview => {}
+        Tab::Traces => match state.trace_view_mode {
+            TraceViewMode::List => {
+                state.trace_focus = TraceFocus::TraceList;
+            }
+            TraceViewMode::Detail => {
+                state.trace_view_mode = TraceViewMode::List;
+                state.trace_focus = TraceFocus::TraceList;
+            }
+        },
+        Tab::Logs => state.logs_focus = PaneFocus::Primary,
+        Tab::Metrics => state.metrics_focus = PaneFocus::Primary,
+        Tab::Llm => state.llm_focus = PaneFocus::Primary,
     }
 }
 
