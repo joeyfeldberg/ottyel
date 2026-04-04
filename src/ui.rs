@@ -84,10 +84,18 @@ pub struct UiState {
     pub selected_trace: usize,
     pub selected_trace_span: usize,
     pub trace_tree_scroll: usize,
+    pub trace_detail_scroll: u16,
     pub collapsed_trace_spans: HashSet<String>,
+    pub show_help: bool,
+    pub logs_focus: PaneFocus,
     pub selected_log: usize,
+    pub log_detail_scroll: u16,
+    pub metrics_focus: PaneFocus,
     pub selected_metric: usize,
+    pub metric_detail_scroll: u16,
+    pub llm_focus: PaneFocus,
     pub selected_llm: usize,
+    pub llm_detail_scroll: u16,
     pub service_filter_index: Option<usize>,
     pub errors_only: bool,
     pub trace_focus: TraceFocus,
@@ -108,10 +116,18 @@ impl Default for UiState {
             selected_trace: 0,
             selected_trace_span: 0,
             trace_tree_scroll: 0,
+            trace_detail_scroll: 0,
             collapsed_trace_spans: HashSet::new(),
+            show_help: false,
+            logs_focus: PaneFocus::Primary,
             selected_log: 0,
+            log_detail_scroll: 0,
+            metrics_focus: PaneFocus::Primary,
             selected_metric: 0,
+            metric_detail_scroll: 0,
+            llm_focus: PaneFocus::Primary,
             selected_llm: 0,
+            llm_detail_scroll: 0,
             service_filter_index: None,
             errors_only: false,
             trace_focus: TraceFocus::TraceList,
@@ -131,6 +147,13 @@ impl Default for UiState {
 pub enum TraceFocus {
     TraceList,
     TraceTree,
+    TraceDetail,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum PaneFocus {
+    Primary,
+    Detail,
 }
 
 pub fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &UiState, theme: Theme) {
@@ -196,6 +219,10 @@ pub fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &UiSta
         Paragraph::new(padded(footer_text(state))).style(Style::default().fg(palette.muted)),
         layout[3],
     );
+
+    if state.show_help {
+        render_help_overlay(frame, root, state, palette);
+    }
 }
 
 pub fn sync_trace_tree_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut UiState) {
@@ -212,6 +239,29 @@ pub fn sync_trace_tree_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &
         total_lines,
         selected_line,
         viewport_height,
+    );
+}
+
+pub fn sync_detail_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut UiState) {
+    state.trace_detail_scroll = clamp_scroll(
+        state.trace_detail_scroll,
+        trace_detail_lines(snapshot, state).len(),
+        detail_viewport_height(trace_detail_area(root)),
+    );
+    state.log_detail_scroll = clamp_scroll(
+        state.log_detail_scroll,
+        log_detail_lines(snapshot, state).len(),
+        detail_viewport_height(log_detail_area(root)),
+    );
+    state.metric_detail_scroll = clamp_scroll(
+        state.metric_detail_scroll,
+        metric_detail_lines(snapshot, state).len(),
+        detail_viewport_height(metric_detail_area(root)),
+    );
+    state.llm_detail_scroll = clamp_scroll(
+        state.llm_detail_scroll,
+        llm_detail_lines(snapshot, state).len(),
+        detail_viewport_height(llm_detail_area(root)),
     );
 }
 
@@ -329,6 +379,23 @@ fn render_overview(
                 .border_style(Style::default().fg(palette.warning)),
         ),
         lower[1],
+    );
+}
+
+fn render_help_overlay(frame: &mut Frame<'_>, area: Rect, state: &UiState, palette: Palette) {
+    let popup = centered_rect(70, 58, area);
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(help_lines(state))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title(help_title(state))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette.warning)),
+            )
+            .style(Style::default().fg(palette.foreground)),
+        popup,
     );
 }
 
@@ -455,22 +522,22 @@ fn render_traces(
         right[0],
     );
 
-    let span_detail = selected_trace_row(&tree_rows, state.selected_trace_span)
-        .map(|row| build_span_detail_lines(row, palette))
-        .unwrap_or_else(|| {
-            vec![Line::raw(
-                "Select a trace and move focus to the tree to inspect spans.",
-            )]
-        });
+    let span_detail = trace_detail_lines(snapshot, state);
+    let span_detail_border = if state.trace_focus == TraceFocus::TraceDetail {
+        palette.accent
+    } else {
+        palette.muted
+    };
 
     frame.render_widget(
         Paragraph::new(span_detail)
+            .scroll((state.trace_detail_scroll, 0))
             .wrap(Wrap { trim: false })
             .block(
                 Block::default()
-                    .title("Span Detail")
+                    .title(trace_detail_title(state))
                     .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette.accent)),
+                    .border_style(Style::default().fg(span_detail_border)),
             ),
         right[1],
     );
@@ -487,6 +554,17 @@ fn render_logs(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
         .split(area);
+
+    let feed_border = if state.logs_focus == PaneFocus::Primary {
+        palette.accent
+    } else {
+        palette.muted
+    };
+    let detail_border = if state.logs_focus == PaneFocus::Detail {
+        palette.warning
+    } else {
+        palette.muted
+    };
 
     let rows: Vec<Row<'_>> = snapshot
         .logs
@@ -527,23 +605,25 @@ fn render_logs(
         Block::default()
             .title(log_feed_title(state))
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.accent)),
+            .border_style(Style::default().fg(feed_border)),
     );
     frame.render_widget(table, panels[0]);
 
-    let detail = snapshot
-        .logs
-        .get(state.selected_log)
-        .map(|log| build_log_detail_lines(log, palette))
-        .unwrap_or_else(|| vec![Line::raw("No log selected.")]);
+    let detail = log_detail_lines(snapshot, state);
 
     frame.render_widget(
-        Paragraph::new(detail).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .title("Log Detail")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.warning)),
-        ),
+        Paragraph::new(detail)
+            .scroll((state.log_detail_scroll, 0))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title(detail_title(
+                        "Log Detail",
+                        state.logs_focus == PaneFocus::Detail,
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(detail_border)),
+            ),
         panels[1],
     );
 }
@@ -559,6 +639,17 @@ fn render_metrics(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
         .split(area);
+
+    let feed_border = if state.metrics_focus == PaneFocus::Primary {
+        palette.accent
+    } else {
+        palette.muted
+    };
+    let detail_border = if state.metrics_focus == PaneFocus::Detail {
+        palette.accent
+    } else {
+        palette.muted
+    };
 
     let rows: Vec<Row<'_>> = snapshot
         .metrics
@@ -599,7 +690,7 @@ fn render_metrics(
         Block::default()
             .title("Metrics Feed")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.accent)),
+            .border_style(Style::default().fg(feed_border)),
     );
     frame.render_widget(table, panels[0]);
 
@@ -621,14 +712,20 @@ fn render_metrics(
         .data(&chart_values);
     frame.render_widget(sparkline, right[0]);
 
-    let detail = build_metric_detail_lines(snapshot, state.selected_metric, &series, palette);
+    let detail = metric_detail_lines(snapshot, state);
     frame.render_widget(
-        Paragraph::new(detail).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .title("Metric Detail")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.accent)),
-        ),
+        Paragraph::new(detail)
+            .scroll((state.metric_detail_scroll, 0))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title(detail_title(
+                        "Metric Detail",
+                        state.metrics_focus == PaneFocus::Detail,
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(detail_border)),
+            ),
         right[1],
     );
 }
@@ -644,6 +741,17 @@ fn render_llm(
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(area);
+
+    let feed_border = if state.llm_focus == PaneFocus::Primary {
+        palette.warning
+    } else {
+        palette.muted
+    };
+    let detail_border = if state.llm_focus == PaneFocus::Detail {
+        palette.accent
+    } else {
+        palette.muted
+    };
 
     let rows: Vec<Row<'_>> = snapshot
         .llm
@@ -696,39 +804,24 @@ fn render_llm(
         Block::default()
             .title("LLM Inspector")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.warning)),
+            .border_style(Style::default().fg(feed_border)),
     );
     frame.render_widget(table, panels[0]);
 
-    let detail = snapshot
-        .llm
-        .get(state.selected_llm)
-        .map(|item| {
-            vec![
-                Line::from(format!("trace {}", truncate(&item.trace_id, 24))),
-                Line::from(format!("service {}", item.service_name)),
-                Line::from(format!("provider {}", item.provider)),
-                Line::from(format!("model {}", item.model)),
-                Line::from(format!("operation {}", item.operation)),
-                Line::from(format!("status {}", item.status)),
-                Line::from(format!(
-                    "tokens in={} out={} total={}",
-                    item.input_tokens.unwrap_or_default(),
-                    item.output_tokens.unwrap_or_default(),
-                    item.total_tokens.unwrap_or_default()
-                )),
-                Line::from(format!("cost {:?}", item.cost)),
-                Line::from(format!("latency_ms {:?}", item.latency_ms)),
-            ]
-        })
-        .unwrap_or_else(|| vec![Line::raw("No LLM spans yet.")]);
+    let detail = llm_detail_lines(snapshot, state);
     frame.render_widget(
-        Paragraph::new(detail).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .title("Model detail")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.accent)),
-        ),
+        Paragraph::new(detail)
+            .scroll((state.llm_detail_scroll, 0))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title(detail_title(
+                        "Model Detail",
+                        state.llm_focus == PaneFocus::Detail,
+                    ))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(detail_border)),
+            ),
         panels[1],
     );
 
@@ -776,6 +869,7 @@ fn build_trace_tree_lines(
                 "STATUS_CODE_OK" => Style::default().fg(palette.success),
                 _ => Style::default().fg(palette.muted),
             };
+            let status_text = visible_status_badge(&row.span.status_code);
             let selection_style = if index == selected_index {
                 let color = if tree_focused {
                     palette.warning
@@ -797,11 +891,6 @@ fn build_trace_tree_lines(
                     Style::default().fg(palette.muted).patch(selection_style),
                 ),
                 Span::styled(
-                    format!("{:<9}", row.span.span_kind),
-                    Style::default().fg(palette.accent).patch(selection_style),
-                ),
-                Span::raw(" "),
-                Span::styled(
                     format!("{:>8.1}ms", row.span.duration_ms),
                     Style::default()
                         .fg(palette.foreground)
@@ -818,9 +907,10 @@ fn build_trace_tree_lines(
                     llm_suffix,
                     Style::default().fg(palette.warning).patch(selection_style),
                 ),
-                Span::raw(" "),
                 Span::styled(
-                    status_badge(&row.span.status_code),
+                    status_text
+                        .map(|text| format!(" {text}"))
+                        .unwrap_or_default(),
                     status_style.patch(selection_style),
                 ),
             ])
@@ -975,6 +1065,14 @@ fn status_badge(status_code: &str) -> &'static str {
         "STATUS_CODE_ERROR" => "error",
         "STATUS_CODE_OK" => "ok",
         _ => "unset",
+    }
+}
+
+fn visible_status_badge(status_code: &str) -> Option<&'static str> {
+    match status_code {
+        "STATUS_CODE_ERROR" => Some("error"),
+        "STATUS_CODE_OK" => Some("ok"),
+        _ => None,
     }
 }
 
@@ -1420,6 +1518,10 @@ fn trace_tree_title(state: &UiState) -> String {
     titled(parts)
 }
 
+fn trace_detail_title(state: &UiState) -> String {
+    detail_title("Span Detail", state.trace_focus == TraceFocus::TraceDetail)
+}
+
 fn global_status_text(snapshot: &DashboardSnapshot, state: &UiState) -> String {
     format!(
         "window={} | service={} | search={} | panes traces={} logs={} metrics={} llm={}",
@@ -1434,6 +1536,9 @@ fn global_status_text(snapshot: &DashboardSnapshot, state: &UiState) -> String {
 }
 
 fn footer_text(state: &UiState) -> String {
+    if state.show_help {
+        return "help: esc/?/enter close".to_string();
+    }
     if state.search_mode {
         return "global search: type to filter | enter/esc close | backspace delete".to_string();
     }
@@ -1443,30 +1548,192 @@ fn footer_text(state: &UiState) -> String {
 
     match Tab::ALL[state.active_tab] {
         Tab::Overview => {
-            "overview: tab switch panes | / global search | s service | t window | q quit"
+            "overview: tab switch panes | ? help | / global search | s service | t window | q quit"
                 .to_string()
         }
         Tab::Traces => match state.trace_focus {
             TraceFocus::TraceList => {
-                "traces: j/k select trace | l tree focus | e errors | s service | t window | / search | q quit"
+                "traces: j/k select trace | l tree | ? help | e errors | s service | t window | / search | q quit"
                     .to_string()
             }
             TraceFocus::TraceTree => {
-                "trace tree: j/k move | h list focus | space/enter toggle subtree | e errors | / search | q quit"
+                "trace tree: j/k move | h list | l detail | space toggle subtree | ? help | e errors | / search | q quit"
+                    .to_string()
+            }
+            TraceFocus::TraceDetail => {
+                "span detail: j/k scroll | h tree | ? help | e errors | / search | q quit"
                     .to_string()
             }
         },
         Tab::Logs => {
-            "logs: j/k move | f tail | x log search | v severity | c correlation | s service | t window | / global search | q quit"
-                .to_string()
+            if state.logs_focus == PaneFocus::Primary {
+                "logs: j/k move | l detail | f tail | x log search | v severity | c correlation | ? help | s service | t window | / global search | q quit"
+                    .to_string()
+            } else {
+                "log detail: j/k scroll | h feed | ? help | s service | t window | / global search | q quit"
+                    .to_string()
+            }
         }
         Tab::Metrics => {
-            "metrics: j/k move | s service | t window | / global search | q quit".to_string()
+            if state.metrics_focus == PaneFocus::Primary {
+                "metrics: j/k move | l detail | ? help | s service | t window | / global search | q quit"
+                    .to_string()
+            } else {
+                "metric detail: j/k scroll | h feed | ? help | s service | t window | / global search | q quit"
+                    .to_string()
+            }
         }
         Tab::Llm => {
-            "llm: j/k move | s service | t window | / global search | q quit".to_string()
+            if state.llm_focus == PaneFocus::Primary {
+                "llm: j/k move | l detail | ? help | s service | t window | / global search | q quit"
+                    .to_string()
+            } else {
+                "model detail: j/k scroll | h feed | ? help | s service | t window | / global search | q quit"
+                    .to_string()
+            }
         }
     }
+}
+
+fn help_title(state: &UiState) -> String {
+    match Tab::ALL[state.active_tab] {
+        Tab::Overview => "Help: Overview".to_string(),
+        Tab::Traces => match state.trace_focus {
+            TraceFocus::TraceList => "Help: Trace List".to_string(),
+            TraceFocus::TraceTree => "Help: Trace Tree".to_string(),
+            TraceFocus::TraceDetail => "Help: Span Detail".to_string(),
+        },
+        Tab::Logs => {
+            if state.logs_focus == PaneFocus::Primary {
+                "Help: Logs Feed".to_string()
+            } else {
+                "Help: Log Detail".to_string()
+            }
+        }
+        Tab::Metrics => {
+            if state.metrics_focus == PaneFocus::Primary {
+                "Help: Metrics Feed".to_string()
+            } else {
+                "Help: Metric Detail".to_string()
+            }
+        }
+        Tab::Llm => {
+            if state.llm_focus == PaneFocus::Primary {
+                "Help: LLM Inspector".to_string()
+            } else {
+                "Help: Model Detail".to_string()
+            }
+        }
+    }
+}
+
+fn help_lines(state: &UiState) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::raw("global"),
+        Line::raw("  tab / shift-tab  switch panes"),
+        Line::raw("  /                global search"),
+        Line::raw("  s                cycle service filter"),
+        Line::raw("  t                cycle time window"),
+        Line::raw("  ?                open/close help"),
+        Line::raw("  q                quit"),
+        Line::raw(""),
+    ];
+
+    match Tab::ALL[state.active_tab] {
+        Tab::Overview => {
+            lines.push(Line::raw("overview"));
+            lines.push(Line::raw("  use tab to move to investigation panes"));
+        }
+        Tab::Traces => match state.trace_focus {
+            TraceFocus::TraceList => {
+                lines.push(Line::raw("trace list"));
+                lines.push(Line::raw("  j / k            move traces"));
+                lines.push(Line::raw("  l                focus trace tree"));
+                lines.push(Line::raw("  e                toggle errors-only traces"));
+            }
+            TraceFocus::TraceTree => {
+                lines.push(Line::raw("trace tree"));
+                lines.push(Line::raw("  j / k            move visible spans"));
+                lines.push(Line::raw("  [ / ]            previous/next error span"));
+                lines.push(Line::raw("  p                jump to parent span"));
+                lines.push(Line::raw("  r                jump to root span"));
+                lines.push(Line::raw("  m                jump to first llm span"));
+                lines.push(Line::raw("  h                focus trace list"));
+                lines.push(Line::raw("  l                focus span detail"));
+                lines.push(Line::raw("  space / enter    collapse or expand subtree"));
+                lines.push(Line::raw("  e                toggle errors-only traces"));
+            }
+            TraceFocus::TraceDetail => {
+                lines.push(Line::raw("span detail"));
+                lines.push(Line::raw("  j / k            scroll detail"));
+                lines.push(Line::raw("  [ / ]            previous/next error span"));
+                lines.push(Line::raw("  p                jump to parent span"));
+                lines.push(Line::raw("  r                jump to root span"));
+                lines.push(Line::raw("  m                jump to first llm span"));
+                lines.push(Line::raw("  h                focus trace tree"));
+            }
+        },
+        Tab::Logs => {
+            if state.logs_focus == PaneFocus::Primary {
+                lines.push(Line::raw("logs feed"));
+                lines.push(Line::raw("  j / k            move logs and disable tail"));
+                lines.push(Line::raw("  l                focus log detail"));
+                lines.push(Line::raw("  f                toggle tail/follow mode"));
+                lines.push(Line::raw("  x                log-only text search"));
+                lines.push(Line::raw("  v                cycle severity filter"));
+                lines.push(Line::raw("  c                cycle correlation filter"));
+            } else {
+                lines.push(Line::raw("log detail"));
+                lines.push(Line::raw("  j / k            scroll detail"));
+                lines.push(Line::raw("  h                focus logs feed"));
+            }
+        }
+        Tab::Metrics => {
+            if state.metrics_focus == PaneFocus::Primary {
+                lines.push(Line::raw("metrics feed"));
+                lines.push(Line::raw("  j / k            move metric selection"));
+                lines.push(Line::raw("  l                focus metric detail"));
+                lines.push(Line::raw(
+                    "  right pane       shows trend and stats for selection",
+                ));
+            } else {
+                lines.push(Line::raw("metric detail"));
+                lines.push(Line::raw("  j / k            scroll detail"));
+                lines.push(Line::raw("  h                focus metrics feed"));
+            }
+        }
+        Tab::Llm => {
+            if state.llm_focus == PaneFocus::Primary {
+                lines.push(Line::raw("llm inspector"));
+                lines.push(Line::raw("  j / k            move normalized llm spans"));
+                lines.push(Line::raw("  l                focus model detail"));
+                lines.push(Line::raw(
+                    "  right pane       shows model/provider/token detail",
+                ));
+            } else {
+                lines.push(Line::raw("model detail"));
+                lines.push(Line::raw("  j / k            scroll detail"));
+                lines.push(Line::raw("  h                focus llm inspector"));
+            }
+        }
+    }
+
+    if state.search_mode {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("global search mode is active"));
+        lines.push(Line::raw(
+            "  type to edit, backspace to delete, enter/esc to close",
+        ));
+    }
+    if state.log_search_mode {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("log search mode is active"));
+        lines.push(Line::raw(
+            "  type to edit, backspace to delete, enter/esc to close",
+        ));
+    }
+
+    lines
 }
 
 fn titled(mut parts: Vec<String>) -> String {
@@ -1479,6 +1746,68 @@ fn titled(mut parts: Vec<String>) -> String {
 
 fn padded(text: String) -> String {
     format!(" {text} ")
+}
+
+fn detail_title(base: &str, focused: bool) -> String {
+    if focused {
+        format!("{base} [focus]")
+    } else {
+        base.to_string()
+    }
+}
+
+fn trace_detail_lines(snapshot: &DashboardSnapshot, state: &UiState) -> Vec<Line<'static>> {
+    let tree_rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
+    selected_trace_row(&tree_rows, state.selected_trace_span)
+        .map(|row| build_span_detail_lines(row, Palette::from_theme(Theme::Ember)))
+        .unwrap_or_else(|| {
+            vec![Line::raw(
+                "Select a trace and move focus to the tree to inspect spans.",
+            )]
+        })
+}
+
+fn log_detail_lines(snapshot: &DashboardSnapshot, state: &UiState) -> Vec<Line<'static>> {
+    snapshot
+        .logs
+        .get(state.selected_log)
+        .map(|log| build_log_detail_lines(log, Palette::from_theme(Theme::Ember)))
+        .unwrap_or_else(|| vec![Line::raw("No log selected.")])
+}
+
+fn metric_detail_lines(snapshot: &DashboardSnapshot, state: &UiState) -> Vec<Line<'static>> {
+    let series = selected_metric_series(snapshot, state.selected_metric);
+    build_metric_detail_lines(
+        snapshot,
+        state.selected_metric,
+        &series,
+        Palette::from_theme(Theme::Ember),
+    )
+}
+
+fn llm_detail_lines(snapshot: &DashboardSnapshot, state: &UiState) -> Vec<Line<'static>> {
+    snapshot
+        .llm
+        .get(state.selected_llm)
+        .map(|item| {
+            vec![
+                Line::from(format!("trace {}", truncate(&item.trace_id, 24))),
+                Line::from(format!("service {}", item.service_name)),
+                Line::from(format!("provider {}", item.provider)),
+                Line::from(format!("model {}", item.model)),
+                Line::from(format!("operation {}", item.operation)),
+                Line::from(format!("status {}", item.status)),
+                Line::from(format!(
+                    "tokens in={} out={} total={}",
+                    item.input_tokens.unwrap_or_default(),
+                    item.output_tokens.unwrap_or_default(),
+                    item.total_tokens.unwrap_or_default()
+                )),
+                Line::from(format!("cost {:?}", item.cost)),
+                Line::from(format!("latency_ms {:?}", item.latency_ms)),
+            ]
+        })
+        .unwrap_or_else(|| vec![Line::raw("No LLM spans yet.")])
 }
 
 pub fn visible_trace_tree_len(snapshot: &DashboardSnapshot, state: &UiState) -> usize {
@@ -1494,6 +1823,61 @@ pub fn selected_trace_tree_span(
         .map(|row| (row.span.span_id.clone(), row.has_children))
 }
 
+pub fn previous_error_trace_index(snapshot: &DashboardSnapshot, state: &UiState) -> Option<usize> {
+    let rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
+    let current = state.selected_trace_span.min(rows.len().saturating_sub(1));
+    (0..current)
+        .rev()
+        .find(|index| rows[*index].span.status_code == "STATUS_CODE_ERROR")
+}
+
+pub fn next_error_trace_index(snapshot: &DashboardSnapshot, state: &UiState) -> Option<usize> {
+    let rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
+    let start = state.selected_trace_span.saturating_add(1);
+    (start..rows.len()).find(|index| rows[*index].span.status_code == "STATUS_CODE_ERROR")
+}
+
+pub fn parent_trace_index(snapshot: &DashboardSnapshot, state: &UiState) -> Option<usize> {
+    let rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
+    let row = selected_trace_row(&rows, state.selected_trace_span)?;
+    if row.span.parent_span_id.is_empty() {
+        return None;
+    }
+
+    rows.iter()
+        .position(|candidate| candidate.span.span_id == row.span.parent_span_id)
+}
+
+pub fn root_trace_index(snapshot: &DashboardSnapshot, state: &UiState) -> Option<usize> {
+    let rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
+    let row = selected_trace_row(&rows, state.selected_trace_span)?;
+
+    let spans_by_id = snapshot
+        .selected_trace
+        .iter()
+        .map(|span| (span.span_id.as_str(), span))
+        .collect::<HashMap<_, _>>();
+
+    let mut current = row.span.span_id.as_str();
+    let mut root = current;
+    while let Some(span) = spans_by_id.get(current) {
+        if span.parent_span_id.is_empty() {
+            root = span.span_id.as_str();
+            break;
+        }
+        root = span.parent_span_id.as_str();
+        current = span.parent_span_id.as_str();
+    }
+
+    rows.iter()
+        .position(|candidate| candidate.span.span_id == root)
+}
+
+pub fn first_llm_trace_index(snapshot: &DashboardSnapshot, state: &UiState) -> Option<usize> {
+    let rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
+    rows.iter().position(|row| row.span.llm.is_some())
+}
+
 fn trace_tree_selected_line(state: &UiState, tree_rows: &[TraceTreeRow]) -> usize {
     const TREE_HEADER_LINES: usize = 3;
     if tree_rows.is_empty() {
@@ -1506,6 +1890,10 @@ fn trace_tree_selected_line(state: &UiState, tree_rows: &[TraceTreeRow]) -> usiz
 }
 
 fn trace_tree_viewport_height(area: Rect) -> usize {
+    area.height.saturating_sub(2) as usize
+}
+
+fn detail_viewport_height(area: Rect) -> usize {
     area.height.saturating_sub(2) as usize
 }
 
@@ -1538,6 +1926,84 @@ fn trace_tree_area(root: Rect) -> Rect {
         .split(panels[1])[0]
 }
 
+fn trace_detail_area(root: Rect) -> Rect {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(10),
+            Constraint::Length(1),
+        ])
+        .split(root);
+    let body = layout[2];
+    let panels = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(48), Constraint::Percentage(52)])
+        .split(body);
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(panels[1])[1]
+}
+
+fn log_detail_area(root: Rect) -> Rect {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(10),
+            Constraint::Length(1),
+        ])
+        .split(root);
+    let body = layout[2];
+    let panels = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .split(body);
+    panels[1]
+}
+
+fn metric_detail_area(root: Rect) -> Rect {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(10),
+            Constraint::Length(1),
+        ])
+        .split(root);
+    let body = layout[2];
+    let panels = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .split(body);
+    Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(9), Constraint::Min(10)])
+        .split(panels[1])[1]
+}
+
+fn llm_detail_area(root: Rect) -> Rect {
+    let layout = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Length(1),
+            Constraint::Min(10),
+            Constraint::Length(1),
+        ])
+        .split(root);
+    let body = layout[2];
+    let panels = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .split(body);
+    panels[1]
+}
+
 fn trace_tree_scroll_offset(
     current_offset: usize,
     total_lines: usize,
@@ -1565,6 +2031,15 @@ fn trace_tree_scroll_offset(
     offset
 }
 
+fn clamp_scroll(current: u16, line_count: usize, viewport_height: usize) -> u16 {
+    if viewport_height == 0 || line_count <= viewport_height {
+        return 0;
+    }
+
+    let max_scroll = line_count.saturating_sub(viewport_height);
+    current.min(u16::try_from(max_scroll).unwrap_or(u16::MAX))
+}
+
 fn centered_rect(percent_x: u16, percent_y: u16, area: Rect) -> Rect {
     let vertical = Layout::default()
         .direction(Direction::Vertical)
@@ -1590,10 +2065,12 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        TraceFocus, UiState, build_log_detail_lines, format_log_body, metric_chart_values,
-        selected_trace_row, trace_tree_rows, trace_tree_scroll_offset,
+        TraceFocus, UiState, build_log_detail_lines, first_llm_trace_index, footer_text,
+        format_log_body, help_lines, help_title, metric_chart_values, next_error_trace_index,
+        parent_trace_index, previous_error_trace_index, root_trace_index, selected_trace_row,
+        trace_tree_rows, trace_tree_scroll_offset,
     };
-    use crate::domain::{AttributeMap, LogSummary, MetricSummary, SpanDetail};
+    use crate::domain::{AttributeMap, LlmAttributes, LogSummary, MetricSummary, SpanDetail};
     use crate::query::TimeWindow;
     use serde_json::json;
 
@@ -1658,12 +2135,62 @@ mod tests {
     }
 
     #[test]
+    fn trace_navigation_helpers_follow_visible_tree_rows() {
+        let snapshot = crate::domain::DashboardSnapshot {
+            services: Vec::new(),
+            overview: crate::domain::OverviewStats {
+                service_count: 0,
+                trace_count: 0,
+                error_span_count: 0,
+                log_count: 0,
+                metric_count: 0,
+                llm_count: 0,
+            },
+            traces: Vec::new(),
+            selected_trace: vec![
+                span_with_parent("trace", "root", "", "request", 0, 100),
+                span_with_parent("trace", "http", "root", "http.call", 10, 70),
+                span_with_parent("trace", "cache", "http", "cache.get", 20, 30),
+                SpanDetail {
+                    status_code: "STATUS_CODE_ERROR".to_string(),
+                    ..span_with_parent("trace", "db", "root", "db.query", 75, 95)
+                },
+                SpanDetail {
+                    llm: Some(LlmAttributes {
+                        model: Some("gpt-5.4".to_string()),
+                        ..LlmAttributes::default()
+                    }),
+                    ..span_with_parent("trace", "llm", "root", "chat.completion", 96, 110)
+                },
+            ],
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+        };
+        let state = UiState {
+            selected_trace_span: 2,
+            ..UiState::default()
+        };
+
+        assert_eq!(previous_error_trace_index(&snapshot, &state), None);
+        assert_eq!(next_error_trace_index(&snapshot, &state), Some(3));
+        assert_eq!(parent_trace_index(&snapshot, &state), Some(1));
+        assert_eq!(root_trace_index(&snapshot, &state), Some(0));
+        assert_eq!(first_llm_trace_index(&snapshot, &state), Some(4));
+    }
+
+    #[test]
     fn ui_state_defaults_to_trace_list_focus() {
         let state = UiState::default();
         assert_eq!(state.trace_focus, TraceFocus::TraceList);
         assert_eq!(state.selected_trace_span, 0);
         assert_eq!(state.trace_tree_scroll, 0);
+        assert_eq!(state.trace_detail_scroll, 0);
         assert!(state.collapsed_trace_spans.is_empty());
+        assert!(!state.show_help);
+        assert_eq!(state.log_detail_scroll, 0);
+        assert_eq!(state.metric_detail_scroll, 0);
+        assert_eq!(state.llm_detail_scroll, 0);
         assert_eq!(state.time_window, TimeWindow::TwentyFourHours);
         assert!(!state.search_mode);
         assert!(state.search_query.is_empty());
@@ -1678,6 +2205,43 @@ mod tests {
             crate::query::LogCorrelationFilter::All
         );
         assert!(!state.log_tail);
+    }
+
+    #[test]
+    fn help_title_and_footer_follow_active_pane() {
+        let mut state = UiState::default();
+        state.active_tab = super::Tab::Logs as usize;
+        state.show_help = true;
+
+        assert_eq!(help_title(&state), "Help: Logs Feed");
+        assert_eq!(footer_text(&state), "help: esc/?/enter close");
+    }
+
+    #[test]
+    fn help_lines_include_trace_tree_commands() {
+        let mut state = UiState {
+            active_tab: super::Tab::Traces as usize,
+            trace_focus: TraceFocus::TraceTree,
+            ..UiState::default()
+        };
+        state.show_help = true;
+
+        let rendered = help_lines(&state)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>();
+
+        assert!(rendered.iter().any(|line| line.contains("trace tree")));
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("space / enter    collapse or expand subtree"))
+        );
+        assert!(
+            rendered
+                .iter()
+                .any(|line| line.contains("?                open/close help"))
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@ use crate::{
         LogCorrelationFilter, LogFilters, LogSeverityFilter, QueryFilters, QueryService, TimeWindow,
     },
     store::Store,
-    ui::{Tab, TraceFocus, UiState},
+    ui::{PaneFocus, Tab, TraceFocus, UiState},
 };
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -87,6 +87,11 @@ async fn terminal_loop(
             &snapshot,
             &mut state,
         );
+        crate::ui::sync_detail_scroll(
+            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+            &snapshot,
+            &mut state,
+        );
         terminal.draw(|frame| crate::ui::render(frame, &snapshot, &state, args.theme))?;
 
         tokio::select! {
@@ -124,6 +129,10 @@ fn handle_key(
     state: &mut UiState,
     snapshot: &crate::domain::DashboardSnapshot,
 ) -> bool {
+    if state.show_help {
+        return handle_help_key(code, state);
+    }
+
     if state.log_search_mode {
         return handle_log_search_key(code, state);
     }
@@ -135,6 +144,9 @@ fn handle_key(
     match code {
         KeyCode::Char('/') => {
             state.search_mode = true;
+        }
+        KeyCode::Char('?') => {
+            state.show_help = true;
         }
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return true,
         KeyCode::Char('x') if Tab::ALL[state.active_tab] == Tab::Logs => {
@@ -159,12 +171,8 @@ fn handle_key(
         KeyCode::BackTab => {
             state.active_tab = (state.active_tab + Tab::ALL.len() - 1) % Tab::ALL.len();
         }
-        KeyCode::Left | KeyCode::Char('h') if Tab::ALL[state.active_tab] == Tab::Traces => {
-            state.trace_focus = TraceFocus::TraceList;
-        }
-        KeyCode::Right | KeyCode::Char('l') if Tab::ALL[state.active_tab] == Tab::Traces => {
-            state.trace_focus = TraceFocus::TraceTree;
-        }
+        KeyCode::Left | KeyCode::Char('h') => move_focus_left(state),
+        KeyCode::Right | KeyCode::Char('l') => move_focus_right(state),
         KeyCode::Enter | KeyCode::Char(' ')
             if Tab::ALL[state.active_tab] == Tab::Traces
                 && state.trace_focus == TraceFocus::TraceTree =>
@@ -172,6 +180,22 @@ fn handle_key(
             toggle_selected_trace_subtree(state, snapshot)
         }
         KeyCode::Char('e') => state.errors_only = !state.errors_only,
+        KeyCode::Char('[') if Tab::ALL[state.active_tab] == Tab::Traces => jump_to_trace_row(
+            crate::ui::previous_error_trace_index(snapshot, state),
+            state,
+        ),
+        KeyCode::Char(']') if Tab::ALL[state.active_tab] == Tab::Traces => {
+            jump_to_trace_row(crate::ui::next_error_trace_index(snapshot, state), state)
+        }
+        KeyCode::Char('p') if Tab::ALL[state.active_tab] == Tab::Traces => {
+            jump_to_trace_row(crate::ui::parent_trace_index(snapshot, state), state)
+        }
+        KeyCode::Char('r') if Tab::ALL[state.active_tab] == Tab::Traces => {
+            jump_to_trace_row(crate::ui::root_trace_index(snapshot, state), state)
+        }
+        KeyCode::Char('m') if Tab::ALL[state.active_tab] == Tab::Traces => {
+            jump_to_trace_row(crate::ui::first_llm_trace_index(snapshot, state), state)
+        }
         KeyCode::Char('t') => cycle_time_window(state),
         KeyCode::Char('s') if !snapshot.services.is_empty() => {
             state.service_filter_index = match state.service_filter_index {
@@ -197,22 +221,53 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &crate::domain::D
                 if state.selected_trace != previous {
                     state.selected_trace_span = 0;
                     state.trace_tree_scroll = 0;
+                    state.trace_detail_scroll = 0;
                     state.collapsed_trace_spans.clear();
                 }
             }
             TraceFocus::TraceTree => {
+                let previous = state.selected_trace_span;
                 let visible_len = crate::ui::visible_trace_tree_len(snapshot, state);
                 move_index(&mut state.selected_trace_span, visible_len, delta);
+                if state.selected_trace_span != previous {
+                    state.trace_detail_scroll = 0;
+                }
             }
+            TraceFocus::TraceDetail => scroll_detail(delta as i16, state),
         },
-        Tab::Logs => {
-            move_index(&mut state.selected_log, snapshot.logs.len(), delta);
-            if delta != 0 {
-                state.log_tail = false;
+        Tab::Logs => match state.logs_focus {
+            PaneFocus::Primary => {
+                let previous = state.selected_log;
+                move_index(&mut state.selected_log, snapshot.logs.len(), delta);
+                if delta != 0 {
+                    state.log_tail = false;
+                }
+                if state.selected_log != previous {
+                    state.log_detail_scroll = 0;
+                }
             }
-        }
-        Tab::Metrics => move_index(&mut state.selected_metric, snapshot.metrics.len(), delta),
-        Tab::Llm => move_index(&mut state.selected_llm, snapshot.llm.len(), delta),
+            PaneFocus::Detail => scroll_detail(delta as i16, state),
+        },
+        Tab::Metrics => match state.metrics_focus {
+            PaneFocus::Primary => {
+                let previous = state.selected_metric;
+                move_index(&mut state.selected_metric, snapshot.metrics.len(), delta);
+                if state.selected_metric != previous {
+                    state.metric_detail_scroll = 0;
+                }
+            }
+            PaneFocus::Detail => scroll_detail(delta as i16, state),
+        },
+        Tab::Llm => match state.llm_focus {
+            PaneFocus::Primary => {
+                let previous = state.selected_llm;
+                move_index(&mut state.selected_llm, snapshot.llm.len(), delta);
+                if state.selected_llm != previous {
+                    state.llm_detail_scroll = 0;
+                }
+            }
+            PaneFocus::Detail => scroll_detail(delta as i16, state),
+        },
     }
 }
 
@@ -225,6 +280,7 @@ fn sync_selection(state: &mut UiState, snapshot: &crate::domain::DashboardSnapsh
         .min(crate::ui::visible_trace_tree_len(snapshot, state).saturating_sub(1));
     if snapshot.selected_trace.is_empty() {
         state.trace_tree_scroll = 0;
+        state.trace_detail_scroll = 0;
         state.collapsed_trace_spans.clear();
     }
     state.selected_log = state
@@ -311,6 +367,57 @@ fn toggle_selected_trace_subtree(state: &mut UiState, snapshot: &crate::domain::
     }
 }
 
+fn scroll_detail(delta: i16, state: &mut UiState) {
+    let scroll = match Tab::ALL[state.active_tab] {
+        Tab::Overview => return,
+        Tab::Traces => &mut state.trace_detail_scroll,
+        Tab::Logs => &mut state.log_detail_scroll,
+        Tab::Metrics => &mut state.metric_detail_scroll,
+        Tab::Llm => &mut state.llm_detail_scroll,
+    };
+
+    *scroll = scroll.saturating_add_signed(delta);
+}
+
+fn jump_to_trace_row(target: Option<usize>, state: &mut UiState) {
+    if let Some(index) = target {
+        state.selected_trace_span = index;
+        state.trace_detail_scroll = 0;
+    }
+}
+
+fn move_focus_left(state: &mut UiState) {
+    match Tab::ALL[state.active_tab] {
+        Tab::Overview => {}
+        Tab::Traces => {
+            state.trace_focus = match state.trace_focus {
+                TraceFocus::TraceList => TraceFocus::TraceList,
+                TraceFocus::TraceTree => TraceFocus::TraceList,
+                TraceFocus::TraceDetail => TraceFocus::TraceTree,
+            };
+        }
+        Tab::Logs => state.logs_focus = PaneFocus::Primary,
+        Tab::Metrics => state.metrics_focus = PaneFocus::Primary,
+        Tab::Llm => state.llm_focus = PaneFocus::Primary,
+    }
+}
+
+fn move_focus_right(state: &mut UiState) {
+    match Tab::ALL[state.active_tab] {
+        Tab::Overview => {}
+        Tab::Traces => {
+            state.trace_focus = match state.trace_focus {
+                TraceFocus::TraceList => TraceFocus::TraceTree,
+                TraceFocus::TraceTree => TraceFocus::TraceDetail,
+                TraceFocus::TraceDetail => TraceFocus::TraceDetail,
+            };
+        }
+        Tab::Logs => state.logs_focus = PaneFocus::Detail,
+        Tab::Metrics => state.metrics_focus = PaneFocus::Detail,
+        Tab::Llm => state.llm_focus = PaneFocus::Detail,
+    }
+}
+
 fn handle_search_key(code: KeyCode, state: &mut UiState) -> bool {
     match code {
         KeyCode::Esc | KeyCode::Enter => {
@@ -343,6 +450,16 @@ fn handle_log_search_key(code: KeyCode, state: &mut UiState) -> bool {
         }
         KeyCode::Char(character) => {
             state.log_search_query.push(character);
+        }
+        _ => {}
+    }
+    false
+}
+
+fn handle_help_key(code: KeyCode, state: &mut UiState) -> bool {
+    match code {
+        KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => {
+            state.show_help = false;
         }
         _ => {}
     }
