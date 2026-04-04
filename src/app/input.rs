@@ -1,133 +1,16 @@
-use std::{io, time::Duration};
-
-use anyhow::{Context, Result};
-use crossterm::{
-    event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
-use futures::StreamExt;
-use ratatui::{Terminal, backend::CrosstermBackend};
-use tokio::{sync::watch, time::interval};
+use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::{
-    config::{Cli, Command, DoctorArgs, ServeArgs},
-    query::{
-        LogCorrelationFilter, LogFilters, LogSeverityFilter, QueryFilters, QueryService, TimeWindow,
-    },
-    store::Store,
+    domain::DashboardSnapshot,
+    query::{LogCorrelationFilter, LogFilters, LogSeverityFilter, QueryFilters, TimeWindow},
     ui::{PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
 };
 
-pub async fn run(cli: Cli) -> Result<()> {
-    match cli.command.unwrap_or(Command::Serve(ServeArgs::default())) {
-        Command::Serve(args) => serve(args).await,
-        Command::Doctor(args) => doctor(args),
-    }
-}
-
-async fn serve(args: ServeArgs) -> Result<()> {
-    let store = Store::open(&args.db_path, args.retention_hours, args.max_spans)?;
-    let query = QueryService::new(store.clone(), args.page_size);
-    let (shutdown_tx, shutdown_rx) = watch::channel(false);
-
-    let bind = args.bind.clone();
-    let server = tokio::spawn(async move { crate::ingest::serve(&bind, store, shutdown_rx).await });
-
-    let ui_result = run_terminal(&query, &args).await;
-    let _ = shutdown_tx.send(true);
-    let server_result = server.await.context("ingest task join failure")??;
-    let _ = server_result;
-    ui_result
-}
-
-fn doctor(args: DoctorArgs) -> Result<()> {
-    let store = Store::open(&args.db_path, 24, 1000)?;
-    let (traces, errors, logs, metrics, llm) = store.counts(None)?;
-    println!("db: {}", args.db_path.display());
-    println!("traces: {traces}");
-    println!("error_spans: {errors}");
-    println!("logs: {logs}");
-    println!("metrics: {metrics}");
-    println!("llm_spans: {llm}");
-    Ok(())
-}
-
-async fn run_terminal(query: &QueryService, args: &ServeArgs) -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
-    terminal.clear()?;
-
-    let terminal_result = terminal_loop(&mut terminal, query, args).await;
-
-    disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
-    terminal.show_cursor()?;
-    terminal_result
-}
-
-async fn terminal_loop(
-    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    query: &QueryService,
-    args: &ServeArgs,
-) -> Result<()> {
-    let mut events = EventStream::new();
-    let mut tick = interval(Duration::from_millis(args.tick_rate_ms));
-    let mut state = UiState::default();
-    let mut snapshot = query.snapshot(&filters(&state, &[]))?;
-
-    loop {
-        sync_selection(&mut state, &snapshot);
-        let size = terminal.size()?;
-        crate::ui::sync_trace_tree_scroll(
-            ratatui::layout::Rect::new(0, 0, size.width, size.height),
-            &snapshot,
-            &mut state,
-        );
-        crate::ui::sync_detail_scroll(
-            ratatui::layout::Rect::new(0, 0, size.width, size.height),
-            &snapshot,
-            &mut state,
-        );
-        terminal.draw(|frame| crate::ui::render(frame, &snapshot, &state, args.theme))?;
-
-        tokio::select! {
-            _ = tick.tick() => {
-                snapshot = query.snapshot(&filters(&state, &snapshot.services))?;
-                if let Some(trace) = snapshot.traces.get(state.selected_trace) {
-                    snapshot.selected_trace = query.trace_detail(&trace.trace_id)?;
-                }
-            }
-            maybe_event = events.next() => {
-                match maybe_event.transpose()? {
-                    Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        if handle_key(key.code, key.modifiers, &mut state, &snapshot) {
-                            break;
-                        }
-                        snapshot = query.snapshot(&filters(&state, &snapshot.services))?;
-                        if let Some(trace) = snapshot.traces.get(state.selected_trace) {
-                            snapshot.selected_trace = query.trace_detail(&trace.trace_id)?;
-                        }
-                    }
-                    Some(Event::Resize(_, _)) => {}
-                    Some(_) => {}
-                    None => break,
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn handle_key(
+pub(super) fn handle_key(
     code: KeyCode,
     modifiers: KeyModifiers,
     state: &mut UiState,
-    snapshot: &crate::domain::DashboardSnapshot,
+    snapshot: &DashboardSnapshot,
 ) -> bool {
     if state.show_help {
         return handle_help_key(code, state);
@@ -219,7 +102,57 @@ fn handle_key(
     false
 }
 
-fn move_selection(delta: isize, state: &mut UiState, snapshot: &crate::domain::DashboardSnapshot) {
+pub(super) fn sync_selection(state: &mut UiState, snapshot: &DashboardSnapshot) {
+    state.selected_trace = state
+        .selected_trace
+        .min(snapshot.traces.len().saturating_sub(1));
+    state.selected_trace_span = state
+        .selected_trace_span
+        .min(crate::ui::visible_trace_tree_len(snapshot, state).saturating_sub(1));
+    if snapshot.selected_trace.is_empty() {
+        state.trace_view_mode = TraceViewMode::List;
+        state.trace_focus = TraceFocus::TraceList;
+        state.trace_tree_scroll = 0;
+        state.trace_detail_scroll = 0;
+        state.collapsed_trace_spans.clear();
+    }
+    state.selected_log = state
+        .selected_log
+        .min(snapshot.logs.len().saturating_sub(1));
+    if state.log_tail && !snapshot.logs.is_empty() {
+        state.selected_log = 0;
+    }
+    state.selected_metric = state
+        .selected_metric
+        .min(snapshot.metrics.len().saturating_sub(1));
+    state.selected_llm = state.selected_llm.min(snapshot.llm.len().saturating_sub(1));
+
+    if let Some(idx) = state.service_filter_index
+        && idx >= snapshot.services.len()
+    {
+        state.service_filter_index = None;
+    }
+}
+
+pub(super) fn filters(state: &UiState, services: &[String]) -> QueryFilters {
+    QueryFilters {
+        service: state
+            .service_filter_index
+            .and_then(|idx| services.get(idx))
+            .cloned(),
+        errors_only: state.errors_only,
+        time_window: state.time_window,
+        search_query: (!state.search_query.is_empty()).then(|| state.search_query.clone()),
+        log_filters: LogFilters {
+            severity: state.log_severity_filter,
+            correlation: state.log_correlation_filter,
+            search_query: (!state.log_search_query.is_empty())
+                .then(|| state.log_search_query.clone()),
+        },
+    }
+}
+
+fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapshot) {
     match Tab::ALL[state.active_tab] {
         Tab::Overview => {}
         Tab::Traces => match state.trace_focus {
@@ -288,56 +221,6 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &crate::domain::D
     }
 }
 
-fn sync_selection(state: &mut UiState, snapshot: &crate::domain::DashboardSnapshot) {
-    state.selected_trace = state
-        .selected_trace
-        .min(snapshot.traces.len().saturating_sub(1));
-    state.selected_trace_span = state
-        .selected_trace_span
-        .min(crate::ui::visible_trace_tree_len(snapshot, state).saturating_sub(1));
-    if snapshot.selected_trace.is_empty() {
-        state.trace_view_mode = TraceViewMode::List;
-        state.trace_focus = TraceFocus::TraceList;
-        state.trace_tree_scroll = 0;
-        state.trace_detail_scroll = 0;
-        state.collapsed_trace_spans.clear();
-    }
-    state.selected_log = state
-        .selected_log
-        .min(snapshot.logs.len().saturating_sub(1));
-    if state.log_tail && !snapshot.logs.is_empty() {
-        state.selected_log = 0;
-    }
-    state.selected_metric = state
-        .selected_metric
-        .min(snapshot.metrics.len().saturating_sub(1));
-    state.selected_llm = state.selected_llm.min(snapshot.llm.len().saturating_sub(1));
-
-    if let Some(idx) = state.service_filter_index {
-        if idx >= snapshot.services.len() {
-            state.service_filter_index = None;
-        }
-    }
-}
-
-fn filters(state: &UiState, services: &[String]) -> QueryFilters {
-    QueryFilters {
-        service: state
-            .service_filter_index
-            .and_then(|idx| services.get(idx))
-            .cloned(),
-        errors_only: state.errors_only,
-        time_window: state.time_window,
-        search_query: (!state.search_query.is_empty()).then(|| state.search_query.clone()),
-        log_filters: LogFilters {
-            severity: state.log_severity_filter,
-            correlation: state.log_correlation_filter,
-            search_query: (!state.log_search_query.is_empty())
-                .then(|| state.log_search_query.clone()),
-        },
-    }
-}
-
 fn move_index(selection: &mut usize, max: usize, delta: isize) {
     if max == 0 {
         return;
@@ -373,7 +256,7 @@ fn cycle_log_correlation_filter(state: &mut UiState) {
         LogCorrelationFilter::ALL[(current + 1) % LogCorrelationFilter::ALL.len()];
 }
 
-fn toggle_selected_trace_subtree(state: &mut UiState, snapshot: &crate::domain::DashboardSnapshot) {
+fn toggle_selected_trace_subtree(state: &mut UiState, snapshot: &DashboardSnapshot) {
     let Some((span_id, has_children)) = crate::ui::selected_trace_tree_span(snapshot, state) else {
         return;
     };

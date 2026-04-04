@@ -1,0 +1,455 @@
+use ratatui::{
+    prelude::{Modifier, Style},
+    text::{Line, Span},
+};
+
+use crate::domain::{DashboardSnapshot, LogSummary, MetricSummary, SpanDetail, truncate};
+
+use super::{Palette, UiState, traces};
+
+pub(crate) fn selected_metric_series(
+    snapshot: &DashboardSnapshot,
+    selected_index: usize,
+) -> Vec<MetricSummary> {
+    let Some(selected) = snapshot.metrics.get(selected_index) else {
+        return Vec::new();
+    };
+
+    let mut series = snapshot
+        .metrics
+        .iter()
+        .filter(|metric| {
+            metric.service_name == selected.service_name
+                && metric.metric_name == selected.metric_name
+                && metric.instrument_kind == selected.instrument_kind
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    series.sort_by_key(|metric| metric.timestamp_unix_nano);
+    series
+}
+
+pub(crate) fn metric_chart_values(series: &[MetricSummary]) -> Vec<u64> {
+    if series.is_empty() {
+        return vec![0];
+    }
+
+    let numeric = series
+        .iter()
+        .filter_map(|metric| metric.value)
+        .collect::<Vec<_>>();
+    if numeric.is_empty() {
+        return vec![0; series.len().max(1)];
+    }
+
+    let min = numeric.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = numeric.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    let spread = (max - min).max(1.0);
+
+    series
+        .iter()
+        .map(|metric| {
+            metric
+                .value
+                .map(|value| (((value - min) / spread) * 100.0).round() as u64 + 1)
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+pub(crate) fn trace_detail_lines(
+    snapshot: &DashboardSnapshot,
+    state: &UiState,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    traces::selected_trace_span_detail(snapshot, state)
+        .map(|span| build_span_detail_lines(&span, palette))
+        .unwrap_or_else(|| {
+            vec![Line::raw(
+                "Select a trace and move focus to the tree to inspect spans.",
+            )]
+        })
+}
+
+pub(crate) fn log_detail_lines(
+    snapshot: &DashboardSnapshot,
+    state: &UiState,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    snapshot
+        .logs
+        .get(state.selected_log)
+        .map(|log| build_log_detail_lines(log, palette))
+        .unwrap_or_else(|| vec![Line::raw("No log selected.")])
+}
+
+pub(crate) fn metric_detail_lines(
+    snapshot: &DashboardSnapshot,
+    state: &UiState,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let series = selected_metric_series(snapshot, state.selected_metric);
+    build_metric_detail_lines(snapshot, state.selected_metric, &series, palette)
+}
+
+pub(crate) fn llm_detail_lines(
+    snapshot: &DashboardSnapshot,
+    state: &UiState,
+) -> Vec<Line<'static>> {
+    snapshot
+        .llm
+        .get(state.selected_llm)
+        .map(|item| {
+            vec![
+                Line::from(format!("trace {}", truncate(&item.trace_id, 24))),
+                Line::from(format!("service {}", item.service_name)),
+                Line::from(format!("provider {}", item.provider)),
+                Line::from(format!("model {}", item.model)),
+                Line::from(format!("operation {}", item.operation)),
+                Line::from(format!("status {}", item.status)),
+                Line::from(format!(
+                    "tokens in={} out={} total={}",
+                    item.input_tokens.unwrap_or_default(),
+                    item.output_tokens.unwrap_or_default(),
+                    item.total_tokens.unwrap_or_default()
+                )),
+                Line::from(format!("cost {:?}", item.cost)),
+                Line::from(format!("latency_ms {:?}", item.latency_ms)),
+            ]
+        })
+        .unwrap_or_else(|| vec![Line::raw("No LLM spans yet.")])
+}
+
+pub(crate) fn build_log_detail_lines(log: &LogSummary, palette: Palette) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            truncate(&log.body, 72),
+            Style::default()
+                .fg(palette.foreground)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("service {}", log.service_name)),
+        Line::from(format!("severity {}", log.severity)),
+        Line::from(format!("timestamp {}", log.timestamp_unix_nano)),
+        Line::from(format!(
+            "trace {}",
+            if log.trace_id.is_empty() {
+                "<none>"
+            } else {
+                log.trace_id.as_str()
+            }
+        )),
+        Line::from(format!(
+            "span {}",
+            if log.span_id.is_empty() {
+                "<none>"
+            } else {
+                log.span_id.as_str()
+            }
+        )),
+    ];
+
+    if !log.resource_attributes.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "resource",
+            Style::default()
+                .fg(palette.success)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (key, value) in log.resource_attributes.iter().take(6) {
+            lines.push(Line::from(format!(
+                "{} = {}",
+                truncate(key, 28),
+                truncate(&attribute_value_text(value), 64)
+            )));
+        }
+        if log.resource_attributes.len() > 6 {
+            lines.push(Line::from(format!(
+                "... {} more resource attributes",
+                log.resource_attributes.len() - 6
+            )));
+        }
+    }
+
+    if !log.attributes.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "attributes",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (key, value) in log.attributes.iter().take(8) {
+            lines.push(Line::from(format!(
+                "{} = {}",
+                truncate(key, 28),
+                truncate(&attribute_value_text(value), 64)
+            )));
+        }
+        if log.attributes.len() > 8 {
+            lines.push(Line::from(format!(
+                "... {} more attributes",
+                log.attributes.len() - 8
+            )));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "message",
+        Style::default()
+            .fg(palette.warning)
+            .add_modifier(Modifier::BOLD),
+    )));
+    lines.extend(format_log_body(&log.body).into_iter().map(Line::from));
+
+    lines
+}
+
+pub(crate) fn format_log_body(body: &str) -> Vec<String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
+        if let Ok(pretty) = serde_json::to_string_pretty(&value) {
+            return pretty.lines().map(ToString::to_string).collect();
+        }
+    }
+
+    body.lines().map(ToString::to_string).collect()
+}
+
+fn build_metric_detail_lines(
+    snapshot: &DashboardSnapshot,
+    selected_index: usize,
+    series: &[MetricSummary],
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let Some(selected) = snapshot.metrics.get(selected_index) else {
+        return vec![Line::raw("No metric selected.")];
+    };
+
+    let numeric = series
+        .iter()
+        .filter_map(|metric| metric.value)
+        .collect::<Vec<_>>();
+    let latest = series.last().and_then(|metric| metric.value);
+    let min = numeric.iter().copied().reduce(f64::min);
+    let max = numeric.iter().copied().reduce(f64::max);
+    let avg = if numeric.is_empty() {
+        None
+    } else {
+        Some(numeric.iter().sum::<f64>() / numeric.len() as f64)
+    };
+
+    let mut lines = vec![
+        Line::from(Span::styled(
+            truncate(&selected.metric_name, 42),
+            Style::default()
+                .fg(palette.foreground)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("service {}", selected.service_name)),
+        Line::from(format!("kind {}", selected.instrument_kind)),
+        Line::from(format!("samples {}", series.len())),
+        Line::from(format!("latest {:?}", latest)),
+        Line::from(format!("min {:?}  max {:?}", min, max)),
+        Line::from(format!("avg {:?}", avg)),
+        Line::raw(""),
+        Line::from(Span::styled(
+            "recent points",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        )),
+    ];
+
+    for metric in series.iter().rev().take(6) {
+        lines.push(Line::from(format!(
+            "{} -> {}",
+            metric.timestamp_unix_nano, metric.summary
+        )));
+    }
+
+    lines
+}
+
+fn build_span_detail_lines(span: &SpanDetail, palette: Palette) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(vec![
+            Span::styled(
+                truncate(&span.span_name, 48),
+                Style::default()
+                    .fg(palette.foreground)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" "),
+            Span::styled(
+                status_badge(&span.status_code),
+                match span.status_code.as_str() {
+                    "STATUS_CODE_ERROR" => Style::default().fg(palette.warning),
+                    "STATUS_CODE_OK" => Style::default().fg(palette.success),
+                    _ => Style::default().fg(palette.muted),
+                },
+            ),
+        ]),
+        Line::from(format!("service {}", span.service_name)),
+        Line::from(format!("span_id {}", span.span_id)),
+        Line::from(format!(
+            "parent {}",
+            if span.parent_span_id.is_empty() {
+                "<root>"
+            } else {
+                span.parent_span_id.as_str()
+            }
+        )),
+        Line::from(format!(
+            "kind {}  duration {:.1}ms",
+            span.span_kind, span.duration_ms
+        )),
+        Line::from(format!(
+            "events {}  links {}",
+            span.events.len(),
+            span.links.len()
+        )),
+    ];
+
+    if let Some(llm) = &span.llm {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "llm",
+            Style::default()
+                .fg(palette.warning)
+                .add_modifier(Modifier::BOLD),
+        )));
+        if let Some(provider) = &llm.provider {
+            lines.push(Line::from(format!("provider {provider}")));
+        }
+        if let Some(model) = &llm.model {
+            lines.push(Line::from(format!("model {model}")));
+        }
+        if let Some(operation) = &llm.operation {
+            lines.push(Line::from(format!("operation {operation}")));
+        }
+        if llm.input_tokens.is_some() || llm.output_tokens.is_some() || llm.total_tokens.is_some() {
+            lines.push(Line::from(format!(
+                "tokens in={} out={} total={}",
+                llm.input_tokens.unwrap_or_default(),
+                llm.output_tokens.unwrap_or_default(),
+                llm.total_tokens.unwrap_or_default()
+            )));
+        }
+        if let Some(cost) = llm.cost {
+            lines.push(Line::from(format!("cost {cost:.6}")));
+        }
+    }
+
+    if !span.resource_attributes.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "resource",
+            Style::default()
+                .fg(palette.success)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (key, value) in span.resource_attributes.iter().take(4) {
+            lines.push(Line::from(format!(
+                "{} = {}",
+                truncate(key, 28),
+                truncate(&attribute_value_text(value), 64)
+            )));
+        }
+    }
+
+    if !span.attributes.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "attributes",
+            Style::default()
+                .fg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for (key, value) in span.attributes.iter().take(8) {
+            lines.push(Line::from(format!(
+                "{} = {}",
+                truncate(key, 28),
+                truncate(&attribute_value_text(value), 64)
+            )));
+        }
+        if span.attributes.len() > 8 {
+            lines.push(Line::from(format!(
+                "... {} more attributes",
+                span.attributes.len() - 8
+            )));
+        }
+    }
+
+    if !span.events.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "events",
+            Style::default()
+                .fg(palette.warning)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for event in span.events.iter().take(3) {
+            lines.push(Line::from(format!(
+                "{} @ {}",
+                truncate(&event.name, 28),
+                event.timestamp_unix_nano
+            )));
+            for (key, value) in event.attributes.iter().take(2) {
+                lines.push(Line::from(format!(
+                    "  {} = {}",
+                    truncate(key, 24),
+                    truncate(&attribute_value_text(value), 56)
+                )));
+            }
+        }
+    }
+
+    if !span.links.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(Line::from(Span::styled(
+            "links",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        )));
+        for link in span.links.iter().take(3) {
+            lines.push(Line::from(format!(
+                "{} / {}",
+                truncate(&link.trace_id, 16),
+                truncate(&link.span_id, 16)
+            )));
+            if !link.trace_state.is_empty() {
+                lines.push(Line::from(format!(
+                    "  state {}",
+                    truncate(&link.trace_state, 52)
+                )));
+            }
+            for (key, value) in link.attributes.iter().take(2) {
+                lines.push(Line::from(format!(
+                    "  {} = {}",
+                    truncate(key, 24),
+                    truncate(&attribute_value_text(value), 56)
+                )));
+            }
+        }
+    }
+
+    lines
+}
+
+fn attribute_value_text(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        _ => value.to_string(),
+    }
+}
+
+fn status_badge(status_code: &str) -> &'static str {
+    match status_code {
+        "STATUS_CODE_ERROR" => "error",
+        "STATUS_CODE_OK" => "ok",
+        _ => "unset",
+    }
+}
