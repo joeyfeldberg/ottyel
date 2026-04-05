@@ -1,12 +1,13 @@
 use ratatui::{
     Frame,
     layout::{Alignment, Rect},
-    prelude::Style,
-    text::Line,
+    prelude::{Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Clear, Paragraph, Wrap},
 };
 
 use crate::{
+    commands,
     domain::{DashboardSnapshot, truncate},
     query::{LogCorrelationFilter, LogSeverityFilter},
 };
@@ -36,6 +37,67 @@ pub(crate) fn render_help_overlay(
     );
 }
 
+pub(crate) fn render_command_palette(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    palette: Palette,
+) {
+    let popup = geometry::centered_rect(68, 52, area);
+    let commands = commands::matching_commands(&state.command_query);
+    let mut lines = vec![Line::from(vec![
+        Span::styled("query ", Style::default().fg(palette.muted)),
+        Span::styled(
+            if state.command_query.is_empty() {
+                ":".to_string()
+            } else {
+                format!(":{}", state.command_query)
+            },
+            Style::default()
+                .fg(palette.foreground)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+    lines.push(Line::raw(""));
+
+    if commands.is_empty() {
+        lines.push(Line::raw("No matching commands."));
+    } else {
+        for (index, command) in commands.iter().take(8).enumerate() {
+            let selected = index == state.selected_command;
+            let style = if selected {
+                Style::default().fg(palette.background).bg(palette.accent)
+            } else {
+                Style::default().fg(palette.foreground)
+            };
+            lines.push(Line::from(vec![
+                Span::styled(
+                    if selected { " > " } else { "   " },
+                    Style::default().fg(palette.muted).patch(style),
+                ),
+                Span::styled(command.title, style),
+            ]));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(Line::from(Span::styled(
+        "enter run  j/k move  backspace delete  esc close",
+        Style::default().fg(palette.muted),
+    )));
+
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
+            Block::default()
+                .title("Command Palette")
+                .borders(Borders::ALL)
+                .border_style(Style::default().fg(palette.accent)),
+        ),
+        popup,
+    );
+}
+
 pub(crate) fn global_status_text(snapshot: &DashboardSnapshot, state: &UiState) -> String {
     format!(
         "window={} | service={} | search={} | panes traces={} logs={} metrics={} llm={}",
@@ -50,6 +112,9 @@ pub(crate) fn global_status_text(snapshot: &DashboardSnapshot, state: &UiState) 
 }
 
 pub(crate) fn footer_text(state: &UiState) -> String {
+    if state.show_command_palette {
+        return "command palette: type to filter | enter run | j/k move | esc close".to_string();
+    }
     if state.show_help {
         return "help: esc/?/enter close".to_string();
     }
@@ -62,47 +127,47 @@ pub(crate) fn footer_text(state: &UiState) -> String {
 
     match Tab::ALL[state.active_tab] {
         Tab::Overview => {
-            "overview: tab switch panes | ? help | / global search | s service | t window | q quit"
+            "overview: tab switch panes | : commands | ? help | / global search | s service | t window | q quit"
                 .to_string()
         }
         Tab::Traces => match state.trace_focus {
             TraceFocus::TraceList => {
-                "traces: j/k select trace | enter open | ? help | e errors | s service | t window | / search | q quit"
+                "traces: j/k select trace | enter open | : commands | ? help | e errors | s service | t window | / search | q quit"
                     .to_string()
             }
             TraceFocus::TraceTree => {
-                "trace tree: j/k move | l/right detail | esc list | space toggle subtree | ? help | e errors | / search | q quit"
+                "trace tree: j/k move | l/right detail | esc list | space toggle subtree | : commands | ? help | e errors | / search | q quit"
                     .to_string()
             }
             TraceFocus::TraceDetail => {
-                "span detail: j/k scroll | h/left tree | esc list | ? help | e errors | / search | q quit"
+                "span detail: j/k scroll | h/left tree | esc list | : commands | ? help | e errors | / search | q quit"
                     .to_string()
             }
         },
         Tab::Logs => {
             if state.logs_focus == PaneFocus::Primary {
-                "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation | ? help | s service | t window | / global search | q quit"
+                "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation | : commands | ? help | s service | t window | / global search | q quit"
                     .to_string()
             } else {
-                "log detail: j/k scroll | esc/h/left feed | ? help | s service | t window | / global search | q quit"
+                "log detail: j/k scroll | esc/h/left feed | : commands | ? help | s service | t window | / global search | q quit"
                     .to_string()
             }
         }
         Tab::Metrics => {
             if state.metrics_focus == PaneFocus::Primary {
-                "metrics: j/k move | l/right detail | ? help | s service | t window | / global search | q quit"
+                "metrics: j/k move | l/right detail | : commands | ? help | s service | t window | / global search | q quit"
                     .to_string()
             } else {
-                "metric detail: j/k scroll | esc/h/left feed | ? help | s service | t window | / global search | q quit"
+                "metric detail: j/k scroll | esc/h/left feed | : commands | ? help | s service | t window | / global search | q quit"
                     .to_string()
             }
         }
         Tab::Llm => {
             if state.llm_focus == PaneFocus::Primary {
-                "llm: j/k move | l/right detail | ? help | s service | t window | / global search | q quit"
+                "llm: j/k move | l/right detail | : commands | ? help | s service | t window | / global search | q quit"
                     .to_string()
             } else {
-                "model detail: j/k scroll | esc/h/left feed | ? help | s service | t window | / global search | q quit"
+                "model detail: j/k scroll | esc/h/left feed | : commands | ? help | s service | t window | / global search | q quit"
                     .to_string()
             }
         }
@@ -145,6 +210,7 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
     let mut lines = vec![
         Line::raw("global"),
         Line::raw("  tab / shift-tab  switch panes"),
+        Line::raw("  : / ctrl-p       open command palette"),
         Line::raw("  /                global search"),
         Line::raw("  s                cycle service filter"),
         Line::raw("  t                cycle time window"),
@@ -245,6 +311,13 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
         lines.push(Line::raw("log search mode is active"));
         lines.push(Line::raw(
             "  type to edit, backspace to delete, enter/esc to close",
+        ));
+    }
+    if state.show_command_palette {
+        lines.push(Line::raw(""));
+        lines.push(Line::raw("command palette is active"));
+        lines.push(Line::raw(
+            "  type to edit, j/k to move, enter to run, esc to close",
         ));
     }
 

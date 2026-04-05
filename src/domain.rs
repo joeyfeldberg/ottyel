@@ -115,12 +115,18 @@ pub struct LlmSummary {
     pub provider: String,
     pub model: String,
     pub operation: String,
+    pub span_kind: Option<String>,
+    pub prompt_preview: Option<String>,
+    pub output_preview: Option<String>,
+    pub tool_name: Option<String>,
+    pub tool_args: Option<String>,
     pub input_tokens: Option<u64>,
     pub output_tokens: Option<u64>,
     pub total_tokens: Option<u64>,
     pub cost: Option<f64>,
     pub latency_ms: Option<f64>,
     pub status: String,
+    pub raw_json: Value,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

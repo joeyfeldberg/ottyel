@@ -95,28 +95,12 @@ pub(crate) fn metric_detail_lines(
 pub(crate) fn llm_detail_lines(
     snapshot: &DashboardSnapshot,
     state: &UiState,
+    palette: Palette,
 ) -> Vec<Line<'static>> {
     snapshot
         .llm
         .get(state.selected_llm)
-        .map(|item| {
-            vec![
-                Line::from(format!("trace {}", truncate(&item.trace_id, 24))),
-                Line::from(format!("service {}", item.service_name)),
-                Line::from(format!("provider {}", item.provider)),
-                Line::from(format!("model {}", item.model)),
-                Line::from(format!("operation {}", item.operation)),
-                Line::from(format!("status {}", item.status)),
-                Line::from(format!(
-                    "tokens in={} out={} total={}",
-                    item.input_tokens.unwrap_or_default(),
-                    item.output_tokens.unwrap_or_default(),
-                    item.total_tokens.unwrap_or_default()
-                )),
-                Line::from(format!("cost {:?}", item.cost)),
-                Line::from(format!("latency_ms {:?}", item.latency_ms)),
-            ]
-        })
+        .map(|item| build_llm_detail_lines(item, palette))
         .unwrap_or_else(|| vec![Line::raw("No LLM spans yet.")])
 }
 
@@ -215,6 +199,110 @@ pub(crate) fn format_log_body(body: &str) -> Vec<String> {
     }
 
     body.lines().map(ToString::to_string).collect()
+}
+
+fn build_llm_detail_lines(
+    item: &crate::domain::LlmSummary,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let mut lines = vec![
+        Line::from(Span::styled(
+            truncate(&item.model, 48),
+            Style::default()
+                .fg(palette.foreground)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(format!("service {}", item.service_name)),
+        Line::from(format!("trace {}", item.trace_id)),
+        Line::from(format!("span {}", item.span_id)),
+        Line::from(format!("provider {}", item.provider)),
+        Line::from(format!("operation {}", item.operation)),
+        Line::from(format!(
+            "kind {}",
+            item.span_kind.as_deref().unwrap_or("<unset>")
+        )),
+        Line::from(format!("status {}", item.status)),
+        Line::from(format!(
+            "tokens in={} out={} total={}",
+            item.input_tokens.unwrap_or_default(),
+            item.output_tokens.unwrap_or_default(),
+            item.total_tokens.unwrap_or_default()
+        )),
+        Line::from(format!(
+            "latency {} ms  cost {}",
+            optional_number(item.latency_ms, 3),
+            optional_number(item.cost, 6)
+        )),
+    ];
+
+    if let Some(prompt) = item
+        .prompt_preview
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(Line::raw(""));
+        lines.push(section_header("prompt", palette.accent));
+        lines.extend(multiline_block(prompt).into_iter().map(Line::from));
+    }
+
+    if let Some(output) = item
+        .output_preview
+        .as_deref()
+        .filter(|value| !value.is_empty())
+    {
+        lines.push(Line::raw(""));
+        lines.push(section_header("output", palette.success));
+        lines.extend(multiline_block(output).into_iter().map(Line::from));
+    }
+
+    if item.tool_name.is_some() || item.tool_args.is_some() {
+        lines.push(Line::raw(""));
+        lines.push(section_header("tool", palette.warning));
+        if let Some(name) = &item.tool_name {
+            lines.push(Line::from(format!("name {name}")));
+        }
+        if let Some(args) = item.tool_args.as_deref().filter(|value| !value.is_empty()) {
+            lines.push(Line::from("args"));
+            lines.extend(multiline_block(args).into_iter().map(Line::from));
+        }
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(section_header("normalized", palette.muted));
+    lines.extend(
+        format_json_value(&item.raw_json)
+            .into_iter()
+            .map(Line::from),
+    );
+
+    lines
+}
+
+fn section_header(label: &str, color: ratatui::prelude::Color) -> Line<'static> {
+    Line::from(Span::styled(
+        label.to_string(),
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn multiline_block(text: &str) -> Vec<String> {
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+        return format_json_value(&value);
+    }
+
+    text.lines().map(ToString::to_string).collect()
+}
+
+fn format_json_value(value: &serde_json::Value) -> Vec<String> {
+    serde_json::to_string_pretty(value)
+        .map(|pretty| pretty.lines().map(ToString::to_string).collect())
+        .unwrap_or_else(|_| vec![value.to_string()])
+}
+
+fn optional_number(value: Option<f64>, precision: usize) -> String {
+    value
+        .map(|number| format!("{number:.precision$}"))
+        .unwrap_or_else(|| "-".to_string())
 }
 
 fn build_metric_detail_lines(

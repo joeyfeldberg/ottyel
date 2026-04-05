@@ -260,7 +260,7 @@ pub(crate) fn render_llm(
     );
     frame.render_widget(table, panels[0]);
 
-    let detail = details::llm_detail_lines(snapshot, state);
+    let detail = details::llm_detail_lines(snapshot, state, palette);
     frame.render_widget(
         Paragraph::new(detail)
             .scroll((state.llm_detail_scroll, 0))

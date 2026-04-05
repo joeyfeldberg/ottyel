@@ -329,7 +329,7 @@ impl Store {
         let mut sql = String::from(
             r#"
             SELECT llm_spans.trace_id, llm_spans.span_id, llm_spans.service_name, provider, model, operation,
-                   input_tokens, output_tokens, total_tokens, cost, latency_ms, status
+                   input_tokens, output_tokens, total_tokens, cost, latency_ms, status, raw_json
             FROM llm_spans
             "#,
         );
@@ -368,15 +368,26 @@ impl Store {
                 provider: row.get(3)?,
                 model: row.get(4)?,
                 operation: row.get(5)?,
+                span_kind: None,
+                prompt_preview: None,
+                output_preview: None,
+                tool_name: None,
+                tool_args: None,
                 input_tokens: row.get(6)?,
                 output_tokens: row.get(7)?,
                 total_tokens: row.get(8)?,
                 cost: row.get(9)?,
                 latency_ms: row.get(10)?,
                 status: row.get(11)?,
+                raw_json: serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(12)?)
+                    .unwrap_or_default(),
             })
         })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let mut rows = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        for row in &mut rows {
+            hydrate_llm_summary(row);
+        }
+        Ok(rows)
     }
 
     fn span_events_by_trace(
@@ -444,4 +455,18 @@ impl Store {
 
         Ok(by_span)
     }
+}
+
+fn hydrate_llm_summary(summary: &mut LlmSummary) {
+    let parsed: Result<crate::domain::LlmAttributes, _> =
+        serde_json::from_value(summary.raw_json.clone());
+    let Ok(llm) = parsed else {
+        return;
+    };
+
+    summary.span_kind = llm.span_kind;
+    summary.prompt_preview = llm.prompt_preview;
+    summary.output_preview = llm.output_preview;
+    summary.tool_name = llm.tool_name;
+    summary.tool_args = llm.tool_args;
 }

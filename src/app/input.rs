@@ -1,6 +1,7 @@
 use crossterm::event::{KeyCode, KeyModifiers};
 
 use crate::{
+    commands::{self, PaletteAction},
     domain::DashboardSnapshot,
     query::{LogCorrelationFilter, LogFilters, LogSeverityFilter, QueryFilters, TimeWindow},
     ui::{PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
@@ -12,6 +13,10 @@ pub(super) fn handle_key(
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
 ) -> bool {
+    if state.show_command_palette {
+        return handle_command_palette_key(code, modifiers, state, snapshot);
+    }
+
     if state.show_help {
         return handle_help_key(code, state);
     }
@@ -25,6 +30,12 @@ pub(super) fn handle_key(
     }
 
     match code {
+        KeyCode::Char(':') => {
+            open_command_palette(state);
+        }
+        KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
+            open_command_palette(state);
+        }
         KeyCode::Char('/') => {
             state.search_mode = true;
         }
@@ -132,6 +143,13 @@ pub(super) fn sync_selection(state: &mut UiState, snapshot: &DashboardSnapshot) 
     {
         state.service_filter_index = None;
     }
+}
+
+fn tab_index(tab: Tab) -> usize {
+    Tab::ALL
+        .iter()
+        .position(|candidate| *candidate == tab)
+        .unwrap_or(0)
 }
 
 pub(super) fn filters(state: &UiState, services: &[String]) -> QueryFilters {
@@ -400,6 +418,120 @@ fn handle_help_key(code: KeyCode, state: &mut UiState) -> bool {
             state.show_help = false;
         }
         _ => {}
+    }
+    false
+}
+
+fn open_command_palette(state: &mut UiState) {
+    state.show_help = false;
+    state.search_mode = false;
+    state.log_search_mode = false;
+    state.show_command_palette = true;
+    state.command_query.clear();
+    state.selected_command = 0;
+}
+
+fn close_command_palette(state: &mut UiState) {
+    state.show_command_palette = false;
+    state.command_query.clear();
+    state.selected_command = 0;
+}
+
+fn handle_command_palette_key(
+    code: KeyCode,
+    modifiers: KeyModifiers,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) -> bool {
+    match code {
+        KeyCode::Esc => {
+            close_command_palette(state);
+        }
+        KeyCode::Enter => {
+            let commands = commands::matching_commands(&state.command_query);
+            if let Some(command) = commands.get(state.selected_command).copied() {
+                close_command_palette(state);
+                return execute_palette_action(command.action, state, snapshot);
+            }
+        }
+        KeyCode::Backspace => {
+            state.command_query.pop();
+            clamp_palette_selection(state);
+        }
+        KeyCode::Down | KeyCode::Char('j') => move_palette_selection(1, state),
+        KeyCode::Up | KeyCode::Char('k') => move_palette_selection(-1, state),
+        KeyCode::Char('p') if modifiers.contains(KeyModifiers::CONTROL) => {
+            close_command_palette(state);
+        }
+        KeyCode::Char(character) if !modifiers.contains(KeyModifiers::CONTROL) => {
+            state.command_query.push(character);
+            clamp_palette_selection(state);
+        }
+        _ => {}
+    }
+    false
+}
+
+fn move_palette_selection(delta: isize, state: &mut UiState) {
+    let commands = commands::matching_commands(&state.command_query);
+    move_index(&mut state.selected_command, commands.len(), delta);
+}
+
+fn clamp_palette_selection(state: &mut UiState) {
+    let len = commands::matching_commands(&state.command_query).len();
+    state.selected_command = state.selected_command.min(len.saturating_sub(1));
+}
+
+fn execute_palette_action(
+    action: PaletteAction,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) -> bool {
+    match action {
+        PaletteAction::SwitchTab(tab) => {
+            state.active_tab = tab_index(tab);
+        }
+        PaletteAction::ToggleHelp => {
+            state.show_help = true;
+        }
+        PaletteAction::CycleService => {
+            if !snapshot.services.is_empty() {
+                state.service_filter_index = match state.service_filter_index {
+                    None => Some(0),
+                    Some(idx) if idx + 1 >= snapshot.services.len() => None,
+                    Some(idx) => Some(idx + 1),
+                };
+            }
+        }
+        PaletteAction::ClearService => {
+            state.service_filter_index = None;
+        }
+        PaletteAction::CycleTimeWindow => cycle_time_window(state),
+        PaletteAction::ToggleTraceErrors => {
+            state.errors_only = !state.errors_only;
+        }
+        PaletteAction::ReturnToTraceList => {
+            state.active_tab = tab_index(Tab::Traces);
+            state.trace_view_mode = TraceViewMode::List;
+            state.trace_focus = TraceFocus::TraceList;
+        }
+        PaletteAction::ToggleLogTail => {
+            state.active_tab = tab_index(Tab::Logs);
+            state.log_tail = !state.log_tail;
+            if state.log_tail {
+                state.selected_log = 0;
+            }
+        }
+        PaletteAction::ClearGlobalSearch => {
+            state.search_query.clear();
+            state.search_mode = false;
+        }
+        PaletteAction::ClearLogSearch => {
+            state.active_tab = tab_index(Tab::Logs);
+            state.log_search_query.clear();
+            state.log_search_mode = false;
+        }
+        PaletteAction::Quit => return true,
     }
     false
 }

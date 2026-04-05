@@ -47,6 +47,8 @@ fn store_ingests_all_three_signals() {
     assert_eq!(detail[0].links[0].span_id, "0909090909090909");
     let llm = store.recent_llm(None, 10, None, None).unwrap();
     assert_eq!(llm[0].model, "gpt-5.4");
+    assert_eq!(llm[0].prompt_preview.as_deref(), Some("hello"));
+    assert_eq!(llm[0].output_preview.as_deref(), Some("world"));
     assert_eq!(
         store
             .recent_traces(None, false, 10, None, Some("input.value"))

@@ -86,7 +86,9 @@ pub fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &UiSta
         layout[3],
     );
 
-    if state.show_help {
+    if state.show_command_palette {
+        chrome::render_command_palette(frame, root, state, palette);
+    } else if state.show_help {
         chrome::render_help_overlay(frame, root, state, palette);
     }
 }
@@ -134,7 +136,7 @@ pub fn sync_detail_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut 
     );
     state.llm_detail_scroll = geometry::clamp_scroll(
         state.llm_detail_scroll,
-        details::llm_detail_lines(snapshot, state).len(),
+        details::llm_detail_lines(snapshot, state, Palette::from_theme(Theme::Ember)).len(),
         geometry::detail_viewport_height(geometry::llm_detail_area(geometry::body_area(root))),
     );
 }

@@ -4,14 +4,14 @@ use serde_json::json;
 
 use crate::{
     config::Theme,
-    domain::{AttributeMap, LlmAttributes, LogSummary, MetricSummary, SpanDetail},
+    domain::{AttributeMap, LlmAttributes, LlmSummary, LogSummary, MetricSummary, SpanDetail},
     query::TimeWindow,
 };
 
 use super::{
     Palette, Tab, TraceFocus, TraceViewMode, UiState,
     chrome::{footer_text, help_lines, help_title},
-    details::{build_log_detail_lines, format_log_body, metric_chart_values},
+    details::{build_log_detail_lines, format_log_body, llm_detail_lines, metric_chart_values},
     geometry::trace_tree_scroll_offset,
     traces::{
         first_llm_trace_index, next_error_trace_index, parent_trace_index,
@@ -151,6 +151,9 @@ fn ui_state_defaults_to_trace_list_focus() {
     assert_eq!(state.trace_detail_scroll, 0);
     assert!(state.collapsed_trace_spans.is_empty());
     assert!(!state.show_help);
+    assert!(!state.show_command_palette);
+    assert!(state.command_query.is_empty());
+    assert_eq!(state.selected_command, 0);
     assert_eq!(state.log_detail_scroll, 0);
     assert_eq!(state.metric_detail_scroll, 0);
     assert_eq!(state.llm_detail_scroll, 0);
@@ -273,6 +276,74 @@ fn build_log_detail_lines_include_attributes() {
         lines
             .iter()
             .any(|line| line.contains(r#""message": "done""#))
+    );
+}
+
+#[test]
+fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
+    let snapshot = crate::domain::DashboardSnapshot {
+        services: Vec::new(),
+        overview: crate::domain::OverviewStats {
+            service_count: 0,
+            trace_count: 0,
+            error_span_count: 0,
+            log_count: 0,
+            metric_count: 0,
+            llm_count: 1,
+        },
+        traces: Vec::new(),
+        selected_trace: Vec::new(),
+        logs: Vec::new(),
+        metrics: Vec::new(),
+        llm: vec![LlmSummary {
+            trace_id: "trace-1".to_string(),
+            span_id: "span-1".to_string(),
+            service_name: "api".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            operation: "chat".to_string(),
+            span_kind: Some("chain".to_string()),
+            prompt_preview: Some("{\"prompt\":\"hello\"}".to_string()),
+            output_preview: Some("world".to_string()),
+            tool_name: Some("lookup_customer".to_string()),
+            tool_args: Some("{\"customer_id\":\"123\"}".to_string()),
+            input_tokens: Some(11),
+            output_tokens: Some(7),
+            total_tokens: Some(18),
+            cost: Some(0.0042),
+            latency_ms: Some(42.5),
+            status: "STATUS_CODE_OK".to_string(),
+            raw_json: json!({
+                "provider": "openai",
+                "model": "gpt-5.4",
+                "tool_name": "lookup_customer"
+            }),
+        }],
+    };
+
+    let rendered = llm_detail_lines(
+        &snapshot,
+        &UiState::default(),
+        Palette::from_theme(Theme::Ember),
+    )
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.contains("prompt")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("\"prompt\": \"hello\""))
+    );
+    assert!(rendered.iter().any(|line| line.contains("output")));
+    assert!(rendered.iter().any(|line| line.contains("world")));
+    assert!(rendered.iter().any(|line| line.contains("lookup_customer")));
+    assert!(rendered.iter().any(|line| line.contains("normalized")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("\"provider\": \"openai\""))
     );
 }
 
