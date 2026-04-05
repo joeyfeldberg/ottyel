@@ -14,7 +14,7 @@ use super::{
     details::{build_log_detail_lines, format_log_body, llm_detail_lines, metric_chart_values},
     geometry::trace_tree_scroll_offset,
     traces::{
-        first_llm_trace_index, next_error_trace_index, parent_trace_index,
+        first_llm_trace_index, format_duration_compact, next_error_trace_index, parent_trace_index,
         previous_error_trace_index, root_trace_index, selected_trace_row, trace_tree_rows,
         trace_window, waterfall_bar,
     },
@@ -34,12 +34,12 @@ fn trace_tree_rows_follow_parent_child_structure() {
 
     let rendered = rows
         .into_iter()
-        .map(|row| format!("{}{}", row.prefix, row.span.span_name))
+        .map(|row| format!("{}:{}", row.depth, row.span.span_name))
         .collect::<Vec<_>>();
 
     assert_eq!(
         rendered,
-        vec!["request", "+- http.call", "| `- cache.get", "`- db.query",]
+        vec!["0:request", "1:http.call", "2:cache.get", "1:db.query",]
     );
 }
 
@@ -138,7 +138,16 @@ fn waterfall_bar_uses_relative_trace_timing() {
         8,
     );
 
-    assert_eq!(bar, "[..====..]");
+    assert_eq!(bar.before, "··");
+    assert_eq!(bar.active, "━━━━");
+    assert_eq!(bar.after, "··");
+}
+
+#[test]
+fn duration_format_compacts_long_values() {
+    assert_eq!(format_duration_compact(58.6), "58.6ms");
+    assert_eq!(format_duration_compact(1_101.7), "1.10s");
+    assert_eq!(format_duration_compact(62_500.0), "1.0m");
 }
 
 #[test]

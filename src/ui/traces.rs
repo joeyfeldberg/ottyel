@@ -82,6 +82,7 @@ pub(crate) fn render(
 
     let tree_rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
     let window = trace_window(&snapshot.selected_trace);
+    let tree_line_width = tree_area.width.saturating_sub(2) as usize;
     let tree_lines = snapshot
         .traces
         .get(state.selected_trace)
@@ -110,6 +111,7 @@ pub(crate) fn render(
                 state.selected_trace_span,
                 state.trace_focus == TraceFocus::TraceTree,
                 window,
+                tree_line_width,
                 palette,
             ))
             .collect::<Vec<_>>()
@@ -184,16 +186,14 @@ pub(crate) fn trace_tree_rows(
     }
 
     let mut rows = Vec::with_capacity(spans.len());
-    for (idx, root_index) in roots.iter().enumerate() {
+    for root_index in &roots {
         push_tree_rows(
             *root_index,
             spans,
             &children_by_parent,
             collapsed_span_ids,
             &mut rows,
-            Vec::new(),
-            false,
-            idx + 1 == roots.len(),
+            0,
         );
     }
 
@@ -320,27 +320,6 @@ pub(crate) fn trace_window(spans: &[SpanDetail]) -> TraceWindow {
     }
 }
 
-pub(crate) fn waterfall_bar(trace_window: TraceWindow, row: &TraceTreeRow, width: usize) -> String {
-    if width == 0 {
-        return String::new();
-    }
-
-    let total = (trace_window.end_unix_nano - trace_window.start_unix_nano).max(1) as f64;
-    let start = (row.span.start_time_unix_nano - trace_window.start_unix_nano).max(0) as f64;
-    let end = (row.span.end_time_unix_nano - trace_window.start_unix_nano).max(0) as f64;
-
-    let mut cells = vec!['.'; width];
-    let left = ((start / total) * width as f64).floor() as usize;
-    let mut right = ((end / total) * width as f64).ceil() as usize;
-    right = right.clamp(left.saturating_add(1), width);
-
-    for cell in &mut cells[left.min(width.saturating_sub(1))..right] {
-        *cell = '=';
-    }
-
-    format!("[{}]", cells.into_iter().collect::<String>())
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct TraceWindow {
     start_unix_nano: i64,
@@ -349,16 +328,16 @@ pub(crate) struct TraceWindow {
 
 #[derive(Debug, Clone)]
 pub(crate) struct TraceTreeRow {
-    pub(crate) prefix: String,
+    pub(crate) depth: usize,
     pub(crate) has_children: bool,
     pub(crate) is_collapsed: bool,
     pub(crate) span: SpanDetail,
 }
 
 impl TraceTreeRow {
-    fn branch_marker(&self) -> &'static str {
+    fn disclosure(&self) -> &'static str {
         if self.has_children {
-            if self.is_collapsed { "[+] " } else { "[-] " }
+            if self.is_collapsed { "▸ " } else { "▾ " }
         } else {
             "    "
         }
@@ -370,28 +349,25 @@ fn build_trace_tree_lines(
     selected_index: usize,
     tree_focused: bool,
     trace_window: TraceWindow,
+    line_width: usize,
     palette: Palette,
 ) -> Vec<Line<'static>> {
     if rows.is_empty() {
         return vec![Line::raw("No spans recorded for this trace.")];
     }
 
+    let timeline_width = if line_width >= 72 {
+        18
+    } else if line_width >= 56 {
+        14
+    } else {
+        10
+    };
+    let duration_width = 8;
+
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
-            let llm_suffix = row
-                .span
-                .llm
-                .as_ref()
-                .and_then(|llm| llm.model.as_deref())
-                .map(|model| format!(" [{model}]"))
-                .unwrap_or_default();
-            let status_style = match row.span.status_code.as_str() {
-                "STATUS_CODE_ERROR" => Style::default().fg(palette.warning),
-                "STATUS_CODE_OK" => Style::default().fg(palette.success),
-                _ => Style::default().fg(palette.muted),
-            };
-            let status_text = visible_status_badge(&row.span.status_code);
             let selection_style = if index == selected_index {
                 let color = if tree_focused {
                     palette.warning
@@ -402,43 +378,69 @@ fn build_trace_tree_lines(
             } else {
                 Style::default()
             };
+            let indent = "  ".repeat(row.depth);
+            let prefix = format!("{indent}{}", row.disclosure());
+            let duration = format_duration_compact(row.span.duration_ms);
+            let llm_badge = row.span.llm.is_some().then_some(" LLM").unwrap_or_default();
+            let error_badge = if row.span.status_code == "STATUS_CODE_ERROR" {
+                " ERR"
+            } else {
+                ""
+            };
+            let badge_width = llm_badge.chars().count() + error_badge.chars().count();
+            let name_width = line_width
+                .saturating_sub(
+                    prefix.chars().count() + timeline_width + duration_width + badge_width + 2,
+                )
+                .max(8);
+            let name = truncate(&row.span.span_name, name_width);
+            let rendered_width = prefix.chars().count()
+                + name.chars().count()
+                + badge_width
+                + timeline_width
+                + duration_width
+                + 1;
+            let spacer = " ".repeat(line_width.saturating_sub(rendered_width));
+            let timeline = waterfall_bar(trace_window, row, timeline_width);
 
             Line::from(vec![
                 Span::styled(
-                    row.prefix.clone(),
+                    prefix,
                     Style::default().fg(palette.muted).patch(selection_style),
                 ),
                 Span::styled(
-                    row.branch_marker(),
-                    Style::default().fg(palette.muted).patch(selection_style),
-                ),
-                Span::styled(
-                    format!("{:>8.1}ms", row.span.duration_ms),
-                    Style::default()
-                        .fg(palette.foreground)
-                        .patch(selection_style),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    waterfall_bar(trace_window, row, 16),
-                    Style::default().fg(palette.accent).patch(selection_style),
-                ),
-                Span::raw(" "),
-                Span::styled(
-                    truncate(&row.span.span_name, 28),
+                    name,
                     Style::default()
                         .fg(palette.foreground)
                         .patch(selection_style),
                 ),
                 Span::styled(
-                    llm_suffix,
+                    llm_badge,
                     Style::default().fg(palette.warning).patch(selection_style),
                 ),
                 Span::styled(
-                    status_text
-                        .map(|text| format!(" {text}"))
-                        .unwrap_or_default(),
-                    status_style.patch(selection_style),
+                    error_badge,
+                    Style::default().fg(palette.warning).patch(selection_style),
+                ),
+                Span::styled(spacer, selection_style),
+                Span::styled(
+                    timeline.before,
+                    Style::default().fg(palette.muted).patch(selection_style),
+                ),
+                Span::styled(
+                    timeline.active,
+                    Style::default().fg(palette.accent).patch(selection_style),
+                ),
+                Span::styled(
+                    timeline.after,
+                    Style::default().fg(palette.muted).patch(selection_style),
+                ),
+                Span::raw(" "),
+                Span::styled(
+                    format!("{duration:>duration_width$}"),
+                    Style::default()
+                        .fg(palette.foreground)
+                        .patch(selection_style),
                 ),
             ])
         })
@@ -451,14 +453,12 @@ fn push_tree_rows(
     children_by_parent: &HashMap<String, Vec<usize>>,
     collapsed_span_ids: &HashSet<String>,
     rows: &mut Vec<TraceTreeRow>,
-    ancestor_has_more_siblings: Vec<bool>,
-    show_branch: bool,
-    is_last: bool,
+    depth: usize,
 ) {
     let has_children = children_by_parent.contains_key(&spans[span_index].span_id);
     let is_collapsed = has_children && collapsed_span_ids.contains(&spans[span_index].span_id);
     rows.push(TraceTreeRow {
-        prefix: tree_prefix(&ancestor_has_more_siblings, show_branch, is_last),
+        depth,
         has_children,
         is_collapsed,
         span: spans[span_index].clone(),
@@ -469,34 +469,17 @@ fn push_tree_rows(
     }
 
     if let Some(children) = children_by_parent.get(&spans[span_index].span_id) {
-        for (child_idx, child_index) in children.iter().enumerate() {
-            let mut child_ancestors = ancestor_has_more_siblings.clone();
-            if show_branch {
-                child_ancestors.push(!is_last);
-            }
+        for child_index in children {
             push_tree_rows(
                 *child_index,
                 spans,
                 children_by_parent,
                 collapsed_span_ids,
                 rows,
-                child_ancestors,
-                true,
-                child_idx + 1 == children.len(),
+                depth + 1,
             );
         }
     }
-}
-
-fn tree_prefix(ancestor_has_more_siblings: &[bool], show_branch: bool, is_last: bool) -> String {
-    let mut prefix = String::new();
-    for has_more in ancestor_has_more_siblings {
-        prefix.push_str(if *has_more { "| " } else { "  " });
-    }
-    if show_branch {
-        prefix.push_str(if is_last { "`- " } else { "+- " });
-    }
-    prefix
 }
 
 fn sort_span_indexes(indexes: &mut [usize], spans: &[SpanDetail]) {
@@ -515,10 +498,46 @@ fn sort_span_indexes(indexes: &mut [usize], spans: &[SpanDetail]) {
     });
 }
 
-fn visible_status_badge(status_code: &str) -> Option<&'static str> {
-    match status_code {
-        "STATUS_CODE_ERROR" => Some("error"),
-        "STATUS_CODE_OK" => Some("ok"),
-        _ => None,
+pub(crate) struct WaterfallBar {
+    pub(crate) before: String,
+    pub(crate) active: String,
+    pub(crate) after: String,
+}
+
+pub(crate) fn waterfall_bar(
+    trace_window: TraceWindow,
+    row: &TraceTreeRow,
+    width: usize,
+) -> WaterfallBar {
+    if width == 0 {
+        return WaterfallBar {
+            before: String::new(),
+            active: String::new(),
+            after: String::new(),
+        };
+    }
+
+    let total = (trace_window.end_unix_nano - trace_window.start_unix_nano).max(1) as f64;
+    let start = (row.span.start_time_unix_nano - trace_window.start_unix_nano).max(0) as f64;
+    let end = (row.span.end_time_unix_nano - trace_window.start_unix_nano).max(0) as f64;
+
+    let left = ((start / total) * width as f64).floor() as usize;
+    let mut right = ((end / total) * width as f64).ceil() as usize;
+    right = right.clamp(left.saturating_add(1), width);
+
+    WaterfallBar {
+        before: "·".repeat(left),
+        active: "━".repeat(right.saturating_sub(left)),
+        after: "·".repeat(width.saturating_sub(right)),
+    }
+}
+
+pub(crate) fn format_duration_compact(duration_ms: f64) -> String {
+    if duration_ms >= 60_000.0 {
+        format!("{:.1}m", duration_ms / 60_000.0)
+    } else if duration_ms >= 1_000.0 {
+        format!("{:.2}s", duration_ms / 1_000.0)
+    } else {
+        format!("{duration_ms:.1}ms")
     }
 }
