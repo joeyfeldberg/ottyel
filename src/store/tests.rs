@@ -15,7 +15,7 @@ use opentelemetry_proto::tonic::{
 };
 use tempfile::tempdir;
 
-use crate::query::{LogCorrelationFilter, LogFilters, LogSeverityFilter};
+use crate::query::{LogCorrelationFilter, LogFilters, LogSeverityFilter, PageRequest};
 
 use super::Store;
 
@@ -188,7 +188,135 @@ fn recent_logs_apply_severity_correlation_and_text_filters() {
     assert!(pane_text[0].body.contains("validation"));
 }
 
+#[test]
+fn cursor_pages_advance_without_rereading_rows() {
+    let tempdir = tempdir().unwrap();
+    let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+    let now = now_nanos();
+
+    store.ingest_traces(trace_request(now)).unwrap();
+    store
+        .ingest_traces(trace_request_variant(
+            now + 10_000_000,
+            [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+            [2, 3, 4, 5, 6, 7, 8, 9],
+            "gpt-4o-mini",
+            "hola",
+            "mundo",
+        ))
+        .unwrap();
+    store.ingest_logs(log_request(now)).unwrap();
+    store.ingest_metrics(metric_request(now)).unwrap();
+    store
+        .ingest_metrics(metric_request_variant(now + 20_000_000, "tokens.total", 24))
+        .unwrap();
+
+    let trace_page_1 = store
+        .recent_traces_page(None, false, &PageRequest::first(1), None, None)
+        .unwrap();
+    let trace_page_2 = store
+        .recent_traces_page(
+            None,
+            false,
+            &PageRequest {
+                limit: 1,
+                cursor: trace_page_1.next_cursor.clone(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(trace_page_1.items.len(), 1);
+    assert_eq!(trace_page_2.items.len(), 1);
+    assert_ne!(
+        trace_page_1.items[0].trace_id,
+        trace_page_2.items[0].trace_id
+    );
+
+    let log_page_1 = store
+        .recent_logs_page(
+            None,
+            &PageRequest::first(1),
+            None,
+            None,
+            &LogFilters::default(),
+        )
+        .unwrap();
+    let log_page_2 = store
+        .recent_logs_page(
+            None,
+            &PageRequest {
+                limit: 1,
+                cursor: log_page_1.next_cursor.clone(),
+            },
+            None,
+            None,
+            &LogFilters::default(),
+        )
+        .unwrap();
+    assert_eq!(log_page_1.items.len(), 1);
+    assert_eq!(log_page_2.items.len(), 1);
+    assert_ne!(log_page_1.items[0].body, log_page_2.items[0].body);
+
+    let metric_page_1 = store
+        .recent_metrics_page(None, &PageRequest::first(1), None, None)
+        .unwrap();
+    let metric_page_2 = store
+        .recent_metrics_page(
+            None,
+            &PageRequest {
+                limit: 1,
+                cursor: metric_page_1.next_cursor.clone(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(metric_page_1.items.len(), 1);
+    assert_eq!(metric_page_2.items.len(), 1);
+    assert_ne!(
+        metric_page_1.items[0].timestamp_unix_nano,
+        metric_page_2.items[0].timestamp_unix_nano
+    );
+
+    let llm_page_1 = store
+        .recent_llm_page(None, &PageRequest::first(1), None, None)
+        .unwrap();
+    let llm_page_2 = store
+        .recent_llm_page(
+            None,
+            &PageRequest {
+                limit: 1,
+                cursor: llm_page_1.next_cursor.clone(),
+            },
+            None,
+            None,
+        )
+        .unwrap();
+    assert_eq!(llm_page_1.items.len(), 1);
+    assert_eq!(llm_page_2.items.len(), 1);
+    assert_ne!(llm_page_1.items[0].span_id, llm_page_2.items[0].span_id);
+}
+
 fn trace_request(now: i64) -> ExportTraceServiceRequest {
+    trace_request_variant(
+        now,
+        [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+        [1, 2, 3, 4, 5, 6, 7, 8],
+        "gpt-5.4",
+        "hello",
+        "world",
+    )
+}
+
+fn trace_request_variant(
+    now: i64,
+    trace_id: [u8; 16],
+    span_id: [u8; 8],
+    model: &str,
+    input: &str,
+    output: &str,
+) -> ExportTraceServiceRequest {
     let now = now as u64;
     ExportTraceServiceRequest {
         resource_spans: vec![ResourceSpans {
@@ -207,8 +335,8 @@ fn trace_request(now: i64) -> ExportTraceServiceRequest {
                 scope: Some(InstrumentationScope::default()),
                 schema_url: String::new(),
                 spans: vec![Span {
-                    trace_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-                    span_id: vec![1, 2, 3, 4, 5, 6, 7, 8],
+                    trace_id: trace_id.to_vec(),
+                    span_id: span_id.to_vec(),
                     parent_span_id: vec![],
                     trace_state: String::new(),
                     name: "chat.completion".to_string(),
@@ -217,9 +345,9 @@ fn trace_request(now: i64) -> ExportTraceServiceRequest {
                     end_time_unix_nano: now + 2_000_000,
                     attributes: vec![
                         string_attr("llm.provider", "openai"),
-                        string_attr("llm.model_name", "gpt-5.4"),
-                        string_attr("input.value", "hello"),
-                        string_attr("output.value", "world"),
+                        string_attr("llm.model_name", model),
+                        string_attr("input.value", input),
+                        string_attr("output.value", output),
                         int_attr("llm.token_count.prompt", 5),
                         int_attr("llm.token_count.completion", 7),
                     ],
@@ -323,6 +451,10 @@ fn log_request(now: i64) -> ExportLogsServiceRequest {
 }
 
 fn metric_request(now: i64) -> ExportMetricsServiceRequest {
+    metric_request_variant(now, "tokens.total", 12)
+}
+
+fn metric_request_variant(now: i64, metric_name: &str, value: i64) -> ExportMetricsServiceRequest {
     let now = now as u64;
     ExportMetricsServiceRequest {
         resource_metrics: vec![ResourceMetrics {
@@ -336,7 +468,7 @@ fn metric_request(now: i64) -> ExportMetricsServiceRequest {
                 scope: Some(InstrumentationScope::default()),
                 schema_url: String::new(),
                 metrics: vec![Metric {
-                    name: "tokens.total".to_string(),
+                    name: metric_name.to_string(),
                     description: String::new(),
                     unit: "1".to_string(),
                     metadata: vec![],
@@ -347,7 +479,7 @@ fn metric_request(now: i64) -> ExportMetricsServiceRequest {
                             time_unix_nano: now + 2_500_000,
                             exemplars: vec![],
                             flags: 0,
-                            value: Some(number_data_point::Value::AsInt(12)),
+                            value: Some(number_data_point::Value::AsInt(value)),
                         }],
                     })),
                 }],

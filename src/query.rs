@@ -12,6 +12,51 @@ pub struct QueryService {
 }
 
 #[derive(Debug, Clone)]
+pub struct Page<T, C> {
+    pub items: Vec<T>,
+    pub next_cursor: Option<C>,
+}
+
+#[derive(Debug, Clone)]
+pub struct PageRequest<C> {
+    pub limit: usize,
+    pub cursor: Option<C>,
+}
+
+impl<C> PageRequest<C> {
+    pub fn first(limit: usize) -> Self {
+        Self {
+            limit,
+            cursor: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct TraceCursor {
+    pub started_at_unix_nano: i64,
+    pub trace_id: String,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct LogCursor {
+    pub timestamp_unix_nano: i64,
+    pub row_id: i64,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct MetricCursor {
+    pub timestamp_unix_nano: i64,
+    pub row_id: i64,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct LlmCursor {
+    pub latency_ms: f64,
+    pub span_id: String,
+}
+
+#[derive(Debug, Clone)]
 pub struct QueryFilters {
     pub service: Option<String>,
     pub errors_only: bool,
@@ -132,37 +177,49 @@ impl QueryService {
         let services = self.store.services(threshold)?;
         let (trace_count, error_span_count, log_count, metric_count, llm_count) =
             self.store.counts(threshold)?;
-        let traces = self.store.recent_traces(
-            filters.service.as_deref(),
-            filters.errors_only,
-            self.page_size,
-            threshold,
-            filters.search_query.as_deref(),
-        )?;
+        let traces = self
+            .store
+            .recent_traces_page(
+                filters.service.as_deref(),
+                filters.errors_only,
+                &PageRequest::first(self.page_size),
+                threshold,
+                filters.search_query.as_deref(),
+            )?
+            .items;
         let selected_trace = traces
             .first()
             .map(|summary| self.store.trace_detail(&summary.trace_id))
             .transpose()?
             .unwrap_or_default();
-        let logs = self.store.recent_logs(
-            filters.service.as_deref(),
-            self.page_size,
-            threshold,
-            filters.search_query.as_deref(),
-            &filters.log_filters,
-        )?;
-        let metrics = self.store.recent_metrics(
-            filters.service.as_deref(),
-            self.page_size,
-            threshold,
-            filters.search_query.as_deref(),
-        )?;
-        let llm = self.store.recent_llm(
-            filters.service.as_deref(),
-            self.page_size,
-            threshold,
-            filters.search_query.as_deref(),
-        )?;
+        let logs = self
+            .store
+            .recent_logs_page(
+                filters.service.as_deref(),
+                &PageRequest::first(self.page_size),
+                threshold,
+                filters.search_query.as_deref(),
+                &filters.log_filters,
+            )?
+            .items;
+        let metrics = self
+            .store
+            .recent_metrics_page(
+                filters.service.as_deref(),
+                &PageRequest::first(self.page_size),
+                threshold,
+                filters.search_query.as_deref(),
+            )?
+            .items;
+        let llm = self
+            .store
+            .recent_llm_page(
+                filters.service.as_deref(),
+                &PageRequest::first(self.page_size),
+                threshold,
+                filters.search_query.as_deref(),
+            )?
+            .items;
 
         Ok(DashboardSnapshot {
             services: services.clone(),
@@ -180,6 +237,64 @@ impl QueryService {
             metrics,
             llm,
         })
+    }
+
+    pub fn traces_page(
+        &self,
+        filters: &QueryFilters,
+        page: &PageRequest<TraceCursor>,
+    ) -> Result<Page<crate::domain::TraceSummary, TraceCursor>> {
+        let threshold = filters.time_window.threshold_unix_nano();
+        self.store.recent_traces_page(
+            filters.service.as_deref(),
+            filters.errors_only,
+            page,
+            threshold,
+            filters.search_query.as_deref(),
+        )
+    }
+
+    pub fn logs_page(
+        &self,
+        filters: &QueryFilters,
+        page: &PageRequest<LogCursor>,
+    ) -> Result<Page<crate::domain::LogSummary, LogCursor>> {
+        let threshold = filters.time_window.threshold_unix_nano();
+        self.store.recent_logs_page(
+            filters.service.as_deref(),
+            page,
+            threshold,
+            filters.search_query.as_deref(),
+            &filters.log_filters,
+        )
+    }
+
+    pub fn metrics_page(
+        &self,
+        filters: &QueryFilters,
+        page: &PageRequest<MetricCursor>,
+    ) -> Result<Page<crate::domain::MetricSummary, MetricCursor>> {
+        let threshold = filters.time_window.threshold_unix_nano();
+        self.store.recent_metrics_page(
+            filters.service.as_deref(),
+            page,
+            threshold,
+            filters.search_query.as_deref(),
+        )
+    }
+
+    pub fn llm_page(
+        &self,
+        filters: &QueryFilters,
+        page: &PageRequest<LlmCursor>,
+    ) -> Result<Page<crate::domain::LlmSummary, LlmCursor>> {
+        let threshold = filters.time_window.threshold_unix_nano();
+        self.store.recent_llm_page(
+            filters.service.as_deref(),
+            page,
+            threshold,
+            filters.search_query.as_deref(),
+        )
     }
 
     pub fn trace_detail(&self, trace_id: &str) -> Result<Vec<crate::domain::SpanDetail>> {

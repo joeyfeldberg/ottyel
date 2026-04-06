@@ -7,7 +7,7 @@ use crate::{
         LlmSummary, LogSummary, MetricSummary, SpanDetail, SpanEventDetail, SpanLinkDetail,
         TraceSummary,
     },
-    query::LogFilters,
+    query::{LlmCursor, LogCursor, LogFilters, MetricCursor, Page, PageRequest, TraceCursor},
 };
 
 use super::{
@@ -19,6 +19,79 @@ use super::{
 };
 
 impl Store {
+    pub fn recent_traces_page(
+        &self,
+        service_filter: Option<&str>,
+        errors_only: bool,
+        page: &PageRequest<TraceCursor>,
+        threshold_unix_nano: Option<i64>,
+        search_query: Option<&str>,
+    ) -> Result<Page<TraceSummary, TraceCursor>> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut sql = r#"
+            SELECT
+                trace_id,
+                MIN(service_name) AS service_name,
+                COALESCE(MAX(CASE WHEN parent_span_id = '' THEN span_name END), MIN(span_name)) AS root_name,
+                COUNT(*) AS span_count,
+                SUM(CASE WHEN status_code NOT IN ('STATUS_CODE_UNSET', 'STATUS_CODE_OK') THEN 1 ELSE 0 END) AS error_count,
+                MAX(end_time_unix_nano) - MIN(start_time_unix_nano) AS duration_nano,
+                MIN(start_time_unix_nano) AS started_at
+            FROM spans
+        "#
+        .to_string();
+
+        let mut where_clauses = Vec::new();
+        if let Some(service) = service_filter {
+            where_clauses.push(format!("service_name = '{}'", escape_sql(service)));
+        }
+        if errors_only {
+            where_clauses
+                .push("status_code NOT IN ('STATUS_CODE_UNSET', 'STATUS_CODE_OK')".to_string());
+        }
+        if let Some(threshold) = threshold_unix_nano {
+            where_clauses.push(format!("end_time_unix_nano >= {threshold}"));
+        }
+        if let Some(query) = search_query.filter(|query| !query.is_empty()) {
+            let pattern = like_pattern(query);
+            where_clauses.push(format!(
+                "(trace_id LIKE '{pattern}' ESCAPE '\\' OR service_name LIKE '{pattern}' ESCAPE '\\' OR span_name LIKE '{pattern}' ESCAPE '\\' OR attributes_json LIKE '{pattern}' ESCAPE '\\' OR resource_attributes_json LIKE '{pattern}' ESCAPE '\\')"
+            ));
+        }
+        if !where_clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_clauses.join(" AND "));
+        }
+        sql.push_str(" GROUP BY trace_id");
+        if let Some(cursor) = &page.cursor {
+            sql.push_str(&format!(
+                " HAVING (MIN(start_time_unix_nano) < {started}) OR (MIN(start_time_unix_nano) = {started} AND trace_id < '{trace_id}')",
+                started = cursor.started_at_unix_nano,
+                trace_id = escape_sql(&cursor.trace_id),
+            ));
+        }
+        sql.push_str(" ORDER BY started_at DESC, trace_id DESC LIMIT ");
+        sql.push_str(&page.limit.saturating_add(1).to_string());
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(TraceSummary {
+                trace_id: row.get(0)?,
+                service_name: row.get(1)?,
+                root_name: row.get(2)?,
+                span_count: row.get(3)?,
+                error_count: row.get(4)?,
+                duration_ms: row.get::<_, i64>(5)? as f64 / 1_000_000.0,
+                started_at_unix_nano: row.get(6)?,
+            })
+        })?;
+        let items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(finish_page(items, page.limit, |item| TraceCursor {
+            started_at_unix_nano: item.started_at_unix_nano,
+            trace_id: item.trace_id.clone(),
+        }))
+    }
+
     pub fn services(&self, threshold_unix_nano: Option<i64>) -> Result<Vec<String>> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let mut sql = String::from("SELECT service_name FROM (");
@@ -104,57 +177,15 @@ impl Store {
         threshold_unix_nano: Option<i64>,
         search_query: Option<&str>,
     ) -> Result<Vec<TraceSummary>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let mut sql = r#"
-            SELECT
-                trace_id,
-                MIN(service_name) AS service_name,
-                COALESCE(MAX(CASE WHEN parent_span_id = '' THEN span_name END), MIN(span_name)) AS root_name,
-                COUNT(*) AS span_count,
-                SUM(CASE WHEN status_code NOT IN ('STATUS_CODE_UNSET', 'STATUS_CODE_OK') THEN 1 ELSE 0 END) AS error_count,
-                MAX(end_time_unix_nano) - MIN(start_time_unix_nano) AS duration_nano,
-                MIN(start_time_unix_nano) AS started_at
-            FROM spans
-        "#
-        .to_string();
-
-        let mut where_clauses = Vec::new();
-        if let Some(service) = service_filter {
-            where_clauses.push(format!("service_name = '{}'", escape_sql(service)));
-        }
-        if errors_only {
-            where_clauses
-                .push("status_code NOT IN ('STATUS_CODE_UNSET', 'STATUS_CODE_OK')".to_string());
-        }
-        if let Some(threshold) = threshold_unix_nano {
-            where_clauses.push(format!("end_time_unix_nano >= {threshold}"));
-        }
-        if let Some(query) = search_query.filter(|query| !query.is_empty()) {
-            let pattern = like_pattern(query);
-            where_clauses.push(format!(
-                "(trace_id LIKE '{pattern}' ESCAPE '\\' OR service_name LIKE '{pattern}' ESCAPE '\\' OR span_name LIKE '{pattern}' ESCAPE '\\' OR attributes_json LIKE '{pattern}' ESCAPE '\\' OR resource_attributes_json LIKE '{pattern}' ESCAPE '\\')"
-            ));
-        }
-        if !where_clauses.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&where_clauses.join(" AND "));
-        }
-        sql.push_str(" GROUP BY trace_id ORDER BY started_at DESC LIMIT ");
-        sql.push_str(&limit.to_string());
-
-        let mut stmt = conn.prepare(&sql)?;
-        let rows = stmt.query_map([], |row| {
-            Ok(TraceSummary {
-                trace_id: row.get(0)?,
-                service_name: row.get(1)?,
-                root_name: row.get(2)?,
-                span_count: row.get(3)?,
-                error_count: row.get(4)?,
-                duration_ms: row.get::<_, i64>(5)? as f64 / 1_000_000.0,
-                started_at_unix_nano: row.get(6)?,
-            })
-        })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        Ok(self
+            .recent_traces_page(
+                service_filter,
+                errors_only,
+                &PageRequest::first(limit),
+                threshold_unix_nano,
+                search_query,
+            )?
+            .items)
     }
 
     pub fn trace_detail(&self, trace_id: &str) -> Result<Vec<SpanDetail>> {
@@ -211,9 +242,28 @@ impl Store {
         search_query: Option<&str>,
         log_filters: &LogFilters,
     ) -> Result<Vec<LogSummary>> {
+        Ok(self
+            .recent_logs_page(
+                service_filter,
+                &PageRequest::first(limit),
+                threshold_unix_nano,
+                search_query,
+                log_filters,
+            )?
+            .items)
+    }
+
+    pub fn recent_logs_page(
+        &self,
+        service_filter: Option<&str>,
+        page: &PageRequest<LogCursor>,
+        threshold_unix_nano: Option<i64>,
+        search_query: Option<&str>,
+        log_filters: &LogFilters,
+    ) -> Result<Page<LogSummary, LogCursor>> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let mut sql = String::from(
-            "SELECT service_name, timestamp_unix_nano, severity, body, trace_id, span_id, resource_attributes_json, attributes_json FROM logs",
+            "SELECT id, service_name, timestamp_unix_nano, severity, body, trace_id, span_id, resource_attributes_json, attributes_json FROM logs",
         );
         let mut where_clauses = Vec::new();
         if let Some(service) = service_filter {
@@ -244,30 +294,45 @@ impl Store {
                 "(body LIKE '{pattern}' ESCAPE '\\' OR severity LIKE '{pattern}' ESCAPE '\\' OR trace_id LIKE '{pattern}' ESCAPE '\\' OR span_id LIKE '{pattern}' ESCAPE '\\' OR attributes_json LIKE '{pattern}' ESCAPE '\\' OR resource_attributes_json LIKE '{pattern}' ESCAPE '\\')"
             ));
         }
+        if let Some(cursor) = &page.cursor {
+            where_clauses.push(format!(
+                "(timestamp_unix_nano < {timestamp} OR (timestamp_unix_nano = {timestamp} AND id < {row_id}))",
+                timestamp = cursor.timestamp_unix_nano,
+                row_id = cursor.row_id,
+            ));
+        }
         if !where_clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&where_clauses.join(" AND "));
         }
-        sql.push_str(" ORDER BY timestamp_unix_nano DESC LIMIT ");
-        sql.push_str(&limit.to_string());
+        sql.push_str(" ORDER BY timestamp_unix_nano DESC, id DESC LIMIT ");
+        sql.push_str(&page.limit.saturating_add(1).to_string());
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
-            let resource_attributes_json: String = row.get(6)?;
-            let attributes_json: String = row.get(7)?;
-            Ok(LogSummary {
-                service_name: row.get(0)?,
-                timestamp_unix_nano: row.get(1)?,
-                severity: row.get(2)?,
-                body: row.get(3)?,
-                trace_id: row.get(4)?,
-                span_id: row.get(5)?,
-                resource_attributes: serde_json::from_str(&resource_attributes_json)
-                    .unwrap_or_default(),
-                attributes: serde_json::from_str(&attributes_json).unwrap_or_default(),
-            })
+            let resource_attributes_json: String = row.get(7)?;
+            let attributes_json: String = row.get(8)?;
+            Ok((
+                row.get::<_, i64>(0)?,
+                LogSummary {
+                    service_name: row.get(1)?,
+                    timestamp_unix_nano: row.get(2)?,
+                    severity: row.get(3)?,
+                    body: row.get(4)?,
+                    trace_id: row.get(5)?,
+                    span_id: row.get(6)?,
+                    resource_attributes: serde_json::from_str(&resource_attributes_json)
+                        .unwrap_or_default(),
+                    attributes: serde_json::from_str(&attributes_json).unwrap_or_default(),
+                },
+            ))
         })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(finish_page(items, page.limit, |(row_id, item)| LogCursor {
+            timestamp_unix_nano: item.timestamp_unix_nano,
+            row_id: *row_id,
+        })
+        .map_items(|(_, item)| item))
     }
 
     pub fn recent_metrics(
@@ -277,10 +342,27 @@ impl Store {
         threshold_unix_nano: Option<i64>,
         search_query: Option<&str>,
     ) -> Result<Vec<MetricSummary>> {
+        Ok(self
+            .recent_metrics_page(
+                service_filter,
+                &PageRequest::first(limit),
+                threshold_unix_nano,
+                search_query,
+            )?
+            .items)
+    }
+
+    pub fn recent_metrics_page(
+        &self,
+        service_filter: Option<&str>,
+        page: &PageRequest<MetricCursor>,
+        threshold_unix_nano: Option<i64>,
+        search_query: Option<&str>,
+    ) -> Result<Page<MetricSummary, MetricCursor>> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let mut sql = String::from(
             r#"
-            SELECT service_name, metric_name, instrument_kind, timestamp_unix_nano, value, summary
+            SELECT id, service_name, metric_name, instrument_kind, timestamp_unix_nano, value, summary
             FROM metrics
             "#,
         );
@@ -297,25 +379,42 @@ impl Store {
                 "(service_name LIKE '{pattern}' ESCAPE '\\' OR metric_name LIKE '{pattern}' ESCAPE '\\' OR instrument_kind LIKE '{pattern}' ESCAPE '\\' OR summary LIKE '{pattern}' ESCAPE '\\' OR attributes_json LIKE '{pattern}' ESCAPE '\\' OR resource_attributes_json LIKE '{pattern}' ESCAPE '\\')"
             ));
         }
+        if let Some(cursor) = &page.cursor {
+            where_clauses.push(format!(
+                "(timestamp_unix_nano < {timestamp} OR (timestamp_unix_nano = {timestamp} AND id < {row_id}))",
+                timestamp = cursor.timestamp_unix_nano,
+                row_id = cursor.row_id,
+            ));
+        }
         if !where_clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&where_clauses.join(" AND "));
         }
-        sql.push_str(" ORDER BY timestamp_unix_nano DESC LIMIT ");
-        sql.push_str(&limit.to_string());
+        sql.push_str(" ORDER BY timestamp_unix_nano DESC, id DESC LIMIT ");
+        sql.push_str(&page.limit.saturating_add(1).to_string());
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
-            Ok(MetricSummary {
-                service_name: row.get(0)?,
-                metric_name: row.get(1)?,
-                instrument_kind: row.get(2)?,
-                timestamp_unix_nano: row.get(3)?,
-                value: row.get(4)?,
-                summary: row.get(5)?,
-            })
+            Ok((
+                row.get::<_, i64>(0)?,
+                MetricSummary {
+                    service_name: row.get(1)?,
+                    metric_name: row.get(2)?,
+                    instrument_kind: row.get(3)?,
+                    timestamp_unix_nano: row.get(4)?,
+                    value: row.get(5)?,
+                    summary: row.get(6)?,
+                },
+            ))
         })?;
-        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+        let items = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        Ok(
+            finish_page(items, page.limit, |(row_id, item)| MetricCursor {
+                timestamp_unix_nano: item.timestamp_unix_nano,
+                row_id: *row_id,
+            })
+            .map_items(|(_, item)| item),
+        )
     }
 
     pub fn recent_llm(
@@ -325,6 +424,23 @@ impl Store {
         threshold_unix_nano: Option<i64>,
         search_query: Option<&str>,
     ) -> Result<Vec<LlmSummary>> {
+        Ok(self
+            .recent_llm_page(
+                service_filter,
+                &PageRequest::first(limit),
+                threshold_unix_nano,
+                search_query,
+            )?
+            .items)
+    }
+
+    pub fn recent_llm_page(
+        &self,
+        service_filter: Option<&str>,
+        page: &PageRequest<LlmCursor>,
+        threshold_unix_nano: Option<i64>,
+        search_query: Option<&str>,
+    ) -> Result<Page<LlmSummary, LlmCursor>> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let mut sql = String::from(
             r#"
@@ -352,12 +468,21 @@ impl Store {
                 "(llm_spans.trace_id LIKE '{pattern}' ESCAPE '\\' OR llm_spans.span_id LIKE '{pattern}' ESCAPE '\\' OR llm_spans.service_name LIKE '{pattern}' ESCAPE '\\' OR provider LIKE '{pattern}' ESCAPE '\\' OR model LIKE '{pattern}' ESCAPE '\\' OR operation LIKE '{pattern}' ESCAPE '\\' OR raw_json LIKE '{pattern}' ESCAPE '\\')"
             ));
         }
+        if let Some(cursor) = &page.cursor {
+            where_clauses.push(format!(
+                "(COALESCE(llm_spans.latency_ms, -1) < {latency} OR (COALESCE(llm_spans.latency_ms, -1) = {latency} AND llm_spans.span_id < '{span_id}'))",
+                latency = cursor.latency_ms,
+                span_id = escape_sql(&cursor.span_id),
+            ));
+        }
         if !where_clauses.is_empty() {
             sql.push_str(" WHERE ");
             sql.push_str(&where_clauses.join(" AND "));
         }
-        sql.push_str(" ORDER BY llm_spans.latency_ms DESC, llm_spans.trace_id DESC LIMIT ");
-        sql.push_str(&limit.to_string());
+        sql.push_str(
+            " ORDER BY COALESCE(llm_spans.latency_ms, -1) DESC, llm_spans.span_id DESC LIMIT ",
+        );
+        sql.push_str(&page.limit.saturating_add(1).to_string());
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
@@ -387,7 +512,10 @@ impl Store {
         for row in &mut rows {
             hydrate_llm_summary(row);
         }
-        Ok(rows)
+        Ok(finish_page(rows, page.limit, |item| LlmCursor {
+            latency_ms: item.latency_ms.unwrap_or(-1.0),
+            span_id: item.span_id.clone(),
+        }))
     }
 
     fn span_events_by_trace(
@@ -454,6 +582,37 @@ impl Store {
         }
 
         Ok(by_span)
+    }
+}
+
+fn finish_page<T, C, F>(mut items: Vec<T>, limit: usize, cursor_for: F) -> Page<T, C>
+where
+    F: Fn(&T) -> C,
+{
+    let has_more = items.len() > limit;
+    if has_more {
+        items.truncate(limit);
+    }
+    let next_cursor = has_more.then(|| items.last().map(&cursor_for)).flatten();
+
+    Page { items, next_cursor }
+}
+
+trait PageMapItems<T, C> {
+    fn map_items<U, F>(self, map: F) -> Page<U, C>
+    where
+        F: Fn(T) -> U;
+}
+
+impl<T, C> PageMapItems<T, C> for Page<T, C> {
+    fn map_items<U, F>(self, map: F) -> Page<U, C>
+    where
+        F: Fn(T) -> U,
+    {
+        Page {
+            items: self.items.into_iter().map(map).collect(),
+            next_cursor: self.next_cursor,
+        }
     }
 }
 

@@ -199,7 +199,12 @@ pub fn extract_llm_attributes(
 ) -> Option<LlmAttributes> {
     let provider = first_string(
         attrs,
-        &["llm.provider", "gen_ai.system", "openinference.provider"],
+        &[
+            "llm.provider",
+            "gen_ai.provider.name",
+            "gen_ai.system",
+            "openinference.provider",
+        ],
     );
     let model = first_string(
         attrs,
@@ -227,7 +232,9 @@ pub fn extract_llm_attributes(
             "llm.prompts.0.content",
             "gen_ai.prompt.0.content",
         ],
-    );
+    )
+    .or_else(|| message_preview(attrs, &["gen_ai.input.messages"]))
+    .or_else(|| first_json_preview(attrs, &["gen_ai.system_instructions"]));
     let output_preview = first_string(
         attrs,
         &[
@@ -236,9 +243,13 @@ pub fn extract_llm_attributes(
             "llm.completions.0.content",
             "gen_ai.completion.0.content",
         ],
-    );
-    let tool_name = first_string(attrs, &["tool.name", "llm.tool.name"]);
-    let tool_args = first_string(attrs, &["tool.arguments", "llm.tool.arguments"]);
+    )
+    .or_else(|| message_preview(attrs, &["gen_ai.output.messages"]));
+    let tool_name = first_string(attrs, &["tool.name", "llm.tool.name"])
+        .or_else(|| first_tool_name(attrs, &["gen_ai.tool.definitions"]))
+        .or_else(|| first_tool_name(attrs, &["gen_ai.input.messages", "gen_ai.output.messages"]));
+    let tool_args = first_string(attrs, &["tool.arguments", "llm.tool.arguments"])
+        .or_else(|| first_tool_args(attrs, &["gen_ai.input.messages", "gen_ai.output.messages"]));
     let input_tokens = first_u64(
         attrs,
         &[
@@ -327,6 +338,134 @@ fn first_f64(attrs: &AttributeMap, keys: &[&str]) -> Option<f64> {
     })
 }
 
+fn first_json_preview(attrs: &AttributeMap, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| attrs.get(*key).and_then(value_preview))
+}
+
+fn message_preview(attrs: &AttributeMap, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| attrs.get(*key).and_then(messages_preview))
+}
+
+fn messages_preview(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) => {
+            let previews = items
+                .iter()
+                .filter_map(message_content_preview)
+                .collect::<Vec<_>>();
+            if previews.is_empty() {
+                None
+            } else {
+                Some(previews.join("\n\n"))
+            }
+        }
+        _ => message_content_preview(value),
+    }
+}
+
+fn message_content_preview(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) if !text.is_empty() => Some(text.clone()),
+        Value::Object(object) => {
+            if let Some(content) = object.get("content").and_then(content_preview) {
+                return Some(content);
+            }
+            if let Some(input_text) = object.get("input_text").and_then(value_preview) {
+                return Some(input_text);
+            }
+            if let Some(output_text) = object.get("output_text").and_then(value_preview) {
+                return Some(output_text);
+            }
+            if let Some(text) = object.get("text").and_then(value_preview) {
+                return Some(text);
+            }
+            if let Some(arguments) = object.get("arguments").and_then(value_preview) {
+                return Some(arguments);
+            }
+            None
+        }
+        _ => value_preview(value),
+    }
+}
+
+fn content_preview(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) => {
+            let previews = items.iter().filter_map(part_preview).collect::<Vec<_>>();
+            if previews.is_empty() {
+                None
+            } else {
+                Some(previews.join("\n"))
+            }
+        }
+        _ => value_preview(value),
+    }
+}
+
+fn part_preview(value: &Value) -> Option<String> {
+    match value {
+        Value::String(text) if !text.is_empty() => Some(text.clone()),
+        Value::Object(object) => object
+            .get("text")
+            .and_then(value_preview)
+            .or_else(|| object.get("content").and_then(value_preview))
+            .or_else(|| object.get("output_text").and_then(value_preview))
+            .or_else(|| object.get("input_text").and_then(value_preview))
+            .or_else(|| object.get("arguments").and_then(value_preview)),
+        _ => value_preview(value),
+    }
+}
+
+fn first_tool_name(attrs: &AttributeMap, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| attrs.get(*key).and_then(tool_name_from_value))
+}
+
+fn first_tool_args(attrs: &AttributeMap, keys: &[&str]) -> Option<String> {
+    keys.iter()
+        .find_map(|key| attrs.get(*key).and_then(tool_args_from_value))
+}
+
+fn tool_name_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) => items.iter().find_map(tool_name_from_value),
+        Value::Object(object) => object
+            .get("name")
+            .and_then(value_preview)
+            .or_else(|| object.get("tool_name").and_then(value_preview))
+            .or_else(|| object.get("function").and_then(tool_name_from_value))
+            .or_else(|| object.get("tool_calls").and_then(tool_name_from_value)),
+        _ => None,
+    }
+}
+
+fn tool_args_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::Array(items) => items.iter().find_map(tool_args_from_value),
+        Value::Object(object) => object
+            .get("arguments")
+            .and_then(value_preview)
+            .or_else(|| object.get("args").and_then(value_preview))
+            .or_else(|| object.get("input").and_then(value_preview))
+            .or_else(|| object.get("function").and_then(tool_args_from_value))
+            .or_else(|| object.get("tool_calls").and_then(tool_args_from_value)),
+        _ => None,
+    }
+}
+
+fn value_preview(value: &Value) -> Option<String> {
+    match value {
+        Value::Null => None,
+        Value::String(text) if text.is_empty() => None,
+        Value::String(text) => Some(text.clone()),
+        Value::Number(number) => Some(number.to_string()),
+        Value::Bool(flag) => Some(flag.to_string()),
+        Value::Array(_) | Value::Object(_) => serde_json::to_string_pretty(value).ok(),
+    }
+}
+
 pub fn truncate(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
@@ -368,5 +507,79 @@ mod tests {
         assert_eq!(llm.prompt_preview.as_deref(), Some("hello"));
         assert_eq!(llm.output_preview.as_deref(), Some("world"));
         assert_eq!(llm.latency_ms, Some(42.5));
+    }
+
+    #[test]
+    fn llm_attributes_normalize_gen_ai_message_arrays() {
+        let attrs = AttributeMap::from([
+            ("gen_ai.provider.name".to_string(), json!("openai")),
+            ("gen_ai.request.model".to_string(), json!("gpt-4o-mini")),
+            ("gen_ai.operation.name".to_string(), json!("chat")),
+            ("gen_ai.usage.input_tokens".to_string(), json!(1184)),
+            ("gen_ai.usage.output_tokens".to_string(), json!(34)),
+            (
+                "gen_ai.system_instructions".to_string(),
+                json!("You are a useful assistant."),
+            ),
+            (
+                "gen_ai.input.messages".to_string(),
+                json!([
+                    {
+                        "role": "system",
+                        "content": [{"type": "text", "text": "You are a useful assistant."}]
+                    },
+                    {
+                        "role": "user",
+                        "content": [{"type": "text", "text": "Summarize this ticket"}]
+                    }
+                ]),
+            ),
+            (
+                "gen_ai.output.messages".to_string(),
+                json!([
+                    {
+                        "role": "assistant",
+                        "content": [{"type": "text", "text": "Here is the summary."}],
+                        "tool_calls": [
+                            {
+                                "name": "lookup_customer",
+                                "arguments": {"customer_id": "123"}
+                            }
+                        ]
+                    }
+                ]),
+            ),
+            (
+                "gen_ai.tool.definitions".to_string(),
+                json!([
+                    {
+                        "name": "lookup_customer",
+                        "description": "Fetch a customer by id"
+                    }
+                ]),
+            ),
+        ]);
+
+        let llm = extract_llm_attributes(&attrs, Some("STATUS_CODE_UNSET"), Some(1609.3)).unwrap();
+
+        assert_eq!(llm.provider.as_deref(), Some("openai"));
+        assert_eq!(llm.model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(llm.operation.as_deref(), Some("chat"));
+        assert_eq!(llm.input_tokens, Some(1184));
+        assert_eq!(llm.output_tokens, Some(34));
+        assert_eq!(llm.total_tokens, Some(1218));
+        assert!(
+            llm.prompt_preview
+                .as_deref()
+                .is_some_and(|value| value.contains("Summarize this ticket"))
+        );
+        assert_eq!(llm.output_preview.as_deref(), Some("Here is the summary."));
+        assert_eq!(llm.tool_name.as_deref(), Some("lookup_customer"));
+        assert!(
+            llm.tool_args
+                .as_deref()
+                .is_some_and(|value| value.contains("customer_id"))
+        );
+        assert_eq!(llm.latency_ms, Some(1609.3));
     }
 }
