@@ -3,10 +3,13 @@ use ratatui::layout::Rect;
 
 use crate::{
     commands::{self, PaletteAction},
+    config::Theme,
     domain::DashboardSnapshot,
     query::{LogCorrelationFilter, LogFilters, LogSeverityFilter, QueryFilters, TimeWindow},
     ui::{PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
 };
+
+const COMMAND_PALETTE_VISIBLE_ROWS: usize = 8;
 
 pub(super) fn handle_key(
     code: KeyCode,
@@ -43,6 +46,7 @@ pub(super) fn handle_key(
         KeyCode::Char('?') => {
             state.show_help = true;
         }
+        KeyCode::Char('g') => cycle_theme(state),
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return true,
         KeyCode::Char('x') if Tab::ALL[state.active_tab] == Tab::Logs => {
             state.log_search_mode = true;
@@ -589,6 +593,14 @@ fn cycle_time_window(state: &mut UiState) {
     state.time_window = TimeWindow::ALL[(current + 1) % TimeWindow::ALL.len()];
 }
 
+fn cycle_theme(state: &mut UiState) {
+    let current = Theme::ALL
+        .iter()
+        .position(|theme| *theme == state.theme)
+        .unwrap_or(0);
+    state.theme = Theme::ALL[(current + 1) % Theme::ALL.len()];
+}
+
 fn cycle_log_severity_filter(state: &mut UiState) {
     let current = LogSeverityFilter::ALL
         .iter()
@@ -762,12 +774,14 @@ fn open_command_palette(state: &mut UiState) {
     state.show_command_palette = true;
     state.command_query.clear();
     state.selected_command = 0;
+    state.command_palette_scroll = 0;
 }
 
 fn close_command_palette(state: &mut UiState) {
     state.show_command_palette = false;
     state.command_query.clear();
     state.selected_command = 0;
+    state.command_palette_scroll = 0;
 }
 
 fn handle_command_palette_key(
@@ -807,12 +821,31 @@ fn handle_command_palette_key(
 
 fn move_palette_selection(delta: isize, state: &mut UiState) {
     let commands = commands::matching_commands(&state.command_query);
+    let previous = state.selected_command;
     move_index(&mut state.selected_command, commands.len(), delta);
+    if state.selected_command != previous {
+        sync_palette_scroll(state, commands.len());
+    }
 }
 
 fn clamp_palette_selection(state: &mut UiState) {
     let len = commands::matching_commands(&state.command_query).len();
     state.selected_command = state.selected_command.min(len.saturating_sub(1));
+    sync_palette_scroll(state, len);
+}
+
+fn sync_palette_scroll(state: &mut UiState, total: usize) {
+    if total <= COMMAND_PALETTE_VISIBLE_ROWS {
+        state.command_palette_scroll = 0;
+        return;
+    }
+
+    state.command_palette_scroll = crate::ui::geometry::trace_tree_scroll_offset(
+        state.command_palette_scroll,
+        total,
+        state.selected_command,
+        COMMAND_PALETTE_VISIBLE_ROWS,
+    );
 }
 
 fn execute_palette_action(
@@ -824,6 +857,10 @@ fn execute_palette_action(
         PaletteAction::SwitchTab(tab) => {
             state.active_tab = tab_index(tab);
         }
+        PaletteAction::SetTheme(theme) => {
+            state.theme = theme;
+        }
+        PaletteAction::CycleTheme => cycle_theme(state),
         PaletteAction::ToggleHelp => {
             state.show_help = true;
         }

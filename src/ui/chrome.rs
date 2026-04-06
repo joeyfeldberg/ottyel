@@ -14,6 +14,8 @@ use crate::{
 
 use super::{Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState, geometry};
 
+pub(crate) const COMMAND_PALETTE_VISIBLE_ROWS: usize = 8;
+
 pub(crate) fn render_help_overlay(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -63,7 +65,12 @@ pub(crate) fn render_command_palette(
     if commands.is_empty() {
         lines.push(Line::raw("No matching commands."));
     } else {
-        for (index, command) in commands.iter().take(8).enumerate() {
+        let (start, end) = command_palette_window(
+            state.command_palette_scroll,
+            state.selected_command,
+            commands.len(),
+        );
+        for (index, command) in commands.iter().enumerate().skip(start).take(end - start) {
             let selected = index == state.selected_command;
             let style = if selected {
                 Style::default().fg(palette.background).bg(palette.accent)
@@ -82,7 +89,7 @@ pub(crate) fn render_command_palette(
 
     lines.push(Line::raw(""));
     lines.push(Line::from(Span::styled(
-        "enter run  j/k move  backspace delete  esc close",
+        "enter run  j/k move  esc close",
         Style::default().fg(palette.muted),
     )));
 
@@ -98,9 +105,36 @@ pub(crate) fn render_command_palette(
     );
 }
 
+pub(crate) fn command_palette_window(
+    current_offset: usize,
+    selected: usize,
+    total: usize,
+) -> (usize, usize) {
+    if total <= COMMAND_PALETTE_VISIBLE_ROWS {
+        return (0, total);
+    }
+
+    let start = current_offset.min(total.saturating_sub(COMMAND_PALETTE_VISIBLE_ROWS));
+    let end = (start + COMMAND_PALETTE_VISIBLE_ROWS).min(total);
+    if selected < start {
+        let adjusted_start = selected;
+        return (
+            adjusted_start,
+            (adjusted_start + COMMAND_PALETTE_VISIBLE_ROWS).min(total),
+        );
+    }
+    if selected >= end {
+        let adjusted_end = (selected + 1).min(total);
+        let adjusted_start = adjusted_end.saturating_sub(COMMAND_PALETTE_VISIBLE_ROWS);
+        return (adjusted_start, adjusted_end);
+    }
+    (start, end)
+}
+
 pub(crate) fn global_status_text(snapshot: &DashboardSnapshot, state: &UiState) -> String {
     format!(
-        "window={} | service={} | search={} | panes traces={} logs={} metrics={} llm={}",
+        "theme={} | window={} | service={} | search={} | panes traces={} logs={} metrics={} llm={}",
+        state.theme.label(),
         state.time_window.label(),
         current_service(snapshot, state).unwrap_or("all"),
         search_label(state),
@@ -212,6 +246,7 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
         Line::raw("  tab / shift-tab  switch panes"),
         Line::raw("  : / ctrl-p       open command palette"),
         Line::raw("  /                global search"),
+        Line::raw("  g                cycle theme"),
         Line::raw("  s                cycle service filter"),
         Line::raw("  t                cycle time window"),
         Line::raw("  ?                open/close help"),

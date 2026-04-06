@@ -20,10 +20,10 @@ use ratatui::{
     widgets::{Block, Borders, Paragraph, Tabs},
 };
 
-use crate::{config::Theme, domain::DashboardSnapshot};
+use crate::domain::DashboardSnapshot;
 
-pub fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &UiState, theme: Theme) {
-    let palette = Palette::from_theme(theme);
+pub fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &UiState) {
+    let palette = Palette::from_theme(state.theme);
     let root = frame.area();
     frame.render_widget(
         Block::default().style(Style::default().bg(palette.background)),
@@ -112,10 +112,11 @@ pub fn sync_trace_tree_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &
 }
 
 pub fn sync_detail_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut UiState) {
+    let palette = Palette::from_theme(state.theme);
     if Tab::ALL[state.active_tab] == Tab::Traces && state.trace_view_mode == TraceViewMode::Detail {
         state.trace_detail_scroll = geometry::clamp_scroll(
             state.trace_detail_scroll,
-            details::trace_detail_lines(snapshot, state, Palette::from_theme(Theme::Ember)).len(),
+            details::trace_detail_lines(snapshot, state, palette).len(),
             geometry::detail_viewport_height(geometry::trace_detail_area(geometry::body_area(
                 root,
             ))),
@@ -126,17 +127,17 @@ pub fn sync_detail_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut 
 
     state.log_detail_scroll = geometry::clamp_scroll(
         state.log_detail_scroll,
-        details::log_detail_lines(snapshot, state, Palette::from_theme(Theme::Ember)).len(),
+        details::log_detail_lines(snapshot, state, palette).len(),
         geometry::detail_viewport_height(geometry::log_detail_area(geometry::body_area(root))),
     );
     state.metric_detail_scroll = geometry::clamp_scroll(
         state.metric_detail_scroll,
-        details::metric_detail_lines(snapshot, state, Palette::from_theme(Theme::Ember)).len(),
+        details::metric_detail_lines(snapshot, state, palette).len(),
         geometry::detail_viewport_height(geometry::metric_detail_area(geometry::body_area(root))),
     );
     state.llm_detail_scroll = geometry::clamp_scroll(
         state.llm_detail_scroll,
-        details::llm_detail_lines(snapshot, state, Palette::from_theme(Theme::Ember)).len(),
+        details::llm_detail_lines(snapshot, state, palette).len(),
         geometry::detail_viewport_height(geometry::llm_detail_area(geometry::body_area(root))),
     );
 }

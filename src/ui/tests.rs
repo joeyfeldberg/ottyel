@@ -10,7 +10,7 @@ use crate::{
 
 use super::{
     Palette, Tab, TraceFocus, TraceViewMode, UiState,
-    chrome::{footer_text, help_lines, help_title},
+    chrome::{command_palette_window, footer_text, help_lines, help_title},
     details::{build_log_detail_lines, format_log_body, llm_detail_lines, metric_chart_values},
     geometry::trace_tree_scroll_offset,
     traces::{
@@ -153,6 +153,7 @@ fn duration_format_compacts_long_values() {
 #[test]
 fn ui_state_defaults_to_trace_list_focus() {
     let state = UiState::default();
+    assert_eq!(state.theme, Theme::Ember);
     assert_eq!(state.trace_view_mode, TraceViewMode::List);
     assert_eq!(state.trace_focus, TraceFocus::TraceList);
     assert_eq!(state.selected_trace_span, 0);
@@ -163,6 +164,7 @@ fn ui_state_defaults_to_trace_list_focus() {
     assert!(!state.show_command_palette);
     assert!(state.command_query.is_empty());
     assert_eq!(state.selected_command, 0);
+    assert_eq!(state.command_palette_scroll, 0);
     assert_eq!(state.log_detail_scroll, 0);
     assert_eq!(state.metric_detail_scroll, 0);
     assert_eq!(state.llm_detail_scroll, 0);
@@ -219,6 +221,21 @@ fn help_lines_include_trace_tree_commands() {
             .iter()
             .any(|line| line.contains("?                open/close help"))
     );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("g                cycle theme"))
+    );
+}
+
+#[test]
+fn command_palette_window_tracks_selected_command() {
+    assert_eq!(command_palette_window(0, 0, 3), (0, 3));
+    assert_eq!(command_palette_window(0, 0, 12), (0, 8));
+    assert_eq!(command_palette_window(4, 10, 12), (4, 12));
+    assert_eq!(command_palette_window(4, 9, 12), (4, 12));
+    assert_eq!(command_palette_window(4, 4, 12), (4, 12));
+    assert_eq!(command_palette_window(4, 3, 12), (3, 11));
 }
 
 #[test]

@@ -1,8 +1,10 @@
-use crate::ui::Tab;
+use crate::{config::Theme, ui::Tab};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum PaletteAction {
     SwitchTab(Tab),
+    SetTheme(Theme),
+    CycleTheme,
     ToggleHelp,
     CycleService,
     ClearService,
@@ -47,6 +49,36 @@ const COMMANDS: &[PaletteCommand] = &[
         title: "Go to LLM Inspector",
         aliases: &["llm", "inspector", "tab llm"],
         action: PaletteAction::SwitchTab(Tab::Llm),
+    },
+    PaletteCommand {
+        title: "Cycle Theme",
+        aliases: &["theme", "next theme", "palette"],
+        action: PaletteAction::CycleTheme,
+    },
+    PaletteCommand {
+        title: "Theme: Ember",
+        aliases: &["theme ember", "ember"],
+        action: PaletteAction::SetTheme(Theme::Ember),
+    },
+    PaletteCommand {
+        title: "Theme: Tidal",
+        aliases: &["theme tidal", "tidal"],
+        action: PaletteAction::SetTheme(Theme::Tidal),
+    },
+    PaletteCommand {
+        title: "Theme: Grove",
+        aliases: &["theme grove", "grove"],
+        action: PaletteAction::SetTheme(Theme::Grove),
+    },
+    PaletteCommand {
+        title: "Theme: Paper",
+        aliases: &["theme paper", "paper", "light"],
+        action: PaletteAction::SetTheme(Theme::Paper),
+    },
+    PaletteCommand {
+        title: "Theme: Neon",
+        aliases: &["theme neon", "neon"],
+        action: PaletteAction::SetTheme(Theme::Neon),
     },
     PaletteCommand {
         title: "Open Help",
@@ -124,7 +156,7 @@ fn command_matches(command: PaletteCommand, query: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{PaletteAction, matching_commands};
-    use crate::ui::Tab;
+    use crate::{config::Theme, ui::Tab};
 
     #[test]
     fn matching_commands_filters_by_title_and_alias() {
@@ -138,6 +170,13 @@ mod tests {
         assert!(
             tail.iter()
                 .any(|command| command.action == PaletteAction::ToggleLogTail)
+        );
+
+        let paper = matching_commands("light");
+        assert!(
+            paper
+                .iter()
+                .any(|command| command.action == PaletteAction::SetTheme(Theme::Paper))
         );
     }
 }

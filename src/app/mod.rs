@@ -80,7 +80,10 @@ async fn terminal_loop(
 ) -> Result<()> {
     let mut events = EventStream::new();
     let mut tick = interval(Duration::from_millis(args.tick_rate_ms));
-    let mut state = UiState::default();
+    let mut state = UiState {
+        theme: args.theme,
+        ..UiState::default()
+    };
     let mut snapshot = query.snapshot(&input::filters(&state, &[]))?;
 
     loop {
@@ -96,7 +99,7 @@ async fn terminal_loop(
             &snapshot,
             &mut state,
         );
-        terminal.draw(|frame| crate::ui::render(frame, &snapshot, &state, args.theme))?;
+        terminal.draw(|frame| crate::ui::render(frame, &snapshot, &state))?;
 
         tokio::select! {
             _ = tick.tick() => {

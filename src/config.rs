@@ -61,4 +61,27 @@ pub struct DoctorArgs {
 pub enum Theme {
     Ember,
     Tidal,
+    Grove,
+    Paper,
+    Neon,
+}
+
+impl Theme {
+    pub const ALL: [Self; 5] = [
+        Self::Ember,
+        Self::Tidal,
+        Self::Grove,
+        Self::Paper,
+        Self::Neon,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Ember => "ember",
+            Self::Tidal => "tidal",
+            Self::Grove => "grove",
+            Self::Paper => "paper",
+            Self::Neon => "neon",
+        }
+    }
 }

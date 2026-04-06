@@ -36,6 +36,30 @@ impl Palette {
                 warning: Color::Rgb(255, 192, 92),
                 success: Color::Rgb(100, 230, 190),
             },
+            Theme::Grove => Self {
+                background: Color::Rgb(11, 18, 13),
+                foreground: Color::Rgb(229, 240, 212),
+                accent: Color::Rgb(112, 204, 92),
+                muted: Color::Rgb(102, 132, 98),
+                warning: Color::Rgb(245, 194, 74),
+                success: Color::Rgb(108, 224, 178),
+            },
+            Theme::Paper => Self {
+                background: Color::Rgb(244, 236, 224),
+                foreground: Color::Rgb(48, 38, 30),
+                accent: Color::Rgb(184, 96, 46),
+                muted: Color::Rgb(136, 118, 98),
+                warning: Color::Rgb(184, 126, 28),
+                success: Color::Rgb(54, 138, 92),
+            },
+            Theme::Neon => Self {
+                background: Color::Rgb(8, 9, 18),
+                foreground: Color::Rgb(225, 235, 255),
+                accent: Color::Rgb(255, 94, 184),
+                muted: Color::Rgb(109, 120, 155),
+                warning: Color::Rgb(255, 202, 64),
+                success: Color::Rgb(86, 240, 196),
+            },
         }
     }
 }
@@ -71,6 +95,7 @@ impl Tab {
 
 #[derive(Debug, Clone)]
 pub struct UiState {
+    pub theme: Theme,
     pub active_tab: usize,
     pub trace_view_mode: TraceViewMode,
     pub selected_trace: usize,
@@ -82,6 +107,7 @@ pub struct UiState {
     pub show_command_palette: bool,
     pub command_query: String,
     pub selected_command: usize,
+    pub command_palette_scroll: usize,
     pub logs_focus: PaneFocus,
     pub selected_log: usize,
     pub log_detail_scroll: u16,
@@ -109,6 +135,7 @@ pub struct UiState {
 impl Default for UiState {
     fn default() -> Self {
         Self {
+            theme: Theme::Ember,
             active_tab: 0,
             trace_view_mode: TraceViewMode::List,
             selected_trace: 0,
@@ -120,6 +147,7 @@ impl Default for UiState {
             show_command_palette: false,
             command_query: String::new(),
             selected_command: 0,
+            command_palette_scroll: 0,
             logs_focus: PaneFocus::Primary,
             selected_log: 0,
             log_detail_scroll: 0,
