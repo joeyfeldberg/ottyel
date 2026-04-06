@@ -112,6 +112,7 @@ fn trace_navigation_helpers_follow_visible_tree_rows() {
         logs: Vec::new(),
         metrics: Vec::new(),
         llm: Vec::new(),
+        selected_llm_timeline: Vec::new(),
     };
     let state = UiState {
         selected_trace_span: 2,
@@ -347,6 +348,32 @@ fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
                 "tool_name": "lookup_customer"
             }),
         }],
+        selected_llm_timeline: vec![
+            crate::domain::LlmTimelineItem {
+                kind: crate::domain::LlmTimelineKind::Prompt,
+                label: "input".to_string(),
+                detail: Some("hello".to_string()),
+                offset_ms: 0.0,
+                duration_ms: None,
+                status: None,
+            },
+            crate::domain::LlmTimelineItem {
+                kind: crate::domain::LlmTimelineKind::Tool,
+                label: "lookup_customer".to_string(),
+                detail: Some("{\"customer_id\":\"123\"}".to_string()),
+                offset_ms: 12.0,
+                duration_ms: Some(8.0),
+                status: Some("STATUS_CODE_OK".to_string()),
+            },
+            crate::domain::LlmTimelineItem {
+                kind: crate::domain::LlmTimelineKind::Output,
+                label: "output".to_string(),
+                detail: Some("world".to_string()),
+                offset_ms: 42.5,
+                duration_ms: None,
+                status: None,
+            },
+        ],
     };
 
     let rendered = llm_detail_lines(
@@ -367,6 +394,12 @@ fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
     assert!(rendered.iter().any(|line| line.contains("output")));
     assert!(rendered.iter().any(|line| line.contains("world")));
     assert!(rendered.iter().any(|line| line.contains("lookup_customer")));
+    assert!(rendered.iter().any(|line| line.contains("timeline")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("tool lookup_customer"))
+    );
     assert!(rendered.iter().any(|line| line.contains("normalized")));
     assert!(
         rendered
@@ -419,6 +452,7 @@ fn llm_detail_lines_truncate_prompt_and_output_by_default() {
             status: "STATUS_CODE_OK".to_string(),
             raw_json: json!({}),
         }],
+        selected_llm_timeline: Vec::new(),
     };
 
     let rendered = llm_detail_lines(
@@ -490,6 +524,7 @@ fn llm_detail_lines_expand_prompt_and_output_when_toggled() {
             status: "STATUS_CODE_OK".to_string(),
             raw_json: json!({}),
         }],
+        selected_llm_timeline: Vec::new(),
     };
     let state = UiState {
         llm_expand_prompt: true,

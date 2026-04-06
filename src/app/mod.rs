@@ -85,6 +85,7 @@ async fn terminal_loop(
         ..UiState::default()
     };
     let mut snapshot = query.snapshot(&input::filters(&state, &[]))?;
+    refresh_detail_state(query, &state, &mut snapshot)?;
 
     loop {
         input::sync_selection(&mut state, &snapshot);
@@ -104,9 +105,7 @@ async fn terminal_loop(
         tokio::select! {
             _ = tick.tick() => {
                 snapshot = query.snapshot(&input::filters(&state, &snapshot.services))?;
-                if let Some(trace) = snapshot.traces.get(state.selected_trace) {
-                    snapshot.selected_trace = query.trace_detail(&trace.trace_id)?;
-                }
+                refresh_detail_state(query, &state, &mut snapshot)?;
             }
             maybe_event = events.next() => {
                 match maybe_event.transpose()? {
@@ -115,9 +114,7 @@ async fn terminal_loop(
                             break;
                         }
                         snapshot = query.snapshot(&input::filters(&state, &snapshot.services))?;
-                        if let Some(trace) = snapshot.traces.get(state.selected_trace) {
-                            snapshot.selected_trace = query.trace_detail(&trace.trace_id)?;
-                        }
+                        refresh_detail_state(query, &state, &mut snapshot)?;
                     }
                     Some(Event::Mouse(mouse)) => {
                         input::handle_mouse(
@@ -127,9 +124,7 @@ async fn terminal_loop(
                             &snapshot,
                         );
                         snapshot = query.snapshot(&input::filters(&state, &snapshot.services))?;
-                        if let Some(trace) = snapshot.traces.get(state.selected_trace) {
-                            snapshot.selected_trace = query.trace_detail(&trace.trace_id)?;
-                        }
+                        refresh_detail_state(query, &state, &mut snapshot)?;
                     }
                     Some(Event::Resize(_, _)) => {}
                     Some(_) => {}
@@ -139,5 +134,21 @@ async fn terminal_loop(
         }
     }
 
+    Ok(())
+}
+
+fn refresh_detail_state(
+    query: &QueryService,
+    state: &UiState,
+    snapshot: &mut crate::domain::DashboardSnapshot,
+) -> Result<()> {
+    if let Some(trace) = snapshot.traces.get(state.selected_trace) {
+        snapshot.selected_trace = query.trace_detail(&trace.trace_id)?;
+    }
+    if let Some(llm) = snapshot.llm.get(state.selected_llm) {
+        snapshot.selected_llm_timeline = query.llm_timeline(&llm.trace_id, &llm.span_id)?;
+    } else {
+        snapshot.selected_llm_timeline.clear();
+    }
     Ok(())
 }

@@ -4,8 +4,8 @@ use anyhow::Result;
 
 use crate::{
     domain::{
-        LlmSummary, LogSummary, MetricSummary, SpanDetail, SpanEventDetail, SpanLinkDetail,
-        TraceSummary,
+        LlmSummary, LlmTimelineItem, LogSummary, MetricSummary, SpanDetail, SpanEventDetail,
+        SpanLinkDetail, TraceSummary, project_llm_timeline,
     },
     query::{LlmCursor, LogCursor, LogFilters, MetricCursor, Page, PageRequest, TraceCursor},
 };
@@ -516,6 +516,11 @@ impl Store {
             latency_ms: item.latency_ms.unwrap_or(-1.0),
             span_id: item.span_id.clone(),
         }))
+    }
+
+    pub fn llm_timeline(&self, trace_id: &str, span_id: &str) -> Result<Vec<LlmTimelineItem>> {
+        let spans = self.trace_detail(trace_id)?;
+        Ok(project_llm_timeline(&spans, span_id))
     }
 
     fn span_events_by_trace(

@@ -950,6 +950,7 @@ mod tests {
             logs: Vec::new(),
             metrics: Vec::new(),
             llm: Vec::new(),
+            selected_llm_timeline: Vec::new(),
         };
 
         handle_mouse(
@@ -1009,6 +1010,7 @@ mod tests {
                 status: "STATUS_CODE_UNSET".to_string(),
                 raw_json: serde_json::json!({}),
             }],
+            selected_llm_timeline: Vec::new(),
         };
 
         handle_mouse(
@@ -1089,6 +1091,7 @@ mod tests {
             logs: Vec::new(),
             metrics: Vec::new(),
             llm: Vec::new(),
+            selected_llm_timeline: Vec::new(),
         };
 
         handle_mouse(
@@ -1137,6 +1140,7 @@ mod tests {
             logs: Vec::new(),
             metrics: Vec::new(),
             llm: Vec::new(),
+            selected_llm_timeline: Vec::new(),
         }
     }
 }

@@ -3,7 +3,10 @@ use ratatui::{
     text::{Line, Span},
 };
 
-use crate::domain::{DashboardSnapshot, LogSummary, MetricSummary, SpanDetail, truncate};
+use crate::domain::{
+    DashboardSnapshot, LlmTimelineItem, LlmTimelineKind, LogSummary, MetricSummary, SpanDetail,
+    truncate,
+};
 
 use super::{Palette, UiState, traces};
 
@@ -102,7 +105,7 @@ pub(crate) fn llm_detail_lines(
     snapshot
         .llm
         .get(state.selected_llm)
-        .map(|item| build_llm_detail_lines(item, state, palette))
+        .map(|item| build_llm_detail_lines(item, &snapshot.selected_llm_timeline, state, palette))
         .unwrap_or_else(|| vec![Line::raw("No LLM spans yet.")])
 }
 
@@ -205,6 +208,7 @@ pub(crate) fn format_log_body(body: &str) -> Vec<String> {
 
 fn build_llm_detail_lines(
     item: &crate::domain::LlmSummary,
+    timeline: &[LlmTimelineItem],
     state: &UiState,
     palette: Palette,
 ) -> Vec<Line<'static>> {
@@ -290,6 +294,12 @@ fn build_llm_detail_lines(
         }
     }
 
+    if !timeline.is_empty() {
+        lines.push(Line::raw(""));
+        lines.push(section_header("timeline", palette.warning));
+        lines.extend(llm_timeline_lines(timeline, palette));
+    }
+
     lines.push(Line::raw(""));
     lines.push(section_header("normalized", palette.muted));
     lines.extend(
@@ -314,6 +324,82 @@ fn multiline_block(text: &str) -> Vec<String> {
     }
 
     text.lines().map(ToString::to_string).collect()
+}
+
+fn llm_timeline_lines(items: &[LlmTimelineItem], palette: Palette) -> Vec<Line<'static>> {
+    let total_ms = items
+        .iter()
+        .map(|item| item.offset_ms + item.duration_ms.unwrap_or(0.0))
+        .fold(0.0, f64::max)
+        .max(1.0);
+
+    let mut lines = Vec::new();
+    for item in items {
+        let lane = timeline_lane(item, total_ms, 18);
+        let color = match item.kind {
+            LlmTimelineKind::Prompt => palette.accent,
+            LlmTimelineKind::Tool => palette.warning,
+            LlmTimelineKind::Output => palette.success,
+            LlmTimelineKind::Step => palette.muted,
+        };
+        let duration = item
+            .duration_ms
+            .map(|value| format!(" {value:.1}ms"))
+            .unwrap_or_default();
+        lines.push(Line::from(vec![
+            Span::styled(
+                format!("{:>6.1}ms ", item.offset_ms),
+                Style::default().fg(palette.muted),
+            ),
+            Span::styled(lane, Style::default().fg(color)),
+            Span::raw(" "),
+            Span::styled(
+                format!("{} {}", item.kind.label(), item.label),
+                Style::default()
+                    .fg(palette.foreground)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(duration, Style::default().fg(palette.muted)),
+        ]));
+        if let Some(detail) = item.detail.as_deref().filter(|detail| !detail.is_empty()) {
+            lines.push(Line::from(vec![
+                Span::raw("        "),
+                Span::styled(
+                    truncate(&detail.replace('\n', " "), 72),
+                    Style::default().fg(palette.muted),
+                ),
+            ]));
+        }
+    }
+    lines
+}
+
+fn timeline_lane(item: &LlmTimelineItem, total_ms: f64, width: usize) -> String {
+    if width == 0 {
+        return String::new();
+    }
+
+    let start = ((item.offset_ms / total_ms) * width as f64).floor() as usize;
+    let duration = item.duration_ms.unwrap_or(0.0);
+    let extent = if duration <= 0.0 {
+        1
+    } else {
+        ((duration / total_ms) * width as f64).ceil().max(1.0) as usize
+    };
+    let end = (start + extent).min(width);
+    (0..width)
+        .map(|index| {
+            if index >= start && index < end {
+                if matches!(item.kind, LlmTimelineKind::Prompt | LlmTimelineKind::Output) {
+                    '●'
+                } else {
+                    '━'
+                }
+            } else {
+                '·'
+            }
+        })
+        .collect()
 }
 
 fn truncated_block(

@@ -236,6 +236,7 @@ impl QueryService {
             logs,
             metrics,
             llm,
+            selected_llm_timeline: Vec::new(),
         })
     }
 
@@ -299,5 +300,13 @@ impl QueryService {
 
     pub fn trace_detail(&self, trace_id: &str) -> Result<Vec<crate::domain::SpanDetail>> {
         self.store.trace_detail(trace_id)
+    }
+
+    pub fn llm_timeline(
+        &self,
+        trace_id: &str,
+        span_id: &str,
+    ) -> Result<Vec<crate::domain::LlmTimelineItem>> {
+        self.store.llm_timeline(trace_id, span_id)
     }
 }

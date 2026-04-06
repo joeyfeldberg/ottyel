@@ -129,6 +129,35 @@ pub struct LlmSummary {
     pub raw_json: Value,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum LlmTimelineKind {
+    Prompt,
+    Step,
+    Tool,
+    Output,
+}
+
+impl LlmTimelineKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Prompt => "prompt",
+            Self::Step => "step",
+            Self::Tool => "tool",
+            Self::Output => "output",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmTimelineItem {
+    pub kind: LlmTimelineKind,
+    pub label: String,
+    pub detail: Option<String>,
+    pub offset_ms: f64,
+    pub duration_ms: Option<f64>,
+    pub status: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OverviewStats {
     pub service_count: usize,
@@ -148,6 +177,7 @@ pub struct DashboardSnapshot {
     pub logs: Vec<LogSummary>,
     pub metrics: Vec<MetricSummary>,
     pub llm: Vec<LlmSummary>,
+    pub selected_llm_timeline: Vec<LlmTimelineItem>,
 }
 
 pub fn attributes_to_map(attributes: &[KeyValue]) -> AttributeMap {
@@ -474,6 +504,136 @@ pub fn truncate(text: &str, max_chars: usize) -> String {
     format!("{truncated}…")
 }
 
+pub fn project_llm_timeline(spans: &[SpanDetail], llm_span_id: &str) -> Vec<LlmTimelineItem> {
+    let Some(llm_span) = spans.iter().find(|span| span.span_id == llm_span_id) else {
+        return Vec::new();
+    };
+
+    let mut timeline = Vec::new();
+    if let Some(prompt) = llm_span
+        .llm
+        .as_ref()
+        .and_then(|llm| llm.prompt_preview.as_deref())
+        .filter(|prompt| !prompt.is_empty())
+    {
+        timeline.push(LlmTimelineItem {
+            kind: LlmTimelineKind::Prompt,
+            label: "input".to_string(),
+            detail: Some(prompt.to_string()),
+            offset_ms: 0.0,
+            duration_ms: None,
+            status: None,
+        });
+    }
+
+    let descendants = llm_descendants(spans, llm_span_id);
+    let mut rendered_tool = false;
+    for span in descendants {
+        let tool_name = span_tool_name(span);
+        let kind = if tool_name.is_some() {
+            rendered_tool = true;
+            LlmTimelineKind::Tool
+        } else {
+            LlmTimelineKind::Step
+        };
+        timeline.push(LlmTimelineItem {
+            kind,
+            label: tool_name.unwrap_or_else(|| span.span_name.clone()),
+            detail: span_tool_detail(span),
+            offset_ms: span_offset_ms(span, llm_span),
+            duration_ms: Some(span.duration_ms.max(0.0)),
+            status: Some(span.status_code.clone()),
+        });
+    }
+
+    if !rendered_tool
+        && let Some(llm) = &llm_span.llm
+        && let Some(tool_name) = llm.tool_name.as_ref().filter(|name| !name.is_empty())
+    {
+        timeline.push(LlmTimelineItem {
+            kind: LlmTimelineKind::Tool,
+            label: tool_name.clone(),
+            detail: llm.tool_args.clone(),
+            offset_ms: (llm_span.duration_ms.max(1.0) * 0.5).min(llm_span.duration_ms.max(0.0)),
+            duration_ms: None,
+            status: None,
+        });
+    }
+
+    if let Some(output) = llm_span
+        .llm
+        .as_ref()
+        .and_then(|llm| llm.output_preview.as_deref())
+        .filter(|output| !output.is_empty())
+    {
+        timeline.push(LlmTimelineItem {
+            kind: LlmTimelineKind::Output,
+            label: "output".to_string(),
+            detail: Some(output.to_string()),
+            offset_ms: llm_span.duration_ms.max(0.0),
+            duration_ms: None,
+            status: None,
+        });
+    }
+
+    timeline.sort_by(|left, right| {
+        left.offset_ms
+            .partial_cmp(&right.offset_ms)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then_with(|| left.kind.label().cmp(right.kind.label()))
+    });
+    timeline
+}
+
+fn llm_descendants<'a>(spans: &'a [SpanDetail], llm_span_id: &str) -> Vec<&'a SpanDetail> {
+    let mut descendants = Vec::new();
+    let mut frontier = vec![llm_span_id];
+
+    while let Some(parent_id) = frontier.pop() {
+        for span in spans.iter().filter(|span| span.parent_span_id == parent_id) {
+            frontier.push(span.span_id.as_str());
+            descendants.push(span);
+        }
+    }
+
+    descendants.sort_by(|left, right| {
+        left.start_time_unix_nano
+            .cmp(&right.start_time_unix_nano)
+            .then(left.span_name.cmp(&right.span_name))
+    });
+    descendants
+}
+
+fn span_offset_ms(span: &SpanDetail, llm_span: &SpanDetail) -> f64 {
+    ((span.start_time_unix_nano - llm_span.start_time_unix_nano) as f64 / 1_000_000.0).max(0.0)
+}
+
+fn span_tool_name(span: &SpanDetail) -> Option<String> {
+    span.attributes
+        .get("tool.name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            span.llm
+                .as_ref()
+                .and_then(|llm| llm.tool_name.clone())
+                .filter(|name| !name.is_empty())
+        })
+        .or_else(|| {
+            span.span_name
+                .contains("tool")
+                .then(|| span.span_name.clone())
+        })
+}
+
+fn span_tool_detail(span: &SpanDetail) -> Option<String> {
+    span.attributes
+        .get("tool.arguments")
+        .and_then(value_preview)
+        .or_else(|| span.llm.as_ref().and_then(|llm| llm.tool_args.clone()))
+}
+
 mod hex {
     pub fn encode(bytes: &[u8]) -> String {
         bytes.iter().map(|byte| format!("{byte:02x}")).collect()
@@ -484,7 +644,9 @@ mod hex {
 mod tests {
     use serde_json::json;
 
-    use super::{AttributeMap, extract_llm_attributes};
+    use super::{
+        AttributeMap, LlmAttributes, SpanDetail, extract_llm_attributes, project_llm_timeline,
+    };
 
     #[test]
     fn llm_attributes_normalize_openinference_keys() {
@@ -581,5 +743,62 @@ mod tests {
                 .is_some_and(|value| value.contains("customer_id"))
         );
         assert_eq!(llm.latency_ms, Some(1609.3));
+    }
+
+    #[test]
+    fn project_llm_timeline_includes_prompt_tool_and_output() {
+        let spans = vec![
+            SpanDetail {
+                trace_id: "trace-1".to_string(),
+                span_id: "llm".to_string(),
+                parent_span_id: "root".to_string(),
+                service_name: "api".to_string(),
+                span_name: "chat.completion".to_string(),
+                span_kind: "INTERNAL".to_string(),
+                status_code: "STATUS_CODE_OK".to_string(),
+                start_time_unix_nano: 1_000,
+                end_time_unix_nano: 51_000_000,
+                duration_ms: 51.0,
+                resource_attributes: Default::default(),
+                attributes: Default::default(),
+                events: Vec::new(),
+                links: Vec::new(),
+                llm: Some(LlmAttributes {
+                    prompt_preview: Some("hello".to_string()),
+                    output_preview: Some("world".to_string()),
+                    tool_name: Some("lookup_customer".to_string()),
+                    tool_args: Some("{\"id\":\"123\"}".to_string()),
+                    ..LlmAttributes::default()
+                }),
+            },
+            SpanDetail {
+                trace_id: "trace-1".to_string(),
+                span_id: "tool".to_string(),
+                parent_span_id: "llm".to_string(),
+                service_name: "api".to_string(),
+                span_name: "tool.lookup_customer".to_string(),
+                span_kind: "INTERNAL".to_string(),
+                status_code: "STATUS_CODE_OK".to_string(),
+                start_time_unix_nano: 11_000_000,
+                end_time_unix_nano: 21_000_000,
+                duration_ms: 10.0,
+                resource_attributes: Default::default(),
+                attributes: AttributeMap::from([
+                    ("tool.name".to_string(), json!("lookup_customer")),
+                    ("tool.arguments".to_string(), json!("{\"id\":\"123\"}")),
+                ]),
+                events: Vec::new(),
+                links: Vec::new(),
+                llm: None,
+            },
+        ];
+
+        let timeline = project_llm_timeline(&spans, "llm");
+
+        assert_eq!(timeline.len(), 3);
+        assert_eq!(timeline[0].kind.label(), "prompt");
+        assert_eq!(timeline[1].kind.label(), "tool");
+        assert_eq!(timeline[1].label, "lookup_customer");
+        assert_eq!(timeline[2].kind.label(), "output");
     }
 }
