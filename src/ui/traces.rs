@@ -276,6 +276,34 @@ pub fn first_llm_trace_index(snapshot: &DashboardSnapshot, state: &UiState) -> O
     rows.iter().position(|row| row.span.llm.is_some())
 }
 
+pub(crate) fn trace_tree_hit(
+    snapshot: &DashboardSnapshot,
+    state: &UiState,
+    area: Rect,
+    column: u16,
+    row: u16,
+) -> Option<(usize, bool)> {
+    let content_top = area.y.saturating_add(1);
+    let content_bottom = area.y.saturating_add(area.height).saturating_sub(1);
+    if row < content_top || row >= content_bottom {
+        return None;
+    }
+
+    let content_row = usize::from(row - content_top);
+    let tree_index = state
+        .trace_tree_scroll
+        .saturating_add(content_row)
+        .saturating_sub(3);
+    let rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
+    let tree_row = rows.get(tree_index)?;
+    let disclosure_end = area
+        .x
+        .saturating_add(1)
+        .saturating_add(u16::try_from(tree_row.depth.saturating_mul(2) + 2).unwrap_or(u16::MAX));
+    let clicked_disclosure = tree_row.has_children && column < disclosure_end;
+    Some((tree_index, clicked_disclosure))
+}
+
 pub(crate) fn trace_tree_selected_line(state: &UiState, tree_rows: &[TraceTreeRow]) -> usize {
     const TREE_HEADER_LINES: usize = 3;
     if tree_rows.is_empty() {

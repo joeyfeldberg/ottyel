@@ -1,4 +1,5 @@
-use crossterm::event::{KeyCode, KeyModifiers};
+use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+use ratatui::layout::Rect;
 
 use crate::{
     commands::{self, PaletteAction},
@@ -45,6 +46,16 @@ pub(super) fn handle_key(
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return true,
         KeyCode::Char('x') if Tab::ALL[state.active_tab] == Tab::Logs => {
             state.log_search_mode = true;
+        }
+        KeyCode::Char('i')
+            if Tab::ALL[state.active_tab] == Tab::Llm && state.llm_focus == PaneFocus::Detail =>
+        {
+            state.llm_expand_prompt = !state.llm_expand_prompt;
+        }
+        KeyCode::Char('o')
+            if Tab::ALL[state.active_tab] == Tab::Llm && state.llm_focus == PaneFocus::Detail =>
+        {
+            state.llm_expand_output = !state.llm_expand_output;
         }
         KeyCode::Char('q') => return true,
         KeyCode::Char('f') => {
@@ -113,6 +124,30 @@ pub(super) fn handle_key(
     false
 }
 
+pub(super) fn handle_mouse(
+    event: MouseEvent,
+    root: Rect,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) {
+    if state.show_command_palette || state.show_help || state.search_mode || state.log_search_mode {
+        return;
+    }
+
+    match event.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            handle_left_click(event.column, event.row, root, state, snapshot)
+        }
+        MouseEventKind::ScrollDown => {
+            handle_scroll(1, event.column, event.row, root, state, snapshot)
+        }
+        MouseEventKind::ScrollUp => {
+            handle_scroll(-1, event.column, event.row, root, state, snapshot)
+        }
+        _ => {}
+    }
+}
+
 pub(super) fn sync_selection(state: &mut UiState, snapshot: &DashboardSnapshot) {
     state.selected_trace = state
         .selected_trace
@@ -168,6 +203,302 @@ pub(super) fn filters(state: &UiState, services: &[String]) -> QueryFilters {
                 .then(|| state.log_search_query.clone()),
         },
     }
+}
+
+fn handle_left_click(
+    column: u16,
+    row: u16,
+    root: Rect,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) {
+    let [tabs_area, _, body, _] = crate::ui::geometry::root_sections(root);
+    if crate::ui::geometry::contains(tabs_area, column, row) {
+        click_tab(column, tabs_area, state);
+        return;
+    }
+    if !crate::ui::geometry::contains(body, column, row) {
+        return;
+    }
+
+    match Tab::ALL[state.active_tab] {
+        Tab::Overview => {}
+        Tab::Traces => handle_trace_click(column, row, body, state, snapshot),
+        Tab::Logs => handle_logs_click(column, row, body, state, snapshot),
+        Tab::Metrics => handle_metrics_click(column, row, body, state, snapshot),
+        Tab::Llm => handle_llm_click(column, row, body, state, snapshot),
+    }
+}
+
+fn click_tab(column: u16, tabs_area: Rect, state: &mut UiState) {
+    let inner_x = tabs_area.x.saturating_add(1);
+    let inner_right = tabs_area
+        .x
+        .saturating_add(tabs_area.width)
+        .saturating_sub(1);
+    if tabs_area.width <= 2 || column < inner_x || column >= inner_right {
+        return;
+    }
+
+    let mut x = inner_x;
+    for (index, tab) in Tab::ALL.iter().enumerate() {
+        let title_width = u16::try_from(tab.title().chars().count()).unwrap_or(u16::MAX);
+        let tab_start = x;
+        let tab_end = x
+            .saturating_add(1)
+            .saturating_add(title_width)
+            .saturating_add(1);
+        if column >= tab_start && column < tab_end {
+            state.active_tab = index;
+            break;
+        }
+
+        x = tab_end;
+        if index + 1 < Tab::ALL.len() {
+            x = x.saturating_add(1);
+        }
+        if x >= inner_right {
+            break;
+        }
+    }
+}
+
+fn handle_scroll(
+    delta: isize,
+    column: u16,
+    row: u16,
+    root: Rect,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) {
+    let body = crate::ui::geometry::body_area(root);
+    if !crate::ui::geometry::contains(body, column, row) {
+        return;
+    }
+
+    match Tab::ALL[state.active_tab] {
+        Tab::Overview => {}
+        Tab::Traces => handle_trace_scroll(delta, column, row, body, state, snapshot),
+        Tab::Logs => handle_logs_scroll(delta, column, row, body, state, snapshot),
+        Tab::Metrics => handle_metrics_scroll(delta, column, row, body, state, snapshot),
+        Tab::Llm => handle_llm_scroll(delta, column, row, body, state, snapshot),
+    }
+}
+
+fn handle_trace_click(
+    column: u16,
+    row: u16,
+    body: Rect,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) {
+    if state.trace_view_mode == TraceViewMode::List {
+        if let Some(index) = table_row_at(body, row, snapshot.traces.len()) {
+            let was_selected = index == state.selected_trace;
+            select_trace(index, state);
+            if was_selected {
+                open_selected_trace(state);
+            }
+        }
+        return;
+    }
+
+    let [tree_area, detail_area] = crate::ui::geometry::trace_detail_sections(body);
+    if crate::ui::geometry::contains(detail_area, column, row) {
+        state.trace_focus = TraceFocus::TraceDetail;
+        return;
+    }
+    if !crate::ui::geometry::contains(tree_area, column, row) {
+        return;
+    }
+
+    state.trace_focus = TraceFocus::TraceTree;
+    if let Some((index, clicked_disclosure)) =
+        crate::ui::trace_tree_hit(snapshot, state, tree_area, column, row)
+    {
+        state.selected_trace_span = index;
+        state.trace_detail_scroll = 0;
+        if clicked_disclosure {
+            toggle_selected_trace_subtree(state, snapshot);
+        }
+    }
+}
+
+fn handle_logs_click(
+    column: u16,
+    row: u16,
+    body: Rect,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) {
+    let [feed_area, detail_area] = crate::ui::geometry::log_sections(body);
+    if crate::ui::geometry::contains(detail_area, column, row) {
+        state.logs_focus = PaneFocus::Detail;
+        return;
+    }
+    if !crate::ui::geometry::contains(feed_area, column, row) {
+        return;
+    }
+
+    state.logs_focus = PaneFocus::Primary;
+    state.log_tail = false;
+    if let Some(index) = table_row_at(feed_area, row, snapshot.logs.len()) {
+        state.selected_log = index;
+        state.log_detail_scroll = 0;
+    }
+}
+
+fn handle_metrics_click(
+    column: u16,
+    row: u16,
+    body: Rect,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) {
+    let [feed_area, right_area] = crate::ui::geometry::metric_sections(body);
+    let detail_area = crate::ui::geometry::metric_right_sections(right_area)[1];
+    if crate::ui::geometry::contains(detail_area, column, row) {
+        state.metrics_focus = PaneFocus::Detail;
+        return;
+    }
+    if !crate::ui::geometry::contains(feed_area, column, row) {
+        return;
+    }
+
+    state.metrics_focus = PaneFocus::Primary;
+    if let Some(index) = table_row_at(feed_area, row, snapshot.metrics.len()) {
+        state.selected_metric = index;
+        state.metric_detail_scroll = 0;
+    }
+}
+
+fn handle_llm_click(
+    column: u16,
+    row: u16,
+    body: Rect,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) {
+    let [feed_area, detail_area] = crate::ui::geometry::llm_sections(body);
+    if crate::ui::geometry::contains(detail_area, column, row) {
+        state.llm_focus = PaneFocus::Detail;
+        return;
+    }
+    if !crate::ui::geometry::contains(feed_area, column, row) {
+        return;
+    }
+
+    state.llm_focus = PaneFocus::Primary;
+    if let Some(index) = table_row_at(feed_area, row, snapshot.llm.len()) {
+        state.selected_llm = index;
+        state.llm_detail_scroll = 0;
+        state.llm_expand_prompt = false;
+        state.llm_expand_output = false;
+    }
+}
+
+fn handle_trace_scroll(
+    delta: isize,
+    column: u16,
+    row: u16,
+    body: Rect,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) {
+    if state.trace_view_mode == TraceViewMode::List {
+        if crate::ui::geometry::contains(body, column, row) {
+            state.trace_focus = TraceFocus::TraceList;
+            move_selection(delta, state, snapshot);
+        }
+        return;
+    }
+
+    let [tree_area, detail_area] = crate::ui::geometry::trace_detail_sections(body);
+    if crate::ui::geometry::contains(detail_area, column, row) {
+        state.trace_focus = TraceFocus::TraceDetail;
+        scroll_detail(delta as i16, state);
+    } else if crate::ui::geometry::contains(tree_area, column, row) {
+        state.trace_focus = TraceFocus::TraceTree;
+        move_selection(delta, state, snapshot);
+    }
+}
+
+fn handle_logs_scroll(
+    delta: isize,
+    column: u16,
+    row: u16,
+    body: Rect,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) {
+    let [feed_area, detail_area] = crate::ui::geometry::log_sections(body);
+    if crate::ui::geometry::contains(detail_area, column, row) {
+        state.logs_focus = PaneFocus::Detail;
+        scroll_detail(delta as i16, state);
+    } else if crate::ui::geometry::contains(feed_area, column, row) {
+        state.logs_focus = PaneFocus::Primary;
+        move_selection(delta, state, snapshot);
+    }
+}
+
+fn handle_metrics_scroll(
+    delta: isize,
+    column: u16,
+    row: u16,
+    body: Rect,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) {
+    let [feed_area, right_area] = crate::ui::geometry::metric_sections(body);
+    let detail_area = crate::ui::geometry::metric_right_sections(right_area)[1];
+    if crate::ui::geometry::contains(detail_area, column, row) {
+        state.metrics_focus = PaneFocus::Detail;
+        scroll_detail(delta as i16, state);
+    } else if crate::ui::geometry::contains(feed_area, column, row) {
+        state.metrics_focus = PaneFocus::Primary;
+        move_selection(delta, state, snapshot);
+    }
+}
+
+fn handle_llm_scroll(
+    delta: isize,
+    column: u16,
+    row: u16,
+    body: Rect,
+    state: &mut UiState,
+    snapshot: &DashboardSnapshot,
+) {
+    let [feed_area, detail_area] = crate::ui::geometry::llm_sections(body);
+    if crate::ui::geometry::contains(detail_area, column, row) {
+        state.llm_focus = PaneFocus::Detail;
+        scroll_detail(delta as i16, state);
+    } else if crate::ui::geometry::contains(feed_area, column, row) {
+        state.llm_focus = PaneFocus::Primary;
+        move_selection(delta, state, snapshot);
+    }
+}
+
+fn table_row_at(area: Rect, row: u16, item_count: usize) -> Option<usize> {
+    let content_top = area.y.saturating_add(2);
+    let content_bottom = area.y.saturating_add(area.height).saturating_sub(1);
+    if row < content_top || row >= content_bottom {
+        return None;
+    }
+
+    let index = usize::from(row - content_top);
+    (index < item_count).then_some(index)
+}
+
+fn select_trace(index: usize, state: &mut UiState) {
+    if state.selected_trace == index {
+        return;
+    }
+
+    state.selected_trace = index;
+    state.selected_trace_span = 0;
+    state.trace_tree_scroll = 0;
+    state.trace_detail_scroll = 0;
+    state.collapsed_trace_spans.clear();
 }
 
 fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapshot) {
@@ -232,6 +563,8 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapsho
                 move_index(&mut state.selected_llm, snapshot.llm.len(), delta);
                 if state.selected_llm != previous {
                     state.llm_detail_scroll = 0;
+                    state.llm_expand_prompt = false;
+                    state.llm_expand_output = false;
                 }
             }
             PaneFocus::Detail => scroll_detail(delta as i16, state),
@@ -534,4 +867,239 @@ fn execute_palette_action(
         PaletteAction::Quit => return true,
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::{KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
+    use ratatui::layout::Rect;
+
+    use super::handle_mouse;
+    use crate::{
+        domain::{DashboardSnapshot, OverviewStats, TraceSummary},
+        ui::{PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
+    };
+
+    #[test]
+    fn clicking_selected_trace_opens_trace_detail() {
+        let mut state = UiState::default();
+        state.active_tab = Tab::Traces as usize;
+        let snapshot = snapshot_with_trace();
+
+        handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 4,
+                row: 6,
+                modifiers: KeyModifiers::empty(),
+            },
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(state.trace_view_mode, TraceViewMode::Detail);
+        assert_eq!(state.trace_focus, TraceFocus::TraceTree);
+    }
+
+    #[test]
+    fn clicking_tab_switches_active_tab() {
+        let mut state = UiState::default();
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: empty_overview(),
+            traces: Vec::new(),
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+        };
+
+        handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 38,
+                row: 1,
+                modifiers: KeyModifiers::empty(),
+            },
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(state.active_tab, Tab::Metrics as usize);
+    }
+
+    #[test]
+    fn scrolling_llm_detail_uses_mouse_wheel() {
+        let mut state = UiState {
+            active_tab: Tab::Llm as usize,
+            llm_focus: PaneFocus::Detail,
+            ..UiState::default()
+        };
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: OverviewStats {
+                llm_count: 1,
+                ..empty_overview()
+            },
+            traces: Vec::new(),
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: vec![crate::domain::LlmSummary {
+                trace_id: "trace-1".to_string(),
+                span_id: "span-1".to_string(),
+                service_name: "api".to_string(),
+                provider: "openai".to_string(),
+                model: "gpt-5.4".to_string(),
+                operation: "chat".to_string(),
+                span_kind: None,
+                prompt_preview: Some(
+                    (1..=20)
+                        .map(|i| format!("line {i}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                output_preview: None,
+                tool_name: None,
+                tool_args: None,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                cost: None,
+                latency_ms: None,
+                status: "STATUS_CODE_UNSET".to_string(),
+                raw_json: serde_json::json!({}),
+            }],
+        };
+
+        handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 90,
+                row: 10,
+                modifiers: KeyModifiers::empty(),
+            },
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(state.llm_focus, PaneFocus::Detail);
+        assert_eq!(state.llm_detail_scroll, 1);
+    }
+
+    #[test]
+    fn clicking_trace_disclosure_toggles_collapsed_subtree() {
+        let mut state = UiState {
+            active_tab: Tab::Traces as usize,
+            trace_view_mode: TraceViewMode::Detail,
+            trace_focus: TraceFocus::TraceTree,
+            ..UiState::default()
+        };
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: OverviewStats {
+                trace_count: 1,
+                ..empty_overview()
+            },
+            traces: vec![TraceSummary {
+                trace_id: "trace-1".to_string(),
+                service_name: "api".to_string(),
+                root_name: "request".to_string(),
+                span_count: 2,
+                error_count: 0,
+                duration_ms: 42.0,
+                started_at_unix_nano: 1,
+            }],
+            selected_trace: vec![
+                crate::domain::SpanDetail {
+                    trace_id: "trace-1".to_string(),
+                    span_id: "root".to_string(),
+                    parent_span_id: String::new(),
+                    service_name: "api".to_string(),
+                    span_name: "request".to_string(),
+                    span_kind: "SERVER".to_string(),
+                    status_code: "STATUS_CODE_OK".to_string(),
+                    start_time_unix_nano: 1,
+                    end_time_unix_nano: 10,
+                    duration_ms: 9.0,
+                    resource_attributes: Default::default(),
+                    attributes: Default::default(),
+                    events: Vec::new(),
+                    links: Vec::new(),
+                    llm: None,
+                },
+                crate::domain::SpanDetail {
+                    trace_id: "trace-1".to_string(),
+                    span_id: "child".to_string(),
+                    parent_span_id: "root".to_string(),
+                    service_name: "api".to_string(),
+                    span_name: "child".to_string(),
+                    span_kind: "INTERNAL".to_string(),
+                    status_code: "STATUS_CODE_OK".to_string(),
+                    start_time_unix_nano: 2,
+                    end_time_unix_nano: 9,
+                    duration_ms: 7.0,
+                    resource_attributes: Default::default(),
+                    attributes: Default::default(),
+                    events: Vec::new(),
+                    links: Vec::new(),
+                    llm: None,
+                },
+            ],
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+        };
+
+        handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 1,
+                row: 8,
+                modifiers: KeyModifiers::empty(),
+            },
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert!(state.collapsed_trace_spans.contains("root"));
+    }
+
+    fn empty_overview() -> OverviewStats {
+        OverviewStats {
+            service_count: 0,
+            trace_count: 0,
+            error_span_count: 0,
+            log_count: 0,
+            metric_count: 0,
+            llm_count: 0,
+        }
+    }
+
+    fn snapshot_with_trace() -> DashboardSnapshot {
+        DashboardSnapshot {
+            services: Vec::new(),
+            overview: OverviewStats {
+                trace_count: 1,
+                ..empty_overview()
+            },
+            traces: vec![TraceSummary {
+                trace_id: "trace-1".to_string(),
+                service_name: "api".to_string(),
+                root_name: "request".to_string(),
+                span_count: 3,
+                error_count: 0,
+                duration_ms: 42.0,
+                started_at_unix_nano: 1,
+            }],
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+        }
+    }
 }

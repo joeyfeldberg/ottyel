@@ -1,15 +1,15 @@
 mod chrome;
 mod details;
-mod geometry;
+pub(crate) mod geometry;
 mod overview;
 mod panes;
 mod state;
 mod traces;
 
 pub use state::{Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState};
-pub use traces::{
+pub(crate) use traces::{
     first_llm_trace_index, next_error_trace_index, parent_trace_index, previous_error_trace_index,
-    root_trace_index, selected_trace_tree_span, visible_trace_tree_len,
+    root_trace_index, selected_trace_tree_span, trace_tree_hit, visible_trace_tree_len,
 };
 
 use ratatui::{

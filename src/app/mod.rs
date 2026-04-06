@@ -4,7 +4,7 @@ use std::{io, time::Duration};
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{Event, EventStream, KeyEventKind},
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -56,7 +56,7 @@ fn doctor(args: DoctorArgs) -> Result<()> {
 async fn run_terminal(query: &QueryService, args: &ServeArgs) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen)?;
+    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
@@ -64,7 +64,11 @@ async fn run_terminal(query: &QueryService, args: &ServeArgs) -> Result<()> {
     let terminal_result = terminal_loop(&mut terminal, query, args).await;
 
     disable_raw_mode()?;
-    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    execute!(
+        terminal.backend_mut(),
+        DisableMouseCapture,
+        LeaveAlternateScreen
+    )?;
     terminal.show_cursor()?;
     terminal_result
 }
@@ -107,6 +111,18 @@ async fn terminal_loop(
                         if input::handle_key(key.code, key.modifiers, &mut state, &snapshot) {
                             break;
                         }
+                        snapshot = query.snapshot(&input::filters(&state, &snapshot.services))?;
+                        if let Some(trace) = snapshot.traces.get(state.selected_trace) {
+                            snapshot.selected_trace = query.trace_detail(&trace.trace_id)?;
+                        }
+                    }
+                    Some(Event::Mouse(mouse)) => {
+                        input::handle_mouse(
+                            mouse,
+                            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                            &mut state,
+                            &snapshot,
+                        );
                         snapshot = query.snapshot(&input::filters(&state, &snapshot.services))?;
                         if let Some(trace) = snapshot.traces.get(state.selected_trace) {
                             snapshot.selected_trace = query.trace_detail(&trace.trace_id)?;

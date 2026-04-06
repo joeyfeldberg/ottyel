@@ -1,7 +1,7 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
-pub(crate) fn body_area(root: Rect) -> Rect {
-    Layout::default()
+pub(crate) fn root_sections(root: Rect) -> [Rect; 4] {
+    let split = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Length(3),
@@ -9,7 +9,19 @@ pub(crate) fn body_area(root: Rect) -> Rect {
             Constraint::Min(10),
             Constraint::Length(1),
         ])
-        .split(root)[2]
+        .split(root);
+    [split[0], split[1], split[2], split[3]]
+}
+
+pub(crate) fn body_area(root: Rect) -> Rect {
+    root_sections(root)[2]
+}
+
+pub(crate) fn contains(area: Rect, column: u16, row: u16) -> bool {
+    column >= area.x
+        && column < area.x.saturating_add(area.width)
+        && row >= area.y
+        && row < area.y.saturating_add(area.height)
 }
 
 pub(crate) fn trace_detail_sections(area: Rect) -> [Rect; 2] {

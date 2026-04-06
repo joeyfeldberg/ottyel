@@ -167,7 +167,7 @@ pub(crate) fn footer_text(state: &UiState) -> String {
                 "llm: j/k move | l/right detail | : commands | ? help | s service | t window | / global search | q quit"
                     .to_string()
             } else {
-                "model detail: j/k scroll | esc/h/left feed | : commands | ? help | s service | t window | / global search | q quit"
+                "model detail: j/k scroll | i/o toggle blocks | esc/h/left feed | : commands | ? help | q quit"
                     .to_string()
             }
         }
@@ -215,6 +215,7 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
         Line::raw("  s                cycle service filter"),
         Line::raw("  t                cycle time window"),
         Line::raw("  ?                open/close help"),
+        Line::raw("  mouse            click to focus/select, wheel to scroll"),
         Line::raw("  q                quit"),
         Line::raw(""),
     ];
@@ -294,6 +295,8 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
             } else {
                 lines.push(Line::raw("model detail"));
                 lines.push(Line::raw("  j / k            scroll detail"));
+                lines.push(Line::raw("  i                expand or collapse prompt"));
+                lines.push(Line::raw("  o                expand or collapse output"));
                 lines.push(Line::raw("  esc / h / left   back to llm inspector"));
             }
         }

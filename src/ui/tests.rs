@@ -166,6 +166,8 @@ fn ui_state_defaults_to_trace_list_focus() {
     assert_eq!(state.log_detail_scroll, 0);
     assert_eq!(state.metric_detail_scroll, 0);
     assert_eq!(state.llm_detail_scroll, 0);
+    assert!(!state.llm_expand_prompt);
+    assert!(!state.llm_expand_output);
     assert_eq!(state.time_window, TimeWindow::TwentyFourHours);
     assert!(!state.search_mode);
     assert!(state.search_query.is_empty());
@@ -353,6 +355,147 @@ fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
         rendered
             .iter()
             .any(|line| line.contains("\"provider\": \"openai\""))
+    );
+}
+
+#[test]
+fn llm_detail_lines_truncate_prompt_and_output_by_default() {
+    let long_prompt = (1..=12)
+        .map(|index| format!("prompt line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let long_output = (1..=11)
+        .map(|index| format!("output line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let snapshot = crate::domain::DashboardSnapshot {
+        services: Vec::new(),
+        overview: crate::domain::OverviewStats {
+            service_count: 0,
+            trace_count: 0,
+            error_span_count: 0,
+            log_count: 0,
+            metric_count: 0,
+            llm_count: 1,
+        },
+        traces: Vec::new(),
+        selected_trace: Vec::new(),
+        logs: Vec::new(),
+        metrics: Vec::new(),
+        llm: vec![LlmSummary {
+            trace_id: "trace-1".to_string(),
+            span_id: "span-1".to_string(),
+            service_name: "api".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            operation: "chat".to_string(),
+            span_kind: None,
+            prompt_preview: Some(long_prompt),
+            output_preview: Some(long_output),
+            tool_name: None,
+            tool_args: None,
+            input_tokens: Some(11),
+            output_tokens: Some(7),
+            total_tokens: Some(18),
+            cost: None,
+            latency_ms: Some(42.5),
+            status: "STATUS_CODE_OK".to_string(),
+            raw_json: json!({}),
+        }],
+    };
+
+    let rendered = llm_detail_lines(
+        &snapshot,
+        &UiState::default(),
+        Palette::from_theme(Theme::Ember),
+    )
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.contains("prompt line 8")));
+    assert!(!rendered.iter().any(|line| line.contains("prompt line 9")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("press i to expand"))
+    );
+    assert!(rendered.iter().any(|line| line.contains("output line 8")));
+    assert!(!rendered.iter().any(|line| line.contains("output line 9")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("press o to expand"))
+    );
+}
+
+#[test]
+fn llm_detail_lines_expand_prompt_and_output_when_toggled() {
+    let long_prompt = (1..=12)
+        .map(|index| format!("prompt line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let long_output = (1..=11)
+        .map(|index| format!("output line {index}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let snapshot = crate::domain::DashboardSnapshot {
+        services: Vec::new(),
+        overview: crate::domain::OverviewStats {
+            service_count: 0,
+            trace_count: 0,
+            error_span_count: 0,
+            log_count: 0,
+            metric_count: 0,
+            llm_count: 1,
+        },
+        traces: Vec::new(),
+        selected_trace: Vec::new(),
+        logs: Vec::new(),
+        metrics: Vec::new(),
+        llm: vec![LlmSummary {
+            trace_id: "trace-1".to_string(),
+            span_id: "span-1".to_string(),
+            service_name: "api".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            operation: "chat".to_string(),
+            span_kind: None,
+            prompt_preview: Some(long_prompt),
+            output_preview: Some(long_output),
+            tool_name: None,
+            tool_args: None,
+            input_tokens: Some(11),
+            output_tokens: Some(7),
+            total_tokens: Some(18),
+            cost: None,
+            latency_ms: Some(42.5),
+            status: "STATUS_CODE_OK".to_string(),
+            raw_json: json!({}),
+        }],
+    };
+    let state = UiState {
+        llm_expand_prompt: true,
+        llm_expand_output: true,
+        ..UiState::default()
+    };
+
+    let rendered = llm_detail_lines(&snapshot, &state, Palette::from_theme(Theme::Ember))
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.contains("prompt line 12")));
+    assert!(rendered.iter().any(|line| line.contains("output line 11")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("press i to collapse"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("press o to collapse"))
     );
 }
 

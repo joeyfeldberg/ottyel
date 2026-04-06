@@ -7,6 +7,8 @@ use crate::domain::{DashboardSnapshot, LogSummary, MetricSummary, SpanDetail, tr
 
 use super::{Palette, UiState, traces};
 
+const LLM_PREVIEW_LINE_LIMIT: usize = 8;
+
 pub(crate) fn selected_metric_series(
     snapshot: &DashboardSnapshot,
     selected_index: usize,
@@ -100,7 +102,7 @@ pub(crate) fn llm_detail_lines(
     snapshot
         .llm
         .get(state.selected_llm)
-        .map(|item| build_llm_detail_lines(item, palette))
+        .map(|item| build_llm_detail_lines(item, state, palette))
         .unwrap_or_else(|| vec![Line::raw("No LLM spans yet.")])
 }
 
@@ -203,6 +205,7 @@ pub(crate) fn format_log_body(body: &str) -> Vec<String> {
 
 fn build_llm_detail_lines(
     item: &crate::domain::LlmSummary,
+    state: &UiState,
     palette: Palette,
 ) -> Vec<Line<'static>> {
     let mut lines = vec![
@@ -242,7 +245,17 @@ fn build_llm_detail_lines(
     {
         lines.push(Line::raw(""));
         lines.push(section_header("prompt", palette.accent));
-        lines.extend(multiline_block(prompt).into_iter().map(Line::from));
+        lines.extend(
+            truncated_block(
+                prompt,
+                state.llm_expand_prompt,
+                LLM_PREVIEW_LINE_LIMIT,
+                'i',
+                palette.muted,
+            )
+            .into_iter()
+            .map(Line::from),
+        );
     }
 
     if let Some(output) = item
@@ -252,7 +265,17 @@ fn build_llm_detail_lines(
     {
         lines.push(Line::raw(""));
         lines.push(section_header("output", palette.success));
-        lines.extend(multiline_block(output).into_iter().map(Line::from));
+        lines.extend(
+            truncated_block(
+                output,
+                state.llm_expand_output,
+                LLM_PREVIEW_LINE_LIMIT,
+                'o',
+                palette.muted,
+            )
+            .into_iter()
+            .map(Line::from),
+        );
     }
 
     if item.tool_name.is_some() || item.tool_args.is_some() {
@@ -291,6 +314,38 @@ fn multiline_block(text: &str) -> Vec<String> {
     }
 
     text.lines().map(ToString::to_string).collect()
+}
+
+fn truncated_block(
+    text: &str,
+    expanded: bool,
+    line_limit: usize,
+    toggle_key: char,
+    muted: ratatui::prelude::Color,
+) -> Vec<Line<'static>> {
+    let lines = multiline_block(text);
+    if expanded || lines.len() <= line_limit {
+        let mut rendered = lines.into_iter().map(Line::from).collect::<Vec<_>>();
+        if expanded && rendered.len() > line_limit {
+            rendered.push(Line::from(Span::styled(
+                format!("press {toggle_key} to collapse"),
+                Style::default().fg(muted),
+            )));
+        }
+        return rendered;
+    }
+
+    let hidden_count = lines.len() - line_limit;
+    let mut rendered = lines
+        .into_iter()
+        .take(line_limit)
+        .map(Line::from)
+        .collect::<Vec<_>>();
+    rendered.push(Line::from(Span::styled(
+        format!("... {hidden_count} more lines (press {toggle_key} to expand)"),
+        Style::default().fg(muted),
+    )));
+    rendered
 }
 
 fn format_json_value(value: &serde_json::Value) -> Vec<String> {
