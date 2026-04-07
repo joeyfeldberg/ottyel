@@ -4,8 +4,8 @@ use anyhow::Result;
 
 use crate::{
     domain::{
-        LlmSummary, LlmTimelineItem, LogSummary, MetricSummary, SpanDetail, SpanEventDetail,
-        SpanLinkDetail, TraceSummary, project_llm_timeline,
+        LlmRollup, LlmRollupDimension, LlmSummary, LlmTimelineItem, LogSummary, MetricSummary,
+        SpanDetail, SpanEventDetail, SpanLinkDetail, TraceSummary, project_llm_timeline,
     },
     query::{LlmCursor, LogCursor, LogFilters, MetricCursor, Page, PageRequest, TraceCursor},
 };
@@ -521,6 +521,98 @@ impl Store {
     pub fn llm_timeline(&self, trace_id: &str, span_id: &str) -> Result<Vec<LlmTimelineItem>> {
         let spans = self.trace_detail(trace_id)?;
         Ok(project_llm_timeline(&spans, span_id))
+    }
+
+    pub fn llm_rollups(
+        &self,
+        service_filter: Option<&str>,
+        threshold_unix_nano: Option<i64>,
+        search_query: Option<&str>,
+    ) -> Result<Vec<LlmRollup>> {
+        let mut rollups = Vec::new();
+        for dimension in [
+            LlmRollupDimension::Model,
+            LlmRollupDimension::Provider,
+            LlmRollupDimension::Service,
+        ] {
+            rollups.extend(self.llm_rollups_for(
+                dimension,
+                service_filter,
+                threshold_unix_nano,
+                search_query,
+            )?);
+        }
+        Ok(rollups)
+    }
+
+    fn llm_rollups_for(
+        &self,
+        dimension: LlmRollupDimension,
+        service_filter: Option<&str>,
+        threshold_unix_nano: Option<i64>,
+        search_query: Option<&str>,
+    ) -> Result<Vec<LlmRollup>> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let column = match dimension {
+            LlmRollupDimension::Model => "model",
+            LlmRollupDimension::Provider => "provider",
+            LlmRollupDimension::Service => "llm_spans.service_name",
+        };
+        let mut sql = format!(
+            r#"
+            SELECT {column} AS label,
+                   COUNT(*) AS call_count,
+                   SUM(CASE WHEN status NOT IN ('STATUS_CODE_UNSET', 'STATUS_CODE_OK', 'unknown') THEN 1 ELSE 0 END) AS error_count,
+                   COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                   COALESCE(SUM(output_tokens), 0) AS output_tokens,
+                   COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                   SUM(cost) AS cost,
+                   AVG(latency_ms) AS avg_latency_ms
+            FROM llm_spans
+            "#
+        );
+        if threshold_unix_nano.is_some() {
+            sql.push_str(" INNER JOIN spans ON spans.span_id = llm_spans.span_id");
+        }
+        let mut where_clauses = Vec::new();
+        if let Some(service) = service_filter {
+            where_clauses.push(format!(
+                "llm_spans.service_name = '{}'",
+                escape_sql(service)
+            ));
+        }
+        if let Some(threshold) = threshold_unix_nano {
+            where_clauses.push(format!("spans.end_time_unix_nano >= {threshold}"));
+        }
+        if let Some(query) = search_query.filter(|query| !query.is_empty()) {
+            let pattern = like_pattern(query);
+            where_clauses.push(format!(
+                "(llm_spans.trace_id LIKE '{pattern}' ESCAPE '\\' OR llm_spans.span_id LIKE '{pattern}' ESCAPE '\\' OR llm_spans.service_name LIKE '{pattern}' ESCAPE '\\' OR provider LIKE '{pattern}' ESCAPE '\\' OR model LIKE '{pattern}' ESCAPE '\\' OR operation LIKE '{pattern}' ESCAPE '\\' OR raw_json LIKE '{pattern}' ESCAPE '\\')"
+            ));
+        }
+        if !where_clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_clauses.join(" AND "));
+        }
+        sql.push_str(&format!(
+            " GROUP BY {column} ORDER BY total_tokens DESC, call_count DESC, label ASC LIMIT 5"
+        ));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(LlmRollup {
+                dimension,
+                label: row.get(0)?,
+                call_count: row.get::<_, i64>(1)? as usize,
+                error_count: row.get::<_, i64>(2)? as usize,
+                input_tokens: row.get::<_, i64>(3)? as u64,
+                output_tokens: row.get::<_, i64>(4)? as u64,
+                total_tokens: row.get::<_, i64>(5)? as u64,
+                cost: row.get(6)?,
+                avg_latency_ms: row.get(7)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
     fn span_events_by_trace(

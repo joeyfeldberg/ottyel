@@ -112,6 +112,7 @@ fn trace_navigation_helpers_follow_visible_tree_rows() {
         logs: Vec::new(),
         metrics: Vec::new(),
         llm: Vec::new(),
+        llm_rollups: Vec::new(),
         selected_llm_timeline: Vec::new(),
     };
     let state = UiState {
@@ -348,6 +349,7 @@ fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
                 "tool_name": "lookup_customer"
             }),
         }],
+        llm_rollups: Vec::new(),
         selected_llm_timeline: vec![
             crate::domain::LlmTimelineItem {
                 kind: crate::domain::LlmTimelineKind::Prompt,
@@ -452,6 +454,7 @@ fn llm_detail_lines_truncate_prompt_and_output_by_default() {
             status: "STATUS_CODE_OK".to_string(),
             raw_json: json!({}),
         }],
+        llm_rollups: Vec::new(),
         selected_llm_timeline: Vec::new(),
     };
 
@@ -524,6 +527,7 @@ fn llm_detail_lines_expand_prompt_and_output_when_toggled() {
             status: "STATUS_CODE_OK".to_string(),
             raw_json: json!({}),
         }],
+        llm_rollups: Vec::new(),
         selected_llm_timeline: Vec::new(),
     };
     let state = UiState {

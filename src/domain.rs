@@ -130,6 +130,36 @@ pub struct LlmSummary {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum LlmRollupDimension {
+    Model,
+    Provider,
+    Service,
+}
+
+impl LlmRollupDimension {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Model => "model",
+            Self::Provider => "provider",
+            Self::Service => "service",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmRollup {
+    pub dimension: LlmRollupDimension,
+    pub label: String,
+    pub call_count: usize,
+    pub error_count: usize,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub total_tokens: u64,
+    pub cost: Option<f64>,
+    pub avg_latency_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum LlmTimelineKind {
     Prompt,
     Step,
@@ -177,6 +207,7 @@ pub struct DashboardSnapshot {
     pub logs: Vec<LogSummary>,
     pub metrics: Vec<MetricSummary>,
     pub llm: Vec<LlmSummary>,
+    pub llm_rollups: Vec<LlmRollup>,
     pub selected_llm_timeline: Vec<LlmTimelineItem>,
 }
 

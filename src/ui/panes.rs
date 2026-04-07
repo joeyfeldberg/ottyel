@@ -2,10 +2,11 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Rect},
     prelude::{Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, Wrap},
 };
 
-use crate::domain::{DashboardSnapshot, truncate};
+use crate::domain::{DashboardSnapshot, LlmRollupDimension, truncate};
 
 use super::{Palette, PaneFocus, UiState, chrome, details, geometry};
 
@@ -193,6 +194,7 @@ pub(crate) fn render_llm(
     palette: Palette,
 ) {
     let panels = geometry::llm_sections(area);
+    let left = geometry::llm_left_sections(panels[0]);
 
     let feed_border = if state.llm_focus == PaneFocus::Primary {
         palette.warning
@@ -258,7 +260,8 @@ pub(crate) fn render_llm(
             .borders(Borders::ALL)
             .border_style(Style::default().fg(feed_border)),
     );
-    frame.render_widget(table, panels[0]);
+    frame.render_widget(llm_rollup_panel(snapshot, palette), left[0]);
+    frame.render_widget(table, left[1]);
 
     let detail = details::llm_detail_lines(snapshot, state, palette);
     frame.render_widget(
@@ -294,4 +297,107 @@ pub(crate) fn render_llm(
             popup,
         );
     }
+}
+
+fn llm_rollup_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Paragraph<'static> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "scope",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "calls",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "err",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "tokens",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "avg",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "cost",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+
+    for dimension in [
+        LlmRollupDimension::Model,
+        LlmRollupDimension::Provider,
+        LlmRollupDimension::Service,
+    ] {
+        for item in snapshot
+            .llm_rollups
+            .iter()
+            .filter(|item| item.dimension == dimension)
+            .take(2)
+        {
+            lines.push(Line::from(format!(
+                "{} {} c={} e={} tok={} avg={} cost={}",
+                dimension.label(),
+                truncate(&item.label, 18),
+                item.call_count,
+                item.error_count,
+                compact_u64(item.total_tokens),
+                optional_ms(item.avg_latency_ms),
+                optional_cost(item.cost)
+            )));
+        }
+    }
+
+    if lines.len() == 1 {
+        lines.push(Line::raw("No LLM rollups yet."));
+    }
+
+    Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+        Block::default()
+            .title("LLM Rollups")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.accent)),
+    )
+}
+
+fn compact_u64(value: u64) -> String {
+    if value >= 1_000_000 {
+        format!("{:.1}m", value as f64 / 1_000_000.0)
+    } else if value >= 1_000 {
+        format!("{:.1}k", value as f64 / 1_000.0)
+    } else {
+        value.to_string()
+    }
+}
+
+fn optional_ms(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("{value:.0}ms"))
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn optional_cost(value: Option<f64>) -> String {
+    value
+        .map(|value| format!("${value:.4}"))
+        .unwrap_or_else(|| "-".to_string())
 }

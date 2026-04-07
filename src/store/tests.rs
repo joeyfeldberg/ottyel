@@ -15,7 +15,10 @@ use opentelemetry_proto::tonic::{
 };
 use tempfile::tempdir;
 
-use crate::query::{LogCorrelationFilter, LogFilters, LogSeverityFilter, PageRequest};
+use crate::{
+    domain::LlmRollupDimension,
+    query::{LogCorrelationFilter, LogFilters, LogSeverityFilter, PageRequest},
+};
 
 use super::Store;
 
@@ -298,6 +301,56 @@ fn cursor_pages_advance_without_rereading_rows() {
     assert_ne!(llm_page_1.items[0].span_id, llm_page_2.items[0].span_id);
 }
 
+#[test]
+fn llm_rollups_group_tokens_latency_errors_and_cost() {
+    let tempdir = tempdir().unwrap();
+    let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+    let now = now_nanos();
+
+    store.ingest_traces(trace_request(now)).unwrap();
+    store
+        .ingest_traces(trace_request_variant(
+            now + 10_000_000,
+            [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+            [2, 3, 4, 5, 6, 7, 8, 9],
+            "gpt-5.4",
+            "hola",
+            "mundo",
+        ))
+        .unwrap();
+    store
+        .ingest_traces(trace_request_variant(
+            now + 20_000_000,
+            [3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+            [3, 4, 5, 6, 7, 8, 9, 10],
+            "gpt-4o-mini",
+            "bonjour",
+            "monde",
+        ))
+        .unwrap();
+
+    let rollups = store.llm_rollups(None, None, None).unwrap();
+    let gpt_54 = rollups
+        .iter()
+        .find(|item| item.dimension == LlmRollupDimension::Model && item.label == "gpt-5.4")
+        .unwrap();
+
+    assert_eq!(gpt_54.call_count, 2);
+    assert_eq!(gpt_54.error_count, 0);
+    assert_eq!(gpt_54.input_tokens, 10);
+    assert_eq!(gpt_54.output_tokens, 14);
+    assert_eq!(gpt_54.total_tokens, 24);
+    assert_eq!(gpt_54.cost, Some(0.004));
+    assert_eq!(gpt_54.avg_latency_ms, Some(2.0));
+
+    let provider = rollups
+        .iter()
+        .find(|item| item.dimension == LlmRollupDimension::Provider && item.label == "openai")
+        .unwrap();
+    assert_eq!(provider.call_count, 3);
+    assert_eq!(provider.total_tokens, 36);
+}
+
 fn trace_request(now: i64) -> ExportTraceServiceRequest {
     trace_request_variant(
         now,
@@ -350,6 +403,7 @@ fn trace_request_variant(
                         string_attr("output.value", output),
                         int_attr("llm.token_count.prompt", 5),
                         int_attr("llm.token_count.completion", 7),
+                        double_attr("llm.cost.total", 0.002),
                     ],
                     dropped_attributes_count: 0,
                     events: vec![Event {
@@ -502,6 +556,15 @@ fn int_attr(key: &str, value: i64) -> KeyValue {
         key: key.to_string(),
         value: Some(AnyValue {
             value: Some(any_value::Value::IntValue(value)),
+        }),
+    }
+}
+
+fn double_attr(key: &str, value: f64) -> KeyValue {
+    KeyValue {
+        key: key.to_string(),
+        value: Some(AnyValue {
+            value: Some(any_value::Value::DoubleValue(value)),
         }),
     }
 }

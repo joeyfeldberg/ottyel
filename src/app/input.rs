@@ -383,12 +383,13 @@ fn handle_llm_click(
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
 ) {
-    let [feed_area, detail_area] = crate::ui::geometry::llm_sections(body);
+    let [left_area, detail_area] = crate::ui::geometry::llm_sections(body);
+    let [_, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.llm_focus = PaneFocus::Detail;
         return;
     }
-    if !crate::ui::geometry::contains(feed_area, column, row) {
+    if !crate::ui::geometry::contains(left_area, column, row) {
         return;
     }
 
@@ -472,7 +473,8 @@ fn handle_llm_scroll(
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
 ) {
-    let [feed_area, detail_area] = crate::ui::geometry::llm_sections(body);
+    let [left_area, detail_area] = crate::ui::geometry::llm_sections(body);
+    let [_, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.llm_focus = PaneFocus::Detail;
         scroll_detail(delta as i16, state);
@@ -950,6 +952,7 @@ mod tests {
             logs: Vec::new(),
             metrics: Vec::new(),
             llm: Vec::new(),
+            llm_rollups: Vec::new(),
             selected_llm_timeline: Vec::new(),
         };
 
@@ -1010,6 +1013,7 @@ mod tests {
                 status: "STATUS_CODE_UNSET".to_string(),
                 raw_json: serde_json::json!({}),
             }],
+            llm_rollups: Vec::new(),
             selected_llm_timeline: Vec::new(),
         };
 
@@ -1091,6 +1095,7 @@ mod tests {
             logs: Vec::new(),
             metrics: Vec::new(),
             llm: Vec::new(),
+            llm_rollups: Vec::new(),
             selected_llm_timeline: Vec::new(),
         };
 
@@ -1140,6 +1145,7 @@ mod tests {
             logs: Vec::new(),
             metrics: Vec::new(),
             llm: Vec::new(),
+            llm_rollups: Vec::new(),
             selected_llm_timeline: Vec::new(),
         }
     }
