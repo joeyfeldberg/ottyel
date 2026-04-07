@@ -351,6 +351,35 @@ fn llm_rollups_group_tokens_latency_errors_and_cost() {
     assert_eq!(provider.total_tokens, 36);
 }
 
+#[test]
+fn llm_sessions_group_when_conversation_attrs_exist() {
+    let tempdir = tempdir().unwrap();
+    let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+    let now = now_nanos();
+
+    store.ingest_traces(trace_request(now)).unwrap();
+    store
+        .ingest_traces(trace_request_variant(
+            now + 10_000_000,
+            [2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17],
+            [2, 3, 4, 5, 6, 7, 8, 9],
+            "gpt-4o-mini",
+            "hola",
+            "mundo",
+        ))
+        .unwrap();
+
+    let sessions = store.llm_sessions(None, None, None).unwrap();
+    assert_eq!(sessions.len(), 1);
+    assert_eq!(sessions[0].correlation_kind, "conversation");
+    assert_eq!(sessions[0].correlation_id, "conv-test");
+    assert_eq!(sessions[0].call_count, 2);
+    assert_eq!(sessions[0].model_count, 2);
+    assert_eq!(sessions[0].provider_count, 1);
+    assert_eq!(sessions[0].total_tokens, 24);
+    assert_eq!(sessions[0].duration_ms, 12.0);
+}
+
 fn trace_request(now: i64) -> ExportTraceServiceRequest {
     trace_request_variant(
         now,
@@ -399,6 +428,7 @@ fn trace_request_variant(
                     attributes: vec![
                         string_attr("llm.provider", "openai"),
                         string_attr("llm.model_name", model),
+                        string_attr("conversation.id", "conv-test"),
                         string_attr("input.value", input),
                         string_attr("output.value", output),
                         int_attr("llm.token_count.prompt", 5),

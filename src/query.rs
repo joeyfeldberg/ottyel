@@ -1,7 +1,7 @@
 use anyhow::Result;
 
 use crate::{
-    domain::{DashboardSnapshot, LlmRollup, OverviewStats},
+    domain::{DashboardSnapshot, LlmRollup, LlmSessionSummary, OverviewStats},
     store::Store,
 };
 
@@ -225,6 +225,11 @@ impl QueryService {
             threshold,
             filters.search_query.as_deref(),
         )?;
+        let llm_sessions = self.store.llm_sessions(
+            filters.service.as_deref(),
+            threshold,
+            filters.search_query.as_deref(),
+        )?;
 
         Ok(DashboardSnapshot {
             services: services.clone(),
@@ -242,6 +247,7 @@ impl QueryService {
             metrics,
             llm,
             llm_rollups,
+            llm_sessions,
             selected_llm_timeline: Vec::new(),
         })
     }
@@ -318,6 +324,14 @@ impl QueryService {
 
     pub fn llm_rollups(&self, filters: &QueryFilters) -> Result<Vec<LlmRollup>> {
         self.store.llm_rollups(
+            filters.service.as_deref(),
+            filters.time_window.threshold_unix_nano(),
+            filters.search_query.as_deref(),
+        )
+    }
+
+    pub fn llm_sessions(&self, filters: &QueryFilters) -> Result<Vec<LlmSessionSummary>> {
+        self.store.llm_sessions(
             filters.service.as_deref(),
             filters.time_window.threshold_unix_nano(),
             filters.search_query.as_deref(),

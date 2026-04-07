@@ -1,11 +1,12 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::Result;
 
 use crate::{
     domain::{
-        LlmRollup, LlmRollupDimension, LlmSummary, LlmTimelineItem, LogSummary, MetricSummary,
-        SpanDetail, SpanEventDetail, SpanLinkDetail, TraceSummary, project_llm_timeline,
+        LlmAttributes, LlmRollup, LlmRollupDimension, LlmSessionSummary, LlmSummary,
+        LlmTimelineItem, LogSummary, MetricSummary, SpanDetail, SpanEventDetail, SpanLinkDetail,
+        TraceSummary, project_llm_timeline,
     },
     query::{LlmCursor, LogCursor, LogFilters, MetricCursor, Page, PageRequest, TraceCursor},
 };
@@ -494,6 +495,8 @@ impl Store {
                 model: row.get(4)?,
                 operation: row.get(5)?,
                 span_kind: None,
+                session_id: None,
+                conversation_id: None,
                 prompt_preview: None,
                 output_preview: None,
                 tool_name: None,
@@ -615,6 +618,88 @@ impl Store {
         Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 
+    pub fn llm_sessions(
+        &self,
+        service_filter: Option<&str>,
+        threshold_unix_nano: Option<i64>,
+        search_query: Option<&str>,
+    ) -> Result<Vec<LlmSessionSummary>> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut sql = String::from(
+            r#"
+            SELECT llm_spans.service_name, provider, model, total_tokens, cost, latency_ms, status,
+                   raw_json, spans.start_time_unix_nano, spans.end_time_unix_nano
+            FROM llm_spans
+            INNER JOIN spans ON spans.span_id = llm_spans.span_id
+            "#,
+        );
+        let mut where_clauses = Vec::new();
+        if let Some(service) = service_filter {
+            where_clauses.push(format!(
+                "llm_spans.service_name = '{}'",
+                escape_sql(service)
+            ));
+        }
+        if let Some(threshold) = threshold_unix_nano {
+            where_clauses.push(format!("spans.end_time_unix_nano >= {threshold}"));
+        }
+        if let Some(query) = search_query.filter(|query| !query.is_empty()) {
+            let pattern = like_pattern(query);
+            where_clauses.push(format!(
+                "(llm_spans.trace_id LIKE '{pattern}' ESCAPE '\\' OR llm_spans.span_id LIKE '{pattern}' ESCAPE '\\' OR llm_spans.service_name LIKE '{pattern}' ESCAPE '\\' OR provider LIKE '{pattern}' ESCAPE '\\' OR model LIKE '{pattern}' ESCAPE '\\' OR operation LIKE '{pattern}' ESCAPE '\\' OR raw_json LIKE '{pattern}' ESCAPE '\\')"
+            ));
+        }
+        if !where_clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&where_clauses.join(" AND "));
+        }
+        sql.push_str(" ORDER BY spans.start_time_unix_nano ASC");
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            let raw_json: String = row.get(7)?;
+            Ok(LlmSessionRow {
+                service_name: row.get(0)?,
+                provider: row.get(1)?,
+                model: row.get(2)?,
+                total_tokens: row.get::<_, Option<i64>>(3)?.unwrap_or_default() as u64,
+                cost: row.get(4)?,
+                status: row.get(6)?,
+                llm: serde_json::from_str(&raw_json).unwrap_or_default(),
+                start_time_unix_nano: row.get(8)?,
+                end_time_unix_nano: row.get(9)?,
+            })
+        })?;
+
+        let mut by_session = HashMap::new();
+        for row in rows {
+            let row = row?;
+            let Some((kind, id)) = llm_session_key(&row.llm) else {
+                continue;
+            };
+            by_session
+                .entry((kind, id))
+                .or_insert_with(|| LlmSessionAccumulator::empty(&row))
+                .push(&row);
+        }
+
+        let mut sessions = by_session
+            .into_iter()
+            .map(|((correlation_kind, correlation_id), accumulator)| {
+                accumulator.finish(correlation_kind, correlation_id)
+            })
+            .collect::<Vec<_>>();
+        sessions.sort_by(|left, right| {
+            right
+                .last_seen_unix_nano
+                .cmp(&left.last_seen_unix_nano)
+                .then_with(|| right.total_tokens.cmp(&left.total_tokens))
+                .then_with(|| left.correlation_id.cmp(&right.correlation_id))
+        });
+        sessions.truncate(5);
+        Ok(sessions)
+    }
+
     fn span_events_by_trace(
         &self,
         trace_id: &str,
@@ -714,15 +799,106 @@ impl<T, C> PageMapItems<T, C> for Page<T, C> {
 }
 
 fn hydrate_llm_summary(summary: &mut LlmSummary) {
-    let parsed: Result<crate::domain::LlmAttributes, _> =
-        serde_json::from_value(summary.raw_json.clone());
+    let parsed: Result<LlmAttributes, _> = serde_json::from_value(summary.raw_json.clone());
     let Ok(llm) = parsed else {
         return;
     };
 
     summary.span_kind = llm.span_kind;
+    summary.session_id = llm.session_id;
+    summary.conversation_id = llm.conversation_id;
     summary.prompt_preview = llm.prompt_preview;
     summary.output_preview = llm.output_preview;
     summary.tool_name = llm.tool_name;
     summary.tool_args = llm.tool_args;
+}
+
+fn llm_session_key(llm: &LlmAttributes) -> Option<(String, String)> {
+    llm.conversation_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .map(|value| ("conversation".to_string(), value.to_string()))
+        .or_else(|| {
+            llm.session_id
+                .as_deref()
+                .filter(|value| !value.is_empty())
+                .map(|value| ("session".to_string(), value.to_string()))
+        })
+}
+
+#[derive(Debug)]
+struct LlmSessionRow {
+    service_name: String,
+    provider: String,
+    model: String,
+    total_tokens: u64,
+    cost: Option<f64>,
+    status: String,
+    llm: LlmAttributes,
+    start_time_unix_nano: i64,
+    end_time_unix_nano: i64,
+}
+
+#[derive(Debug)]
+struct LlmSessionAccumulator {
+    service_name: String,
+    call_count: usize,
+    error_count: usize,
+    models: HashSet<String>,
+    providers: HashSet<String>,
+    total_tokens: u64,
+    cost: Option<f64>,
+    first_seen_unix_nano: i64,
+    last_seen_unix_nano: i64,
+}
+
+impl LlmSessionAccumulator {
+    fn empty(row: &LlmSessionRow) -> Self {
+        Self {
+            service_name: row.service_name.clone(),
+            call_count: 0,
+            error_count: 0,
+            models: HashSet::new(),
+            providers: HashSet::new(),
+            total_tokens: 0,
+            cost: None,
+            first_seen_unix_nano: row.start_time_unix_nano,
+            last_seen_unix_nano: row.end_time_unix_nano,
+        }
+    }
+
+    fn push(&mut self, row: &LlmSessionRow) {
+        self.call_count += 1;
+        if row.status != "STATUS_CODE_UNSET" && row.status != "STATUS_CODE_OK" {
+            self.error_count += 1;
+        }
+        self.models.insert(row.model.clone());
+        self.providers.insert(row.provider.clone());
+        self.total_tokens = self.total_tokens.saturating_add(row.total_tokens);
+        self.cost = match (self.cost, row.cost) {
+            (Some(total), Some(cost)) => Some(total + cost),
+            (None, Some(cost)) => Some(cost),
+            (total, None) => total,
+        };
+        self.first_seen_unix_nano = self.first_seen_unix_nano.min(row.start_time_unix_nano);
+        self.last_seen_unix_nano = self.last_seen_unix_nano.max(row.end_time_unix_nano);
+    }
+
+    fn finish(self, correlation_kind: String, correlation_id: String) -> LlmSessionSummary {
+        LlmSessionSummary {
+            correlation_kind,
+            correlation_id,
+            service_name: self.service_name,
+            call_count: self.call_count,
+            error_count: self.error_count,
+            model_count: self.models.len(),
+            provider_count: self.providers.len(),
+            total_tokens: self.total_tokens,
+            cost: self.cost,
+            duration_ms: (self.last_seen_unix_nano - self.first_seen_unix_nano).max(0) as f64
+                / 1_000_000.0,
+            first_seen_unix_nano: self.first_seen_unix_nano,
+            last_seen_unix_nano: self.last_seen_unix_nano,
+        }
+    }
 }

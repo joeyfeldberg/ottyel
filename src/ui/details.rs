@@ -228,6 +228,14 @@ fn build_llm_detail_lines(
             "kind {}",
             item.span_kind.as_deref().unwrap_or("<unset>")
         )),
+        Line::from(format!(
+            "session {}",
+            item.session_id.as_deref().unwrap_or("<none>")
+        )),
+        Line::from(format!(
+            "conversation {}",
+            item.conversation_id.as_deref().unwrap_or("<none>")
+        )),
         Line::from(format!("status {}", item.status)),
         Line::from(format!(
             "tokens in={} out={} total={}",

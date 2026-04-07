@@ -261,7 +261,8 @@ pub(crate) fn render_llm(
             .border_style(Style::default().fg(feed_border)),
     );
     frame.render_widget(llm_rollup_panel(snapshot, palette), left[0]);
-    frame.render_widget(table, left[1]);
+    frame.render_widget(llm_session_panel(snapshot, palette), left[1]);
+    frame.render_widget(table, left[2]);
 
     let detail = details::llm_detail_lines(snapshot, state, palette);
     frame.render_widget(
@@ -377,6 +378,68 @@ fn llm_rollup_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Paragraph
             .title("LLM Rollups")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette.accent)),
+    )
+}
+
+fn llm_session_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Paragraph<'static> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "id",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "calls",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "err",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "tokens",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            "span",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+    ])];
+
+    for session in snapshot.llm_sessions.iter().take(4) {
+        lines.push(Line::from(format!(
+            "{}:{} c={} e={} tok={} dur={}",
+            session.correlation_kind,
+            truncate(&session.correlation_id, 18),
+            session.call_count,
+            session.error_count,
+            compact_u64(session.total_tokens),
+            optional_ms(Some(session.duration_ms))
+        )));
+    }
+
+    if lines.len() == 1 {
+        lines.push(Line::raw("No session/conversation ids found."));
+    }
+
+    Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+        Block::default()
+            .title("LLM Sessions")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.warning)),
     )
 }
 

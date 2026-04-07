@@ -384,7 +384,7 @@ fn handle_llm_click(
     snapshot: &DashboardSnapshot,
 ) {
     let [left_area, detail_area] = crate::ui::geometry::llm_sections(body);
-    let [_, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
+    let [_, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.llm_focus = PaneFocus::Detail;
         return;
@@ -474,7 +474,7 @@ fn handle_llm_scroll(
     snapshot: &DashboardSnapshot,
 ) {
     let [left_area, detail_area] = crate::ui::geometry::llm_sections(body);
-    let [_, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
+    let [_, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.llm_focus = PaneFocus::Detail;
         scroll_detail(delta as i16, state);
@@ -953,6 +953,7 @@ mod tests {
             metrics: Vec::new(),
             llm: Vec::new(),
             llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
             selected_llm_timeline: Vec::new(),
         };
 
@@ -996,6 +997,8 @@ mod tests {
                 model: "gpt-5.4".to_string(),
                 operation: "chat".to_string(),
                 span_kind: None,
+                session_id: None,
+                conversation_id: None,
                 prompt_preview: Some(
                     (1..=20)
                         .map(|i| format!("line {i}"))
@@ -1014,6 +1017,7 @@ mod tests {
                 raw_json: serde_json::json!({}),
             }],
             llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
             selected_llm_timeline: Vec::new(),
         };
 
@@ -1096,6 +1100,7 @@ mod tests {
             metrics: Vec::new(),
             llm: Vec::new(),
             llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
             selected_llm_timeline: Vec::new(),
         };
 
@@ -1146,6 +1151,7 @@ mod tests {
             metrics: Vec::new(),
             llm: Vec::new(),
             llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
             selected_llm_timeline: Vec::new(),
         }
     }

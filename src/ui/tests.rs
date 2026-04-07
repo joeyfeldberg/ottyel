@@ -113,6 +113,7 @@ fn trace_navigation_helpers_follow_visible_tree_rows() {
         metrics: Vec::new(),
         llm: Vec::new(),
         llm_rollups: Vec::new(),
+        llm_sessions: Vec::new(),
         selected_llm_timeline: Vec::new(),
     };
     let state = UiState {
@@ -333,6 +334,8 @@ fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
             model: "gpt-5.4".to_string(),
             operation: "chat".to_string(),
             span_kind: Some("chain".to_string()),
+            session_id: None,
+            conversation_id: None,
             prompt_preview: Some("{\"prompt\":\"hello\"}".to_string()),
             output_preview: Some("world".to_string()),
             tool_name: Some("lookup_customer".to_string()),
@@ -350,6 +353,7 @@ fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
             }),
         }],
         llm_rollups: Vec::new(),
+        llm_sessions: Vec::new(),
         selected_llm_timeline: vec![
             crate::domain::LlmTimelineItem {
                 kind: crate::domain::LlmTimelineKind::Prompt,
@@ -442,6 +446,8 @@ fn llm_detail_lines_truncate_prompt_and_output_by_default() {
             model: "gpt-5.4".to_string(),
             operation: "chat".to_string(),
             span_kind: None,
+            session_id: None,
+            conversation_id: None,
             prompt_preview: Some(long_prompt),
             output_preview: Some(long_output),
             tool_name: None,
@@ -455,6 +461,7 @@ fn llm_detail_lines_truncate_prompt_and_output_by_default() {
             raw_json: json!({}),
         }],
         llm_rollups: Vec::new(),
+        llm_sessions: Vec::new(),
         selected_llm_timeline: Vec::new(),
     };
 
@@ -515,6 +522,8 @@ fn llm_detail_lines_expand_prompt_and_output_when_toggled() {
             model: "gpt-5.4".to_string(),
             operation: "chat".to_string(),
             span_kind: None,
+            session_id: None,
+            conversation_id: None,
             prompt_preview: Some(long_prompt),
             output_preview: Some(long_output),
             tool_name: None,
@@ -528,6 +537,7 @@ fn llm_detail_lines_expand_prompt_and_output_when_toggled() {
             raw_json: json!({}),
         }],
         llm_rollups: Vec::new(),
+        llm_sessions: Vec::new(),
         selected_llm_timeline: Vec::new(),
     };
     let state = UiState {

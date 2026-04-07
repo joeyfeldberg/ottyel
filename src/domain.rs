@@ -12,6 +12,8 @@ pub struct LlmAttributes {
     pub model: Option<String>,
     pub operation: Option<String>,
     pub span_kind: Option<String>,
+    pub session_id: Option<String>,
+    pub conversation_id: Option<String>,
     pub prompt_preview: Option<String>,
     pub output_preview: Option<String>,
     pub tool_name: Option<String>,
@@ -116,6 +118,8 @@ pub struct LlmSummary {
     pub model: String,
     pub operation: String,
     pub span_kind: Option<String>,
+    pub session_id: Option<String>,
+    pub conversation_id: Option<String>,
     pub prompt_preview: Option<String>,
     pub output_preview: Option<String>,
     pub tool_name: Option<String>,
@@ -157,6 +161,22 @@ pub struct LlmRollup {
     pub total_tokens: u64,
     pub cost: Option<f64>,
     pub avg_latency_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmSessionSummary {
+    pub correlation_kind: String,
+    pub correlation_id: String,
+    pub service_name: String,
+    pub call_count: usize,
+    pub error_count: usize,
+    pub model_count: usize,
+    pub provider_count: usize,
+    pub total_tokens: u64,
+    pub cost: Option<f64>,
+    pub duration_ms: f64,
+    pub first_seen_unix_nano: i64,
+    pub last_seen_unix_nano: i64,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
@@ -208,6 +228,7 @@ pub struct DashboardSnapshot {
     pub metrics: Vec<MetricSummary>,
     pub llm: Vec<LlmSummary>,
     pub llm_rollups: Vec<LlmRollup>,
+    pub llm_sessions: Vec<LlmSessionSummary>,
     pub selected_llm_timeline: Vec<LlmTimelineItem>,
 }
 
@@ -285,6 +306,28 @@ pub fn extract_llm_attributes(
         ],
     );
     let span_kind = first_string(attrs, &["openinference.span.kind", "llm.span.kind"]);
+    let session_id = first_string(
+        attrs,
+        &[
+            "session.id",
+            "llm.session_id",
+            "llm.session.id",
+            "gen_ai.session.id",
+            "openinference.session.id",
+        ],
+    );
+    let conversation_id = first_string(
+        attrs,
+        &[
+            "conversation.id",
+            "thread.id",
+            "llm.conversation_id",
+            "llm.conversation.id",
+            "gen_ai.conversation.id",
+            "gen_ai.thread.id",
+            "openinference.conversation.id",
+        ],
+    );
     let prompt_preview = first_string(
         attrs,
         &[
@@ -354,6 +397,8 @@ pub fn extract_llm_attributes(
         model,
         operation,
         span_kind,
+        session_id,
+        conversation_id,
         prompt_preview,
         output_preview,
         tool_name,
@@ -684,6 +729,8 @@ mod tests {
         let attrs = AttributeMap::from([
             ("llm.provider".to_string(), json!("openai")),
             ("llm.model_name".to_string(), json!("gpt-5.4")),
+            ("conversation.id".to_string(), json!("conv-1")),
+            ("session.id".to_string(), json!("session-1")),
             ("llm.token_count.prompt".to_string(), json!(11)),
             ("llm.token_count.completion".to_string(), json!(7)),
             ("input.value".to_string(), json!("hello")),
@@ -694,6 +741,8 @@ mod tests {
 
         assert_eq!(llm.provider.as_deref(), Some("openai"));
         assert_eq!(llm.model.as_deref(), Some("gpt-5.4"));
+        assert_eq!(llm.conversation_id.as_deref(), Some("conv-1"));
+        assert_eq!(llm.session_id.as_deref(), Some("session-1"));
         assert_eq!(llm.input_tokens, Some(11));
         assert_eq!(llm.output_tokens, Some(7));
         assert_eq!(llm.total_tokens, Some(18));
