@@ -4,9 +4,9 @@ use anyhow::Result;
 
 use crate::{
     domain::{
-        LlmAttributes, LlmRollup, LlmRollupDimension, LlmSessionSummary, LlmSummary,
-        LlmTimelineItem, LogSummary, MetricSummary, SpanDetail, SpanEventDetail, SpanLinkDetail,
-        TraceSummary, project_llm_timeline,
+        LlmAttributes, LlmModelComparison, LlmRollup, LlmRollupDimension, LlmSessionSummary,
+        LlmSummary, LlmTimelineItem, LlmTopCall, LlmTopCallKind, LogSummary, MetricSummary,
+        SpanDetail, SpanEventDetail, SpanLinkDetail, TraceSummary, project_llm_timeline,
     },
     query::{LlmCursor, LogCursor, LogFilters, MetricCursor, Page, PageRequest, TraceCursor},
 };
@@ -700,6 +700,114 @@ impl Store {
         Ok(sessions)
     }
 
+    pub fn llm_model_comparisons(
+        &self,
+        service_filter: Option<&str>,
+        threshold_unix_nano: Option<i64>,
+        search_query: Option<&str>,
+    ) -> Result<Vec<LlmModelComparison>> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut sql = String::from(
+            r#"
+            SELECT provider, model,
+                   COUNT(*) AS call_count,
+                   SUM(CASE WHEN status NOT IN ('STATUS_CODE_UNSET', 'STATUS_CODE_OK', 'unknown') THEN 1 ELSE 0 END) AS error_count,
+                   COALESCE(SUM(total_tokens), 0) AS total_tokens,
+                   SUM(cost) AS cost,
+                   AVG(latency_ms) AS avg_latency_ms
+            FROM llm_spans
+            "#,
+        );
+        if threshold_unix_nano.is_some() {
+            sql.push_str(" INNER JOIN spans ON spans.span_id = llm_spans.span_id");
+        }
+        append_llm_where(&mut sql, service_filter, threshold_unix_nano, search_query);
+        sql.push_str(
+            " GROUP BY provider, model ORDER BY total_tokens DESC, call_count DESC, provider ASC, model ASC LIMIT 8",
+        );
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(LlmModelComparison {
+                provider: row.get(0)?,
+                model: row.get(1)?,
+                call_count: row.get::<_, i64>(2)? as usize,
+                error_count: row.get::<_, i64>(3)? as usize,
+                total_tokens: row.get::<_, i64>(4)? as u64,
+                cost: row.get(5)?,
+                avg_latency_ms: row.get(6)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
+    pub fn llm_top_calls(
+        &self,
+        service_filter: Option<&str>,
+        threshold_unix_nano: Option<i64>,
+        search_query: Option<&str>,
+    ) -> Result<Vec<LlmTopCall>> {
+        let mut calls = self.llm_top_calls_for(
+            LlmTopCallKind::Tokens,
+            service_filter,
+            threshold_unix_nano,
+            search_query,
+        )?;
+        calls.extend(self.llm_top_calls_for(
+            LlmTopCallKind::Cost,
+            service_filter,
+            threshold_unix_nano,
+            search_query,
+        )?);
+        Ok(calls)
+    }
+
+    fn llm_top_calls_for(
+        &self,
+        kind: LlmTopCallKind,
+        service_filter: Option<&str>,
+        threshold_unix_nano: Option<i64>,
+        search_query: Option<&str>,
+    ) -> Result<Vec<LlmTopCall>> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut sql = String::from(
+            r#"
+            SELECT llm_spans.trace_id, llm_spans.span_id, llm_spans.service_name,
+                   provider, model, total_tokens, cost, latency_ms, status
+            FROM llm_spans
+            "#,
+        );
+        if threshold_unix_nano.is_some() {
+            sql.push_str(" INNER JOIN spans ON spans.span_id = llm_spans.span_id");
+        }
+        append_llm_where(&mut sql, service_filter, threshold_unix_nano, search_query);
+        if kind == LlmTopCallKind::Cost {
+            append_where_clause(&mut sql, "cost IS NOT NULL");
+        }
+        let order = match kind {
+            LlmTopCallKind::Cost => "COALESCE(cost, -1) DESC, COALESCE(total_tokens, 0) DESC",
+            LlmTopCallKind::Tokens => "COALESCE(total_tokens, 0) DESC, COALESCE(cost, -1) DESC",
+        };
+        sql.push_str(&format!(" ORDER BY {order}, llm_spans.span_id ASC LIMIT 4"));
+
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map([], |row| {
+            Ok(LlmTopCall {
+                kind,
+                trace_id: row.get(0)?,
+                span_id: row.get(1)?,
+                service_name: row.get(2)?,
+                provider: row.get(3)?,
+                model: row.get(4)?,
+                total_tokens: row.get::<_, Option<i64>>(5)?.unwrap_or_default() as u64,
+                cost: row.get(6)?,
+                latency_ms: row.get(7)?,
+                status: row.get(8)?,
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
+    }
+
     fn span_events_by_trace(
         &self,
         trace_id: &str,
@@ -811,6 +919,43 @@ fn hydrate_llm_summary(summary: &mut LlmSummary) {
     summary.output_preview = llm.output_preview;
     summary.tool_name = llm.tool_name;
     summary.tool_args = llm.tool_args;
+}
+
+fn append_llm_where(
+    sql: &mut String,
+    service_filter: Option<&str>,
+    threshold_unix_nano: Option<i64>,
+    search_query: Option<&str>,
+) {
+    let mut where_clauses = Vec::new();
+    if let Some(service) = service_filter {
+        where_clauses.push(format!(
+            "llm_spans.service_name = '{}'",
+            escape_sql(service)
+        ));
+    }
+    if let Some(threshold) = threshold_unix_nano {
+        where_clauses.push(format!("spans.end_time_unix_nano >= {threshold}"));
+    }
+    if let Some(query) = search_query.filter(|query| !query.is_empty()) {
+        let pattern = like_pattern(query);
+        where_clauses.push(format!(
+            "(llm_spans.trace_id LIKE '{pattern}' ESCAPE '\\' OR llm_spans.span_id LIKE '{pattern}' ESCAPE '\\' OR llm_spans.service_name LIKE '{pattern}' ESCAPE '\\' OR provider LIKE '{pattern}' ESCAPE '\\' OR model LIKE '{pattern}' ESCAPE '\\' OR operation LIKE '{pattern}' ESCAPE '\\' OR raw_json LIKE '{pattern}' ESCAPE '\\')"
+        ));
+    }
+    if !where_clauses.is_empty() {
+        sql.push_str(" WHERE ");
+        sql.push_str(&where_clauses.join(" AND "));
+    }
+}
+
+fn append_where_clause(sql: &mut String, clause: &str) {
+    if sql.contains(" WHERE ") {
+        sql.push_str(" AND ");
+    } else {
+        sql.push_str(" WHERE ");
+    }
+    sql.push_str(clause);
 }
 
 fn llm_session_key(llm: &LlmAttributes) -> Option<(String, String)> {

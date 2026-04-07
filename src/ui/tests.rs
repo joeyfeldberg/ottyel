@@ -114,6 +114,8 @@ fn trace_navigation_helpers_follow_visible_tree_rows() {
         llm: Vec::new(),
         llm_rollups: Vec::new(),
         llm_sessions: Vec::new(),
+        llm_model_comparisons: Vec::new(),
+        llm_top_calls: Vec::new(),
         selected_llm_timeline: Vec::new(),
     };
     let state = UiState {
@@ -354,6 +356,8 @@ fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
         }],
         llm_rollups: Vec::new(),
         llm_sessions: Vec::new(),
+        llm_model_comparisons: Vec::new(),
+        llm_top_calls: Vec::new(),
         selected_llm_timeline: vec![
             crate::domain::LlmTimelineItem {
                 kind: crate::domain::LlmTimelineKind::Prompt,
@@ -462,6 +466,8 @@ fn llm_detail_lines_truncate_prompt_and_output_by_default() {
         }],
         llm_rollups: Vec::new(),
         llm_sessions: Vec::new(),
+        llm_model_comparisons: Vec::new(),
+        llm_top_calls: Vec::new(),
         selected_llm_timeline: Vec::new(),
     };
 
@@ -538,6 +544,8 @@ fn llm_detail_lines_expand_prompt_and_output_when_toggled() {
         }],
         llm_rollups: Vec::new(),
         llm_sessions: Vec::new(),
+        llm_model_comparisons: Vec::new(),
+        llm_top_calls: Vec::new(),
         selected_llm_timeline: Vec::new(),
     };
     let state = UiState {

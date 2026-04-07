@@ -16,7 +16,7 @@ use opentelemetry_proto::tonic::{
 use tempfile::tempdir;
 
 use crate::{
-    domain::LlmRollupDimension,
+    domain::{LlmRollupDimension, LlmTopCallKind},
     query::{LogCorrelationFilter, LogFilters, LogSeverityFilter, PageRequest},
 };
 
@@ -349,6 +349,23 @@ fn llm_rollups_group_tokens_latency_errors_and_cost() {
         .unwrap();
     assert_eq!(provider.call_count, 3);
     assert_eq!(provider.total_tokens, 36);
+
+    let comparisons = store.llm_model_comparisons(None, None, None).unwrap();
+    assert_eq!(comparisons[0].model, "gpt-5.4");
+    assert_eq!(comparisons[0].call_count, 2);
+    assert_eq!(comparisons[0].total_tokens, 24);
+
+    let top_calls = store.llm_top_calls(None, None, None).unwrap();
+    assert!(
+        top_calls
+            .iter()
+            .any(|call| call.kind == LlmTopCallKind::Tokens && call.model == "gpt-5.4")
+    );
+    assert!(
+        top_calls
+            .iter()
+            .any(|call| call.kind == LlmTopCallKind::Cost && call.cost == Some(0.002))
+    );
 }
 
 #[test]

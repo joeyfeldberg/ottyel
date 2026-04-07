@@ -384,7 +384,7 @@ fn handle_llm_click(
     snapshot: &DashboardSnapshot,
 ) {
     let [left_area, detail_area] = crate::ui::geometry::llm_sections(body);
-    let [_, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
+    let [_, _, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.llm_focus = PaneFocus::Detail;
         return;
@@ -474,7 +474,7 @@ fn handle_llm_scroll(
     snapshot: &DashboardSnapshot,
 ) {
     let [left_area, detail_area] = crate::ui::geometry::llm_sections(body);
-    let [_, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
+    let [_, _, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.llm_focus = PaneFocus::Detail;
         scroll_detail(delta as i16, state);
@@ -954,6 +954,8 @@ mod tests {
             llm: Vec::new(),
             llm_rollups: Vec::new(),
             llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
             selected_llm_timeline: Vec::new(),
         };
 
@@ -1018,6 +1020,8 @@ mod tests {
             }],
             llm_rollups: Vec::new(),
             llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
             selected_llm_timeline: Vec::new(),
         };
 
@@ -1101,6 +1105,8 @@ mod tests {
             llm: Vec::new(),
             llm_rollups: Vec::new(),
             llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
             selected_llm_timeline: Vec::new(),
         };
 
@@ -1152,6 +1158,8 @@ mod tests {
             llm: Vec::new(),
             llm_rollups: Vec::new(),
             llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
             selected_llm_timeline: Vec::new(),
         }
     }

@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, Wrap},
 };
 
-use crate::domain::{DashboardSnapshot, LlmRollupDimension, truncate};
+use crate::domain::{DashboardSnapshot, LlmTopCallKind, truncate};
 
 use super::{Palette, PaneFocus, UiState, chrome, details, geometry};
 
@@ -260,9 +260,10 @@ pub(crate) fn render_llm(
             .borders(Borders::ALL)
             .border_style(Style::default().fg(feed_border)),
     );
-    frame.render_widget(llm_rollup_panel(snapshot, palette), left[0]);
-    frame.render_widget(llm_session_panel(snapshot, palette), left[1]);
-    frame.render_widget(table, left[2]);
+    frame.render_widget(llm_model_panel(snapshot, palette), left[0]);
+    frame.render_widget(llm_top_call_panel(snapshot, palette), left[1]);
+    frame.render_widget(llm_session_panel(snapshot, palette), left[2]);
+    frame.render_widget(table, left[3]);
 
     let detail = details::llm_detail_lines(snapshot, state, palette);
     frame.render_widget(
@@ -300,84 +301,79 @@ pub(crate) fn render_llm(
     }
 }
 
-fn llm_rollup_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Paragraph<'static> {
+fn llm_model_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Paragraph<'static> {
     let mut lines = vec![Line::from(vec![
         Span::styled(
-            "scope",
+            "model",
             Style::default()
                 .fg(palette.muted)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" "),
-        Span::styled(
-            "calls",
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "err",
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "tokens",
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "avg",
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "cost",
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(Modifier::BOLD),
-        ),
+        Span::raw(" calls err tokens avg cost"),
     ])];
 
-    for dimension in [
-        LlmRollupDimension::Model,
-        LlmRollupDimension::Provider,
-        LlmRollupDimension::Service,
-    ] {
+    for item in snapshot.llm_model_comparisons.iter().take(4) {
+        lines.push(Line::from(format!(
+            "{} c={} e={} tok={} avg={} cost={}",
+            truncate(&format!("{}/{}", item.provider, item.model), 20),
+            item.call_count,
+            item.error_count,
+            compact_u64(item.total_tokens),
+            optional_ms(item.avg_latency_ms),
+            optional_cost(item.cost)
+        )));
+    }
+
+    if lines.len() == 1 {
+        lines.push(Line::raw("No model comparison data yet."));
+    }
+
+    Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+        Block::default()
+            .title("LLM Models")
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(palette.accent)),
+    )
+}
+
+fn llm_top_call_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Paragraph<'static> {
+    let mut lines = vec![Line::from(vec![
+        Span::styled(
+            "rank",
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" model tokens cost latency"),
+    ])];
+
+    for kind in [LlmTopCallKind::Tokens, LlmTopCallKind::Cost] {
         for item in snapshot
-            .llm_rollups
+            .llm_top_calls
             .iter()
-            .filter(|item| item.dimension == dimension)
+            .filter(|item| item.kind == kind)
             .take(2)
         {
             lines.push(Line::from(format!(
-                "{} {} c={} e={} tok={} avg={} cost={}",
-                dimension.label(),
-                truncate(&item.label, 18),
-                item.call_count,
-                item.error_count,
+                "{} {} tok={} cost={} lat={}",
+                kind.label(),
+                truncate(&item.model, 18),
                 compact_u64(item.total_tokens),
-                optional_ms(item.avg_latency_ms),
-                optional_cost(item.cost)
+                optional_cost(item.cost),
+                optional_ms(item.latency_ms)
             )));
         }
     }
 
     if lines.len() == 1 {
-        lines.push(Line::raw("No LLM rollups yet."));
+        lines.push(Line::raw("No top call data yet."));
     }
 
     Paragraph::new(lines).wrap(Wrap { trim: true }).block(
         Block::default()
-            .title("LLM Rollups")
+            .title("Top LLM Calls")
             .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.accent)),
+            .border_style(Style::default().fg(palette.warning)),
     )
 }
 

@@ -179,6 +179,46 @@ pub struct LlmSessionSummary {
     pub last_seen_unix_nano: i64,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmModelComparison {
+    pub provider: String,
+    pub model: String,
+    pub call_count: usize,
+    pub error_count: usize,
+    pub total_tokens: u64,
+    pub cost: Option<f64>,
+    pub avg_latency_ms: Option<f64>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum LlmTopCallKind {
+    Cost,
+    Tokens,
+}
+
+impl LlmTopCallKind {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Cost => "cost",
+            Self::Tokens => "tokens",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LlmTopCall {
+    pub kind: LlmTopCallKind,
+    pub trace_id: String,
+    pub span_id: String,
+    pub service_name: String,
+    pub provider: String,
+    pub model: String,
+    pub total_tokens: u64,
+    pub cost: Option<f64>,
+    pub latency_ms: Option<f64>,
+    pub status: String,
+}
+
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum LlmTimelineKind {
     Prompt,
@@ -229,6 +269,8 @@ pub struct DashboardSnapshot {
     pub llm: Vec<LlmSummary>,
     pub llm_rollups: Vec<LlmRollup>,
     pub llm_sessions: Vec<LlmSessionSummary>,
+    pub llm_model_comparisons: Vec<LlmModelComparison>,
+    pub llm_top_calls: Vec<LlmTopCall>,
     pub selected_llm_timeline: Vec<LlmTimelineItem>,
 }
 

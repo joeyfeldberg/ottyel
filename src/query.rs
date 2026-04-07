@@ -1,7 +1,10 @@
 use anyhow::Result;
 
 use crate::{
-    domain::{DashboardSnapshot, LlmRollup, LlmSessionSummary, OverviewStats},
+    domain::{
+        DashboardSnapshot, LlmModelComparison, LlmRollup, LlmSessionSummary, LlmTopCall,
+        OverviewStats,
+    },
     store::Store,
 };
 
@@ -230,6 +233,16 @@ impl QueryService {
             threshold,
             filters.search_query.as_deref(),
         )?;
+        let llm_model_comparisons = self.store.llm_model_comparisons(
+            filters.service.as_deref(),
+            threshold,
+            filters.search_query.as_deref(),
+        )?;
+        let llm_top_calls = self.store.llm_top_calls(
+            filters.service.as_deref(),
+            threshold,
+            filters.search_query.as_deref(),
+        )?;
 
         Ok(DashboardSnapshot {
             services: services.clone(),
@@ -248,6 +261,8 @@ impl QueryService {
             llm,
             llm_rollups,
             llm_sessions,
+            llm_model_comparisons,
+            llm_top_calls,
             selected_llm_timeline: Vec::new(),
         })
     }
@@ -332,6 +347,22 @@ impl QueryService {
 
     pub fn llm_sessions(&self, filters: &QueryFilters) -> Result<Vec<LlmSessionSummary>> {
         self.store.llm_sessions(
+            filters.service.as_deref(),
+            filters.time_window.threshold_unix_nano(),
+            filters.search_query.as_deref(),
+        )
+    }
+
+    pub fn llm_model_comparisons(&self, filters: &QueryFilters) -> Result<Vec<LlmModelComparison>> {
+        self.store.llm_model_comparisons(
+            filters.service.as_deref(),
+            filters.time_window.threshold_unix_nano(),
+            filters.search_query.as_deref(),
+        )
+    }
+
+    pub fn llm_top_calls(&self, filters: &QueryFilters) -> Result<Vec<LlmTopCall>> {
+        self.store.llm_top_calls(
             filters.service.as_deref(),
             filters.time_window.threshold_unix_nano(),
             filters.search_query.as_deref(),
