@@ -31,8 +31,11 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let query = QueryService::new(store.clone(), args.page_size);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-    let bind = args.bind.clone();
-    let server = tokio::spawn(async move { crate::ingest::serve(&bind, store, shutdown_rx).await });
+    let http_bind = args.http_bind.clone();
+    let grpc_bind = args.grpc_bind.clone();
+    let server = tokio::spawn(async move {
+        crate::ingest::serve(&http_bind, &grpc_bind, store, shutdown_rx).await
+    });
 
     let ui_result = run_terminal(&query, &args).await;
     let _ = shutdown_tx.send(true);

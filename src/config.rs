@@ -21,8 +21,14 @@ pub enum Command {
 
 #[derive(Debug, Clone, Args)]
 pub struct ServeArgs {
-    #[arg(long, default_value = "127.0.0.1:4318")]
-    pub bind: String,
+    #[arg(
+        long = "http-bind",
+        visible_alias = "bind",
+        default_value = "127.0.0.1:4318"
+    )]
+    pub http_bind: String,
+    #[arg(long, default_value = "127.0.0.1:4317")]
+    pub grpc_bind: String,
     #[arg(long, default_value = ".ottyel/ottyel.db")]
     pub db_path: PathBuf,
     #[arg(long, default_value_t = 24)]
@@ -40,7 +46,8 @@ pub struct ServeArgs {
 impl Default for ServeArgs {
     fn default() -> Self {
         Self {
-            bind: "127.0.0.1:4318".to_string(),
+            http_bind: "127.0.0.1:4318".to_string(),
+            grpc_bind: "127.0.0.1:4317".to_string(),
             db_path: PathBuf::from(".ottyel/ottyel.db"),
             retention_hours: 24,
             max_spans: 100_000,

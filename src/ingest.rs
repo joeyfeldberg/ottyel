@@ -10,12 +10,23 @@ use axum::{
     routing::post,
 };
 use opentelemetry_proto::tonic::collector::{
-    logs::v1::{ExportLogsServiceRequest, ExportLogsServiceResponse},
-    metrics::v1::{ExportMetricsServiceRequest, ExportMetricsServiceResponse},
-    trace::v1::{ExportTraceServiceRequest, ExportTraceServiceResponse},
+    logs::v1::{
+        ExportLogsServiceRequest, ExportLogsServiceResponse,
+        logs_service_server::{LogsService, LogsServiceServer},
+    },
+    metrics::v1::{
+        ExportMetricsServiceRequest, ExportMetricsServiceResponse,
+        metrics_service_server::{MetricsService, MetricsServiceServer},
+    },
+    trace::v1::{
+        ExportTraceServiceRequest, ExportTraceServiceResponse,
+        trace_service_server::{TraceService, TraceServiceServer},
+    },
 };
 use prost::Message;
 use tokio::sync::watch;
+use tokio_stream::wrappers::TcpListenerStream;
+use tonic::{Request, Response, Status, transport::Server};
 
 use crate::store::Store;
 
@@ -24,12 +35,35 @@ struct IngestState {
     store: Store,
 }
 
-pub async fn serve(bind: &str, store: Store, shutdown: watch::Receiver<bool>) -> Result<()> {
-    let addr: SocketAddr = bind
+pub async fn serve(
+    http_bind: &str,
+    grpc_bind: &str,
+    store: Store,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    let http_addr: SocketAddr = http_bind
         .parse()
-        .with_context(|| format!("invalid bind addr {bind}"))?;
+        .with_context(|| format!("invalid HTTP bind addr {http_bind}"))?;
+    let grpc_addr: SocketAddr = grpc_bind
+        .parse()
+        .with_context(|| format!("invalid gRPC bind addr {grpc_bind}"))?;
     let state = IngestState { store };
-    let listener = tokio::net::TcpListener::bind(addr).await?;
+
+    let http_listener = tokio::net::TcpListener::bind(http_addr).await?;
+    let grpc_listener = tokio::net::TcpListener::bind(grpc_addr).await?;
+
+    tokio::try_join!(
+        serve_http_listener(http_listener, state.clone(), shutdown.clone()),
+        serve_grpc_listener(grpc_listener, state, shutdown),
+    )?;
+    Ok(())
+}
+
+async fn serve_http_listener(
+    listener: tokio::net::TcpListener,
+    state: IngestState,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
     let app = Router::new()
         .route("/v1/traces", post(export_traces))
         .route("/v1/logs", post(export_logs))
@@ -38,6 +72,22 @@ pub async fn serve(bind: &str, store: Store, shutdown: watch::Receiver<bool>) ->
 
     axum::serve(listener, app)
         .with_graceful_shutdown(wait_for_shutdown(shutdown))
+        .await?;
+    Ok(())
+}
+
+async fn serve_grpc_listener(
+    listener: tokio::net::TcpListener,
+    state: IngestState,
+    shutdown: watch::Receiver<bool>,
+) -> Result<()> {
+    let incoming = TcpListenerStream::new(listener);
+
+    Server::builder()
+        .add_service(TraceServiceServer::new(state.clone()))
+        .add_service(LogsServiceServer::new(state.clone()))
+        .add_service(MetricsServiceServer::new(state))
+        .serve_with_incoming_shutdown(incoming, wait_for_shutdown(shutdown))
         .await?;
     Ok(())
 }
@@ -99,25 +149,71 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     }
 }
 
+fn internal_status(err: anyhow::Error) -> Status {
+    Status::internal(err.to_string())
+}
+
+#[tonic::async_trait]
+impl TraceService for IngestState {
+    async fn export(
+        &self,
+        request: Request<ExportTraceServiceRequest>,
+    ) -> std::result::Result<Response<ExportTraceServiceResponse>, Status> {
+        self.store
+            .ingest_traces(request.into_inner())
+            .map(|_| Response::new(ExportTraceServiceResponse::default()))
+            .map_err(internal_status)
+    }
+}
+
+#[tonic::async_trait]
+impl LogsService for IngestState {
+    async fn export(
+        &self,
+        request: Request<ExportLogsServiceRequest>,
+    ) -> std::result::Result<Response<ExportLogsServiceResponse>, Status> {
+        self.store
+            .ingest_logs(request.into_inner())
+            .map(|_| Response::new(ExportLogsServiceResponse::default()))
+            .map_err(internal_status)
+    }
+}
+
+#[tonic::async_trait]
+impl MetricsService for IngestState {
+    async fn export(
+        &self,
+        request: Request<ExportMetricsServiceRequest>,
+    ) -> std::result::Result<Response<ExportMetricsServiceResponse>, Status> {
+        self.store
+            .ingest_metrics(request.into_inner())
+            .map(|_| Response::new(ExportMetricsServiceResponse::default()))
+            .map_err(internal_status)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use std::time::{SystemTime, UNIX_EPOCH};
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
     use axum::http::StatusCode;
     use axum::{Router, body::Body, http::Request, routing::post};
     use opentelemetry_proto::tonic::{
-        collector::trace::v1::ExportTraceServiceRequest,
+        collector::trace::v1::{
+            ExportTraceServiceRequest, trace_service_client::TraceServiceClient,
+        },
         common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
         resource::v1::Resource,
         trace::v1::{ResourceSpans, ScopeSpans, Span, Status},
     };
     use prost::Message;
     use tempfile::tempdir;
+    use tonic::transport::Channel;
     use tower::ServiceExt;
 
     use crate::store::Store;
 
-    use super::{IngestState, export_traces};
+    use super::{IngestState, export_traces, serve_grpc_listener};
 
     #[tokio::test]
     async fn traces_endpoint_accepts_otlp_protobuf() {
@@ -130,7 +226,62 @@ mod tests {
                 store: store.clone(),
             });
 
-        let payload = ExportTraceServiceRequest {
+        let payload = trace_export_request(now).encode_to_vec();
+
+        let response = app
+            .oneshot(
+                Request::post("/v1/traces")
+                    .header("content-type", "application/x-protobuf")
+                    .body(Body::from(payload))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(store.counts(None).unwrap().0, 1);
+    }
+
+    #[tokio::test]
+    async fn grpc_traces_ingest_through_otlp_service() {
+        let now = now_nanos() as u64;
+        let tempdir = tempdir().unwrap();
+        let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_grpc_listener(
+            listener,
+            IngestState {
+                store: store.clone(),
+            },
+            shutdown_rx,
+        ));
+
+        let endpoint = format!("http://{addr}");
+        let mut client = connect_trace_client(&endpoint).await;
+        client.export(trace_export_request(now)).await.unwrap();
+
+        let _ = shutdown_tx.send(true);
+        server.await.unwrap().unwrap();
+
+        assert_eq!(store.counts(None).unwrap().0, 1);
+    }
+
+    async fn connect_trace_client(endpoint: &str) -> TraceServiceClient<Channel> {
+        for _ in 0..10 {
+            if let Ok(client) = TraceServiceClient::connect(endpoint.to_string()).await {
+                return client;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        TraceServiceClient::connect(endpoint.to_string())
+            .await
+            .unwrap()
+    }
+
+    fn trace_export_request(now: u64) -> ExportTraceServiceRequest {
+        ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
                 resource: Some(Resource {
                     attributes: vec![KeyValue {
@@ -170,20 +321,6 @@ mod tests {
                 }],
             }],
         }
-        .encode_to_vec();
-
-        let response = app
-            .oneshot(
-                Request::post("/v1/traces")
-                    .header("content-type", "application/x-protobuf")
-                    .body(Body::from(payload))
-                    .unwrap(),
-            )
-            .await
-            .unwrap();
-
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(store.counts(None).unwrap().0, 1);
     }
 
     fn now_nanos() -> i64 {
