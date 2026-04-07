@@ -39,6 +39,39 @@ pub(crate) fn render_help_overlay(
     );
 }
 
+pub(crate) fn render_context_help_overlay(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    state: &UiState,
+    palette: Palette,
+) {
+    let width = 38_u16.min(area.width.saturating_sub(4)).max(24);
+    let height = (context_help_lines(state).len() as u16)
+        .saturating_add(2)
+        .min(area.height.saturating_sub(4))
+        .max(6);
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width + 2),
+        y: area.y + 4,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, popup);
+    frame.render_widget(
+        Paragraph::new(context_help_lines(state))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title(context_help_title(state))
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette.accent)),
+            )
+            .style(Style::default().fg(palette.foreground))
+            .alignment(Alignment::Left),
+        popup,
+    );
+}
+
 pub(crate) fn render_command_palette(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -161,47 +194,47 @@ pub(crate) fn footer_text(state: &UiState) -> String {
 
     match Tab::ALL[state.active_tab] {
         Tab::Overview => {
-            "overview: tab switch panes | : commands | ? help | / global search | s service | t window | q quit"
+            "overview: tab switch panes | : commands | ? help | H hints | / global search | s service | t window | q quit"
                 .to_string()
         }
         Tab::Traces => match state.trace_focus {
             TraceFocus::TraceList => {
-                "traces: j/k select trace | enter open | : commands | ? help | e errors | s service | t window | / search | q quit"
+                "traces: j/k select trace | enter open | : commands | ? help | H hints | e errors | s service | t window | / search | q quit"
                     .to_string()
             }
             TraceFocus::TraceTree => {
-                "trace tree: j/k move | l/right detail | esc list | space toggle subtree | : commands | ? help | e errors | / search | q quit"
+                "trace tree: j/k move | l/right detail | esc list | space toggle subtree | : commands | ? help | H hints | e errors | / search | q quit"
                     .to_string()
             }
             TraceFocus::TraceDetail => {
-                "span detail: j/k scroll | h/left tree | esc list | : commands | ? help | e errors | / search | q quit"
+                "span detail: j/k scroll | h/left tree | esc list | : commands | ? help | H hints | e errors | / search | q quit"
                     .to_string()
             }
         },
         Tab::Logs => {
             if state.logs_focus == PaneFocus::Primary {
-                "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation | : commands | ? help | s service | t window | / global search | q quit"
+                "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation | : commands | ? help | H hints | s service | t window | / global search | q quit"
                     .to_string()
             } else {
-                "log detail: j/k scroll | esc/h/left feed | : commands | ? help | s service | t window | / global search | q quit"
+                "log detail: j/k scroll | esc/h/left feed | : commands | ? help | H hints | s service | t window | / global search | q quit"
                     .to_string()
             }
         }
         Tab::Metrics => {
             if state.metrics_focus == PaneFocus::Primary {
-                "metrics: j/k move | l/right detail | : commands | ? help | s service | t window | / global search | q quit"
+                "metrics: j/k move | l/right detail | : commands | ? help | H hints | s service | t window | / global search | q quit"
                     .to_string()
             } else {
-                "metric detail: j/k scroll | esc/h/left feed | : commands | ? help | s service | t window | / global search | q quit"
+                "metric detail: j/k scroll | esc/h/left feed | : commands | ? help | H hints | s service | t window | / global search | q quit"
                     .to_string()
             }
         }
         Tab::Llm => {
             if state.llm_focus == PaneFocus::Primary {
-                "llm: j/k move | l/right detail | : commands | ? help | s service | t window | / global search | q quit"
+                "llm: j/k move | l/right detail | : commands | ? help | H hints | s service | t window | / global search | q quit"
                     .to_string()
             } else {
-                "model detail: j/k scroll | i/o toggle blocks | esc/h/left feed | : commands | ? help | q quit"
+                "model detail: j/k scroll | i/o toggle blocks | esc/h/left feed | : commands | ? help | H hints | q quit"
                     .to_string()
             }
         }
@@ -250,6 +283,7 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
         Line::raw("  s                cycle service filter"),
         Line::raw("  t                cycle time window"),
         Line::raw("  ?                open/close help"),
+        Line::raw("  H                toggle contextual hints"),
         Line::raw("  mouse            click to focus/select, wheel to scroll"),
         Line::raw("  q                quit"),
         Line::raw(""),
@@ -359,6 +393,112 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
         ));
     }
 
+    lines
+}
+
+pub(crate) fn context_help_title(state: &UiState) -> String {
+    match Tab::ALL[state.active_tab] {
+        Tab::Overview => "Hints: Overview".to_string(),
+        Tab::Traces => match state.trace_focus {
+            TraceFocus::TraceList => "Hints: Trace List".to_string(),
+            TraceFocus::TraceTree => "Hints: Trace Tree".to_string(),
+            TraceFocus::TraceDetail => "Hints: Span Detail".to_string(),
+        },
+        Tab::Logs => {
+            if state.logs_focus == PaneFocus::Primary {
+                "Hints: Logs Feed".to_string()
+            } else {
+                "Hints: Log Detail".to_string()
+            }
+        }
+        Tab::Metrics => {
+            if state.metrics_focus == PaneFocus::Primary {
+                "Hints: Metrics Feed".to_string()
+            } else {
+                "Hints: Metric Detail".to_string()
+            }
+        }
+        Tab::Llm => {
+            if state.llm_focus == PaneFocus::Primary {
+                "Hints: LLM Inspector".to_string()
+            } else {
+                "Hints: Model Detail".to_string()
+            }
+        }
+    }
+}
+
+pub(crate) fn context_help_lines(state: &UiState) -> Vec<Line<'static>> {
+    let mut lines = Vec::new();
+    match Tab::ALL[state.active_tab] {
+        Tab::Overview => {
+            lines.push(Line::raw("Start from a signal pane:"));
+            lines.push(Line::raw("  tab     switch panes"));
+            lines.push(Line::raw("  s/t     service/window"));
+            lines.push(Line::raw("  /       global search"));
+        }
+        Tab::Traces => match state.trace_focus {
+            TraceFocus::TraceList => {
+                lines.push(Line::raw("Pick a trace to inspect:"));
+                lines.push(Line::raw("  j/k     select trace"));
+                lines.push(Line::raw("  enter   open tree"));
+                lines.push(Line::raw("  e       errors only"));
+            }
+            TraceFocus::TraceTree => {
+                lines.push(Line::raw("Navigate visible spans:"));
+                lines.push(Line::raw("  j/k     move"));
+                lines.push(Line::raw("  space   collapse subtree"));
+                lines.push(Line::raw("  l       span detail"));
+                lines.push(Line::raw("  esc     trace list"));
+            }
+            TraceFocus::TraceDetail => {
+                lines.push(Line::raw("Inspect selected span:"));
+                lines.push(Line::raw("  j/k     scroll detail"));
+                lines.push(Line::raw("  h       back to tree"));
+                lines.push(Line::raw("  [/]     prev/next error"));
+            }
+        },
+        Tab::Logs => {
+            if state.logs_focus == PaneFocus::Primary {
+                lines.push(Line::raw("Filter and correlate logs:"));
+                lines.push(Line::raw("  v       severity"));
+                lines.push(Line::raw("  c       correlation"));
+                lines.push(Line::raw("  f       tail mode"));
+                lines.push(Line::raw("  l       detail"));
+            } else {
+                lines.push(Line::raw("Inspect log payload:"));
+                lines.push(Line::raw("  j/k     scroll"));
+                lines.push(Line::raw("  h/esc   feed"));
+            }
+        }
+        Tab::Metrics => {
+            if state.metrics_focus == PaneFocus::Primary {
+                lines.push(Line::raw("Select a metric series:"));
+                lines.push(Line::raw("  j/k     move"));
+                lines.push(Line::raw("  l       trend/detail"));
+                lines.push(Line::raw("  s/t     service/window"));
+            } else {
+                lines.push(Line::raw("Read trend and stats:"));
+                lines.push(Line::raw("  j/k     scroll"));
+                lines.push(Line::raw("  h/esc   feed"));
+            }
+        }
+        Tab::Llm => {
+            if state.llm_focus == PaneFocus::Primary {
+                lines.push(Line::raw("Compare LLM activity:"));
+                lines.push(Line::raw("  j/k     select call"));
+                lines.push(Line::raw("  l       detail"));
+                lines.push(Line::raw("  s/t     service/window"));
+            } else {
+                lines.push(Line::raw("Inspect prompt/output:"));
+                lines.push(Line::raw("  j/k     scroll"));
+                lines.push(Line::raw("  i/o     expand blocks"));
+                lines.push(Line::raw("  h/esc   feed"));
+            }
+        }
+    }
+    lines.push(Line::raw(""));
+    lines.push(Line::raw("H closes hints  ? full help"));
     lines
 }
 

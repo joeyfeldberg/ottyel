@@ -90,6 +90,8 @@ pub fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &UiSta
         chrome::render_command_palette(frame, root, state, palette);
     } else if state.show_help {
         chrome::render_help_overlay(frame, root, state, palette);
+    } else if state.show_context_help {
+        chrome::render_context_help_overlay(frame, root, state, palette);
     }
 }
 

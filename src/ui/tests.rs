@@ -10,7 +10,10 @@ use crate::{
 
 use super::{
     Palette, Tab, TraceFocus, TraceViewMode, UiState,
-    chrome::{command_palette_window, footer_text, help_lines, help_title},
+    chrome::{
+        command_palette_window, context_help_lines, context_help_title, footer_text, help_lines,
+        help_title,
+    },
     details::{build_log_detail_lines, format_log_body, llm_detail_lines, metric_chart_values},
     geometry::trace_tree_scroll_offset,
     traces::{
@@ -166,6 +169,7 @@ fn ui_state_defaults_to_trace_list_focus() {
     assert_eq!(state.trace_detail_scroll, 0);
     assert!(state.collapsed_trace_spans.is_empty());
     assert!(!state.show_help);
+    assert!(!state.show_context_help);
     assert!(!state.show_command_palette);
     assert!(state.command_query.is_empty());
     assert_eq!(state.selected_command, 0);
@@ -199,6 +203,24 @@ fn help_title_and_footer_follow_active_pane() {
 
     assert_eq!(help_title(&state), "Help: Logs Feed");
     assert_eq!(footer_text(&state), "help: esc/?/enter close");
+}
+
+#[test]
+fn context_help_lines_follow_active_focus() {
+    let state = UiState {
+        active_tab: Tab::Llm as usize,
+        llm_focus: super::PaneFocus::Detail,
+        ..UiState::default()
+    };
+
+    let rendered = context_help_lines(&state)
+        .into_iter()
+        .map(|line| line.to_string())
+        .collect::<Vec<_>>();
+
+    assert_eq!(context_help_title(&state), "Hints: Model Detail");
+    assert!(rendered.iter().any(|line| line.contains("i/o")));
+    assert!(rendered.iter().any(|line| line.contains("? full help")));
 }
 
 #[test]

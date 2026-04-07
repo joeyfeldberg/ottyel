@@ -46,6 +46,9 @@ pub(super) fn handle_key(
         KeyCode::Char('?') => {
             state.show_help = true;
         }
+        KeyCode::Char('H') => {
+            state.show_context_help = !state.show_context_help;
+        }
         KeyCode::Char('g') => cycle_theme(state),
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return true,
         KeyCode::Char('x') if Tab::ALL[state.active_tab] == Tab::Logs => {
@@ -771,6 +774,7 @@ fn handle_help_key(code: KeyCode, state: &mut UiState) -> bool {
 
 fn open_command_palette(state: &mut UiState) {
     state.show_help = false;
+    state.show_context_help = false;
     state.search_mode = false;
     state.log_search_mode = false;
     state.show_command_palette = true;
