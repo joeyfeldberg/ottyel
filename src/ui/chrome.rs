@@ -165,17 +165,25 @@ pub(crate) fn command_palette_window(
 }
 
 pub(crate) fn global_status_text(snapshot: &DashboardSnapshot, state: &UiState) -> String {
-    format!(
-        "theme={} | window={} | service={} | search={} | panes traces={} logs={} metrics={} llm={}",
-        state.theme.label(),
-        state.time_window.label(),
-        current_service(snapshot, state).unwrap_or("all"),
-        search_label(state),
+    let mut parts = vec![
+        format!("theme={}", state.theme.label()),
+        format!("[t]ime={}", state.time_window.label()),
+        format!(
+            "[s]ervice={}",
+            current_service(snapshot, state).unwrap_or("all")
+        ),
+    ];
+    if state.search_mode || !state.search_query.is_empty() {
+        parts.push(format!("search={}", search_label(state)));
+    }
+    parts.push(format!(
+        "panes traces={} logs={} metrics={} llm={}",
         snapshot.overview.trace_count,
         snapshot.overview.log_count,
         snapshot.overview.metric_count,
         snapshot.overview.llm_count,
-    )
+    ));
+    parts.join(" | ")
 }
 
 pub(crate) fn footer_text(state: &UiState) -> String {
@@ -194,12 +202,12 @@ pub(crate) fn footer_text(state: &UiState) -> String {
 
     match Tab::ALL[state.active_tab] {
         Tab::Overview => {
-            "overview: tab switch panes | : commands | ? help | H hints | / global search | s service | t window | q quit"
+            "overview: tab switch panes | : commands | ? help | H hints | / global search | q quit"
                 .to_string()
         }
         Tab::Traces => match state.trace_focus {
             TraceFocus::TraceList => {
-                "traces: j/k select trace | enter open | : commands | ? help | H hints | e errors | s service | t window | / search | q quit"
+                "traces: j/k select trace | enter open | : commands | ? help | H hints | e errors | / search | q quit"
                     .to_string()
             }
             TraceFocus::TraceTree => {
@@ -213,25 +221,25 @@ pub(crate) fn footer_text(state: &UiState) -> String {
         },
         Tab::Logs => {
             if state.logs_focus == PaneFocus::Primary {
-                "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation | : commands | ? help | H hints | s service | t window | / global search | q quit"
+                "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation | : commands | ? help | H hints | / global search | q quit"
                     .to_string()
             } else {
-                "log detail: j/k scroll | esc/h/left feed | : commands | ? help | H hints | s service | t window | / global search | q quit"
+                "log detail: j/k scroll | esc/h/left feed | : commands | ? help | H hints | / global search | q quit"
                     .to_string()
             }
         }
         Tab::Metrics => {
             if state.metrics_focus == PaneFocus::Primary {
-                "metrics: j/k move | l/right detail | : commands | ? help | H hints | s service | t window | / global search | q quit"
+                "metrics: j/k move | l/right detail | : commands | ? help | H hints | / global search | q quit"
                     .to_string()
             } else {
-                "metric detail: j/k scroll | esc/h/left feed | : commands | ? help | H hints | s service | t window | / global search | q quit"
+                "metric detail: j/k scroll | esc/h/left feed | : commands | ? help | H hints | / global search | q quit"
                     .to_string()
             }
         }
         Tab::Llm => {
             if state.llm_focus == PaneFocus::Primary {
-                "llm: j/k move | l/right detail | : commands | ? help | H hints | s service | t window | / global search | q quit"
+                "llm: j/k move | l/right detail | : commands | ? help | H hints | / global search | q quit"
                     .to_string()
             } else {
                 "model detail: j/k scroll | i/o toggle blocks | esc/h/left feed | : commands | ? help | H hints | q quit"

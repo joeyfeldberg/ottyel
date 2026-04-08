@@ -132,16 +132,14 @@ pub enum TimeWindow {
     OneHour,
     SixHours,
     TwentyFourHours,
-    All,
 }
 
 impl TimeWindow {
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 4] = [
         Self::FifteenMinutes,
         Self::OneHour,
         Self::SixHours,
         Self::TwentyFourHours,
-        Self::All,
     ];
 
     pub fn label(self) -> &'static str {
@@ -150,7 +148,6 @@ impl TimeWindow {
             Self::OneHour => "1h",
             Self::SixHours => "6h",
             Self::TwentyFourHours => "24h",
-            Self::All => "all",
         }
     }
 
@@ -164,7 +161,6 @@ impl TimeWindow {
             Self::OneHour => Some(60 * 60 * 1_000_000_000_i64),
             Self::SixHours => Some(6 * 60 * 60 * 1_000_000_000_i64),
             Self::TwentyFourHours => Some(24 * 60 * 60 * 1_000_000_000_i64),
-            Self::All => None,
         }?;
         Some(now.saturating_sub(nanos))
     }

@@ -4,15 +4,18 @@ use serde_json::json;
 
 use crate::{
     config::Theme,
-    domain::{AttributeMap, LlmAttributes, LlmSummary, LogSummary, MetricSummary, SpanDetail},
+    domain::{
+        AttributeMap, DashboardSnapshot, LlmAttributes, LlmSummary, LogSummary, MetricSummary,
+        OverviewStats, SpanDetail,
+    },
     query::TimeWindow,
 };
 
 use super::{
     Palette, Tab, TraceFocus, TraceViewMode, UiState,
     chrome::{
-        command_palette_window, context_help_lines, context_help_title, footer_text, help_lines,
-        help_title,
+        command_palette_window, context_help_lines, context_help_title, footer_text,
+        global_status_text, help_lines, help_title,
     },
     details::{build_log_detail_lines, format_log_body, llm_detail_lines, metric_chart_values},
     geometry::trace_tree_scroll_offset,
@@ -203,6 +206,47 @@ fn help_title_and_footer_follow_active_pane() {
 
     assert_eq!(help_title(&state), "Help: Logs Feed");
     assert_eq!(footer_text(&state), "help: esc/?/enter close");
+}
+
+#[test]
+fn global_status_owns_service_and_time_key_hints() {
+    let mut state = UiState {
+        active_tab: Tab::Logs as usize,
+        ..UiState::default()
+    };
+    let snapshot = DashboardSnapshot {
+        services: Vec::new(),
+        overview: OverviewStats {
+            service_count: 0,
+            trace_count: 1,
+            error_span_count: 0,
+            log_count: 2,
+            metric_count: 3,
+            llm_count: 4,
+        },
+        traces: Vec::new(),
+        selected_trace: Vec::new(),
+        logs: Vec::new(),
+        metrics: Vec::new(),
+        llm: Vec::new(),
+        llm_rollups: Vec::new(),
+        llm_sessions: Vec::new(),
+        llm_model_comparisons: Vec::new(),
+        llm_top_calls: Vec::new(),
+        selected_llm_timeline: Vec::new(),
+    };
+
+    let status = global_status_text(&snapshot, &state);
+    assert!(status.contains("[s]ervice=all"));
+    assert!(status.contains("[t]ime=24h"));
+    assert!(!status.contains("search=none"));
+    assert!(!status.contains("search=-"));
+    assert!(!footer_text(&state).contains("s service"));
+    assert!(!footer_text(&state).contains("t window"));
+    assert!(footer_text(&state).contains("/ global search"));
+
+    state.search_query = "latency".to_string();
+    assert!(global_status_text(&snapshot, &state).contains("search=latency"));
 }
 
 #[test]

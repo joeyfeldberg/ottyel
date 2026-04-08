@@ -920,6 +920,7 @@ mod tests {
     use super::handle_mouse;
     use crate::{
         domain::{DashboardSnapshot, OverviewStats, TraceSummary},
+        query::TimeWindow,
         ui::{PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
     };
 
@@ -976,6 +977,19 @@ mod tests {
         );
 
         assert_eq!(state.active_tab, Tab::Metrics as usize);
+    }
+
+    #[test]
+    fn time_window_cycle_wraps_at_twenty_four_hours() {
+        let mut state = UiState {
+            time_window: TimeWindow::TwentyFourHours,
+            ..UiState::default()
+        };
+
+        super::cycle_time_window(&mut state);
+
+        assert_eq!(state.time_window, TimeWindow::FifteenMinutes);
+        assert!(!TimeWindow::ALL.iter().any(|window| window.label() == "all"));
     }
 
     #[test]
