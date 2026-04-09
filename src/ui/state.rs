@@ -84,11 +84,11 @@ impl Tab {
 
     pub fn title(self) -> &'static str {
         match self {
-            Self::Overview => "Overview",
-            Self::Traces => "Trace Explorer",
-            Self::Logs => "Logs",
-            Self::Metrics => "Metrics",
-            Self::Llm => "LLM Inspector",
+            Self::Overview => "[1] Overview",
+            Self::Traces => "[2] Trace Explorer",
+            Self::Logs => "[3] Logs",
+            Self::Metrics => "[4] Metrics",
+            Self::Llm => "[5] LLM Inspector",
         }
     }
 }

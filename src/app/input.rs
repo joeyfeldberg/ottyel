@@ -23,6 +23,7 @@ pub(super) enum InputOutcome {
 pub(super) fn handle_key(
     code: KeyCode,
     modifiers: KeyModifiers,
+    root: Rect,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
 ) -> InputOutcome {
@@ -115,6 +116,17 @@ pub(super) fn handle_key(
         {
             toggle_selected_trace_subtree(state, snapshot)
         }
+        KeyCode::Char(' ') if active_detail_pane_height(root, state).is_some() => {
+            scroll_active_detail_page(1, root, state);
+            return InputOutcome::None;
+        }
+        KeyCode::Char(' ')
+            if active_detail_pane_height(root, state).is_some()
+                && modifiers.contains(KeyModifiers::SHIFT) =>
+        {
+            scroll_active_detail_page(-1, root, state);
+            return InputOutcome::None;
+        }
         KeyCode::Char('e') => {
             state.errors_only = !state.errors_only;
             return InputOutcome::RefreshSnapshot;
@@ -139,6 +151,11 @@ pub(super) fn handle_key(
             cycle_time_window(state);
             return InputOutcome::RefreshSnapshot;
         }
+        KeyCode::Char('1') => state.active_tab = tab_index(Tab::Overview),
+        KeyCode::Char('2') => state.active_tab = tab_index(Tab::Traces),
+        KeyCode::Char('3') => state.active_tab = tab_index(Tab::Logs),
+        KeyCode::Char('4') => state.active_tab = tab_index(Tab::Metrics),
+        KeyCode::Char('5') => state.active_tab = tab_index(Tab::Llm),
         KeyCode::Char('s') if !snapshot.services.is_empty() => {
             state.service_filter_index = match state.service_filter_index {
                 None => Some(0),
@@ -160,6 +177,42 @@ fn movement_step(modifiers: KeyModifiers) -> isize {
     } else {
         1
     }
+}
+
+fn active_detail_pane_height(root: Rect, state: &UiState) -> Option<usize> {
+    let body = crate::ui::geometry::body_area(root);
+    match Tab::ALL[state.active_tab] {
+        Tab::Overview => None,
+        Tab::Traces
+            if state.trace_view_mode == TraceViewMode::Detail
+                && state.trace_focus == TraceFocus::TraceDetail =>
+        {
+            Some(crate::ui::geometry::detail_viewport_height(
+                crate::ui::geometry::trace_detail_area(body),
+            ))
+        }
+        Tab::Logs if state.logs_focus == PaneFocus::Detail => Some(
+            crate::ui::geometry::detail_viewport_height(crate::ui::geometry::log_detail_area(body)),
+        ),
+        Tab::Metrics if state.metrics_focus == PaneFocus::Detail => {
+            let [_, right] = crate::ui::geometry::metric_sections(body);
+            Some(crate::ui::geometry::detail_viewport_height(
+                crate::ui::geometry::metric_right_sections(right)[1],
+            ))
+        }
+        Tab::Llm if state.llm_focus == PaneFocus::Detail => Some(
+            crate::ui::geometry::detail_viewport_height(crate::ui::geometry::llm_detail_area(body)),
+        ),
+        _ => None,
+    }
+}
+
+fn scroll_active_detail_page(direction: isize, root: Rect, state: &mut UiState) {
+    let Some(viewport_height) = active_detail_pane_height(root, state) else {
+        return;
+    };
+    let page_step = viewport_height.saturating_sub(1).max(1) as i16;
+    scroll_detail((direction as i16) * page_step, state);
 }
 
 pub(super) fn handle_mouse(
@@ -1083,11 +1136,12 @@ mod tests {
             llm_top_calls: Vec::new(),
             selected_llm_timeline: Vec::new(),
         };
+        let metrics_column = tab_click_column(Tab::Metrics, Rect::new(0, 0, 120, 40));
 
         handle_mouse(
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
-                column: 38,
+                column: metrics_column,
                 row: 1,
                 modifiers: KeyModifiers::empty(),
             },
@@ -1097,6 +1151,24 @@ mod tests {
         );
 
         assert_eq!(state.active_tab, Tab::Metrics as usize);
+    }
+
+    fn tab_click_column(tab: Tab, root: Rect) -> u16 {
+        let tabs_area = crate::ui::geometry::root_sections(root)[0];
+        let inner_x = tabs_area.x.saturating_add(1);
+        let mut x = inner_x;
+
+        for current in Tab::ALL {
+            let title_width = u16::try_from(current.title().chars().count()).unwrap_or(u16::MAX);
+            let tab_width = title_width.saturating_add(2);
+            if current == tab {
+                return x.saturating_add(tab_width / 2);
+            }
+
+            x = x.saturating_add(tab_width).saturating_add(1);
+        }
+
+        inner_x
     }
 
     #[test]
@@ -1110,6 +1182,36 @@ mod tests {
 
         assert_eq!(state.time_window, TimeWindow::FifteenMinutes);
         assert!(!TimeWindow::ALL.iter().any(|window| window.label() == "all"));
+    }
+
+    #[test]
+    fn numeric_shortcuts_switch_tabs() {
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: empty_overview(),
+            traces: Vec::new(),
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+        let mut state = UiState::default();
+
+        let outcome = super::handle_key(
+            KeyCode::Char('4'),
+            KeyModifiers::empty(),
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(outcome, InputOutcome::None);
+        assert_eq!(state.active_tab, Tab::Metrics as usize);
     }
 
     #[test]
@@ -1151,12 +1253,76 @@ mod tests {
         let outcome = super::handle_key(
             KeyCode::Char('j'),
             KeyModifiers::SHIFT,
+            Rect::new(0, 0, 120, 40),
             &mut state,
             &snapshot,
         );
 
         assert_eq!(outcome, InputOutcome::None);
         assert_eq!(state.selected_log, super::FAST_MOVE_STEP as usize);
+    }
+
+    #[test]
+    fn space_scrolls_active_detail_by_a_page() {
+        let mut state = UiState {
+            active_tab: Tab::Llm as usize,
+            llm_focus: PaneFocus::Detail,
+            ..UiState::default()
+        };
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: OverviewStats {
+                llm_count: 1,
+                ..empty_overview()
+            },
+            traces: Vec::new(),
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: vec![crate::domain::LlmSummary {
+                trace_id: "trace-1".to_string(),
+                span_id: "span-1".to_string(),
+                service_name: "api".to_string(),
+                provider: "openai".to_string(),
+                model: "gpt-5.4".to_string(),
+                operation: "chat".to_string(),
+                span_kind: None,
+                session_id: None,
+                conversation_id: None,
+                prompt_preview: Some(
+                    (1..=40)
+                        .map(|i| format!("line {i}"))
+                        .collect::<Vec<_>>()
+                        .join("\n"),
+                ),
+                output_preview: None,
+                tool_name: None,
+                tool_args: None,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                cost: None,
+                latency_ms: None,
+                status: "STATUS_CODE_UNSET".to_string(),
+                raw_json: serde_json::json!({}),
+            }],
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+
+        let outcome = super::handle_key(
+            KeyCode::Char(' '),
+            KeyModifiers::empty(),
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(outcome, InputOutcome::None);
+        assert!(state.llm_detail_scroll > 1);
     }
 
     #[test]

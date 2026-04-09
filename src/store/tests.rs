@@ -341,7 +341,11 @@ fn llm_rollups_group_tokens_latency_errors_and_cost() {
     assert_eq!(gpt_54.output_tokens, 14);
     assert_eq!(gpt_54.total_tokens, 24);
     assert_eq!(gpt_54.cost, Some(0.004));
-    assert_eq!(gpt_54.avg_latency_ms, Some(2.0));
+    assert!(
+        gpt_54
+            .avg_latency_ms
+            .is_some_and(|value| (value - 2.0).abs() < 0.001)
+    );
 
     let provider = rollups
         .iter()

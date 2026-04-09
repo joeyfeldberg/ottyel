@@ -130,9 +130,14 @@ async fn terminal_loop(
             }
             maybe_event = events.next() => {
                 match maybe_event.transpose()? {
-                    Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        let outcome =
-                            input::handle_key(key.code, key.modifiers, &mut state, &snapshot);
+                        Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                        let outcome = input::handle_key(
+                            key.code,
+                            key.modifiers,
+                            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                            &mut state,
+                            &snapshot,
+                        );
                         if matches!(outcome, InputOutcome::Quit) {
                             break;
                         }
@@ -171,7 +176,7 @@ fn handle_terminal_event(
 ) -> Result<bool> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
-            let outcome = input::handle_key(key.code, key.modifiers, state, snapshot);
+            let outcome = input::handle_key(key.code, key.modifiers, root, state, snapshot);
             if matches!(outcome, InputOutcome::Quit) {
                 return Ok(true);
             }
