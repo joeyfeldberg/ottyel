@@ -522,7 +522,7 @@ impl Store {
     }
 
     pub fn llm_timeline(&self, trace_id: &str, span_id: &str) -> Result<Vec<LlmTimelineItem>> {
-        let spans = self.trace_detail(trace_id)?;
+        let spans = self.llm_timeline_spans(trace_id, span_id)?;
         Ok(project_llm_timeline(&spans, span_id))
     }
 
@@ -872,6 +872,67 @@ impl Store {
         }
 
         Ok(by_span)
+    }
+
+    fn llm_timeline_spans(&self, trace_id: &str, span_id: &str) -> Result<Vec<SpanDetail>> {
+        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let mut stmt = conn.prepare(
+            r#"
+            WITH RECURSIVE subtree AS (
+                SELECT span_id
+                FROM spans
+                WHERE trace_id = ?1 AND span_id = ?2
+                UNION ALL
+                SELECT spans.span_id
+                FROM spans
+                INNER JOIN subtree ON spans.parent_span_id = subtree.span_id
+                WHERE spans.trace_id = ?1
+            )
+            SELECT
+                trace_id,
+                span_id,
+                parent_span_id,
+                service_name,
+                span_name,
+                span_kind,
+                status_code,
+                start_time_unix_nano,
+                end_time_unix_nano,
+                duration_ms,
+                attributes_json,
+                llm_json
+            FROM spans
+            WHERE trace_id = ?1
+              AND span_id IN (SELECT span_id FROM subtree)
+            ORDER BY start_time_unix_nano ASC
+            "#,
+        )?;
+        let rows = stmt.query_map([trace_id, span_id], |row| {
+            let attributes_json: String = row.get(10)?;
+            let llm_json: Option<String> = row.get(11)?;
+            Ok(SpanDetail {
+                trace_id: row.get(0)?,
+                span_id: row.get(1)?,
+                parent_span_id: row.get(2)?,
+                service_name: row.get(3)?,
+                span_name: row.get(4)?,
+                span_kind: row.get(5)?,
+                status_code: row.get(6)?,
+                start_time_unix_nano: row.get(7)?,
+                end_time_unix_nano: row.get(8)?,
+                duration_ms: row.get(9)?,
+                resource_attributes: Default::default(),
+                attributes: serde_json::from_str(&attributes_json).unwrap_or_default(),
+                events: Vec::new(),
+                links: Vec::new(),
+                llm: llm_json
+                    .as_deref()
+                    .map(serde_json::from_str)
+                    .transpose()
+                    .unwrap_or_default(),
+            })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<Vec<_>>>()?)
     }
 }
 

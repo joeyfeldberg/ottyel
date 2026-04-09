@@ -16,7 +16,7 @@ use opentelemetry_proto::tonic::{
 use tempfile::tempdir;
 
 use crate::{
-    domain::{LlmRollupDimension, LlmTopCallKind},
+    domain::{LlmRollupDimension, LlmTimelineKind, LlmTopCallKind},
     query::{LogCorrelationFilter, LogFilters, LogSeverityFilter, PageRequest},
 };
 
@@ -401,6 +401,38 @@ fn llm_sessions_group_when_conversation_attrs_exist() {
     assert_eq!(sessions[0].duration_ms, 12.0);
 }
 
+#[test]
+fn llm_timeline_loads_only_selected_subtree() {
+    let tempdir = tempdir().unwrap();
+    let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+    let now = now_nanos() as u64;
+
+    store
+        .ingest_traces(llm_timeline_trace_request(now))
+        .unwrap();
+
+    let timeline = store
+        .llm_timeline("0102030405060708090a0b0c0d0e0f10", "1111111111111111")
+        .unwrap();
+
+    assert!(
+        timeline
+            .iter()
+            .any(|item| item.kind == LlmTimelineKind::Prompt)
+    );
+    assert!(
+        timeline
+            .iter()
+            .any(|item| item.kind == LlmTimelineKind::Output)
+    );
+    assert!(
+        timeline
+            .iter()
+            .any(|item| item.kind == LlmTimelineKind::Tool && item.label == "lookup_customer")
+    );
+    assert!(!timeline.iter().any(|item| item.label == "cache lookup"));
+}
+
 fn trace_request(now: i64) -> ExportTraceServiceRequest {
     trace_request_variant(
         now,
@@ -410,6 +442,96 @@ fn trace_request(now: i64) -> ExportTraceServiceRequest {
         "hello",
         "world",
     )
+}
+
+fn llm_timeline_trace_request(now: u64) -> ExportTraceServiceRequest {
+    ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![string_attr("service.name", "api")],
+                dropped_attributes_count: 0,
+                entity_refs: Vec::new(),
+            }),
+            schema_url: String::new(),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope::default()),
+                schema_url: String::new(),
+                spans: vec![
+                    Span {
+                        trace_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                        span_id: vec![0x11; 8],
+                        parent_span_id: vec![],
+                        trace_state: String::new(),
+                        name: "chat.completion".to_string(),
+                        kind: span::SpanKind::Server as i32,
+                        start_time_unix_nano: now,
+                        end_time_unix_nano: now + 4_000_000,
+                        attributes: vec![
+                            string_attr("llm.provider", "openai"),
+                            string_attr("llm.model_name", "gpt-5.4"),
+                            string_attr("input.value", "hello"),
+                            string_attr("output.value", "world"),
+                        ],
+                        dropped_attributes_count: 0,
+                        events: Vec::new(),
+                        dropped_events_count: 0,
+                        links: Vec::new(),
+                        dropped_links_count: 0,
+                        status: Some(Status {
+                            message: String::new(),
+                            code: 1,
+                        }),
+                        flags: 0,
+                    },
+                    Span {
+                        trace_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                        span_id: vec![0x22; 8],
+                        parent_span_id: vec![0x11; 8],
+                        trace_state: String::new(),
+                        name: "lookup_customer".to_string(),
+                        kind: span::SpanKind::Internal as i32,
+                        start_time_unix_nano: now + 1_000_000,
+                        end_time_unix_nano: now + 2_000_000,
+                        attributes: vec![
+                            string_attr("tool.name", "lookup_customer"),
+                            string_attr("tool.arguments", "{\"customer_id\":\"123\"}"),
+                        ],
+                        dropped_attributes_count: 0,
+                        events: Vec::new(),
+                        dropped_events_count: 0,
+                        links: Vec::new(),
+                        dropped_links_count: 0,
+                        status: Some(Status {
+                            message: String::new(),
+                            code: 1,
+                        }),
+                        flags: 0,
+                    },
+                    Span {
+                        trace_id: vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+                        span_id: vec![0x33; 8],
+                        parent_span_id: vec![],
+                        trace_state: String::new(),
+                        name: "cache lookup".to_string(),
+                        kind: span::SpanKind::Internal as i32,
+                        start_time_unix_nano: now + 500_000,
+                        end_time_unix_nano: now + 700_000,
+                        attributes: vec![string_attr("cache.key", "customer:123")],
+                        dropped_attributes_count: 0,
+                        events: Vec::new(),
+                        dropped_events_count: 0,
+                        links: Vec::new(),
+                        dropped_links_count: 0,
+                        status: Some(Status {
+                            message: String::new(),
+                            code: 1,
+                        }),
+                        flags: 0,
+                    },
+                ],
+            }],
+        }],
+    }
 }
 
 fn trace_request_variant(
