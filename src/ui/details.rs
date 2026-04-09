@@ -587,11 +587,10 @@ fn build_span_detail_lines(span: &SpanDetail, palette: Palette) -> Vec<Line<'sta
                 .fg(palette.success)
                 .add_modifier(Modifier::BOLD),
         )));
-        for (key, value) in span.resource_attributes.iter().take(4) {
+        for (key, value) in &span.resource_attributes {
             lines.push(Line::from(format!(
-                "{} = {}",
-                truncate(key, 28),
-                truncate(&attribute_value_text(value), 64)
+                "{key} = {}",
+                attribute_value_text(value)
             )));
         }
     }
@@ -604,17 +603,10 @@ fn build_span_detail_lines(span: &SpanDetail, palette: Palette) -> Vec<Line<'sta
                 .fg(palette.accent)
                 .add_modifier(Modifier::BOLD),
         )));
-        for (key, value) in span.attributes.iter().take(8) {
+        for (key, value) in &span.attributes {
             lines.push(Line::from(format!(
-                "{} = {}",
-                truncate(key, 28),
-                truncate(&attribute_value_text(value), 64)
-            )));
-        }
-        if span.attributes.len() > 8 {
-            lines.push(Line::from(format!(
-                "... {} more attributes",
-                span.attributes.len() - 8
+                "{key} = {}",
+                attribute_value_text(value)
             )));
         }
     }
@@ -627,17 +619,15 @@ fn build_span_detail_lines(span: &SpanDetail, palette: Palette) -> Vec<Line<'sta
                 .fg(palette.warning)
                 .add_modifier(Modifier::BOLD),
         )));
-        for event in span.events.iter().take(3) {
+        for event in &span.events {
             lines.push(Line::from(format!(
                 "{} @ {}",
-                truncate(&event.name, 28),
-                event.timestamp_unix_nano
+                event.name, event.timestamp_unix_nano
             )));
-            for (key, value) in event.attributes.iter().take(2) {
+            for (key, value) in &event.attributes {
                 lines.push(Line::from(format!(
-                    "  {} = {}",
-                    truncate(key, 24),
-                    truncate(&attribute_value_text(value), 56)
+                    "  {key} = {}",
+                    attribute_value_text(value)
                 )));
             }
         }
@@ -651,23 +641,15 @@ fn build_span_detail_lines(span: &SpanDetail, palette: Palette) -> Vec<Line<'sta
                 .fg(palette.muted)
                 .add_modifier(Modifier::BOLD),
         )));
-        for link in span.links.iter().take(3) {
-            lines.push(Line::from(format!(
-                "{} / {}",
-                truncate(&link.trace_id, 16),
-                truncate(&link.span_id, 16)
-            )));
+        for link in &span.links {
+            lines.push(Line::from(format!("{} / {}", link.trace_id, link.span_id)));
             if !link.trace_state.is_empty() {
-                lines.push(Line::from(format!(
-                    "  state {}",
-                    truncate(&link.trace_state, 52)
-                )));
+                lines.push(Line::from(format!("  state {}", link.trace_state)));
             }
-            for (key, value) in link.attributes.iter().take(2) {
+            for (key, value) in &link.attributes {
                 lines.push(Line::from(format!(
-                    "  {} = {}",
-                    truncate(key, 24),
-                    truncate(&attribute_value_text(value), 56)
+                    "  {key} = {}",
+                    attribute_value_text(value)
                 )));
             }
         }

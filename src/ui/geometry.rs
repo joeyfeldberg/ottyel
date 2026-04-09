@@ -127,31 +127,40 @@ pub(crate) fn clamp_window_offset(
     scroll_window_offset(current_offset, total_items, viewport_height, 0)
 }
 
+pub(crate) fn follow_selected_offset(
+    current_offset: usize,
+    total_items: usize,
+    selected_index: usize,
+    viewport_height: usize,
+) -> usize {
+    if total_items == 0 || viewport_height == 0 || total_items <= viewport_height {
+        return 0;
+    }
+
+    let max_offset = total_items.saturating_sub(viewport_height);
+    let offset = current_offset.min(max_offset);
+
+    if selected_index < offset {
+        return selected_index;
+    }
+
+    let visible_end = offset.saturating_add(viewport_height);
+    if selected_index >= visible_end {
+        return (selected_index + 1)
+            .saturating_sub(viewport_height)
+            .min(max_offset);
+    }
+
+    offset
+}
+
 pub(crate) fn trace_tree_scroll_offset(
     current_offset: usize,
     total_lines: usize,
     selected_line: usize,
     viewport_height: usize,
 ) -> usize {
-    if total_lines == 0 || viewport_height == 0 || total_lines <= viewport_height {
-        return 0;
-    }
-
-    let max_offset = total_lines.saturating_sub(viewport_height);
-    let offset = current_offset.min(max_offset);
-
-    if selected_line < offset {
-        return selected_line;
-    }
-
-    let visible_end = offset.saturating_add(viewport_height);
-    if selected_line >= visible_end {
-        return (selected_line + 1)
-            .saturating_sub(viewport_height)
-            .min(max_offset);
-    }
-
-    offset
+    follow_selected_offset(current_offset, total_lines, selected_line, viewport_height)
 }
 
 pub(crate) fn clamp_scroll(current: u16, line_count: usize, viewport_height: usize) -> u16 {

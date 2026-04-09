@@ -207,8 +207,7 @@ pub(crate) fn footer_text(state: &UiState) -> String {
         }
         Tab::Traces => match state.trace_focus {
             TraceFocus::TraceList => {
-                "traces: j/k select trace | enter open | : commands | ? help | e errors"
-                    .to_string()
+                "traces: j/k select trace | enter open | : commands | ? help | e errors".to_string()
             }
             TraceFocus::TraceTree => {
                 "trace tree: j/k move | l/right detail | esc list | : commands | ? help | e errors"
@@ -224,23 +223,19 @@ pub(crate) fn footer_text(state: &UiState) -> String {
                 "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation | : commands"
                     .to_string()
             } else {
-                "log detail: j/k scroll | esc/h/left feed | : commands"
-                    .to_string()
+                "log detail: j/k scroll | esc/h/left feed | : commands".to_string()
             }
         }
         Tab::Metrics => {
             if state.metrics_focus == PaneFocus::Primary {
-                "metrics: j/k move | l/right detail | : commands"
-                    .to_string()
+                "metrics: j/k move | l/right detail | : commands".to_string()
             } else {
-                "metric detail: j/k scroll | esc/h/left feed | : commands"
-                    .to_string()
+                "metric detail: j/k scroll | esc/h/left feed | : commands".to_string()
             }
         }
         Tab::Llm => {
             if state.llm_focus == PaneFocus::Primary {
-                "llm: j/k move | l/right detail | : commands"
-                    .to_string()
+                "llm: j/k move | l/right detail | : commands".to_string()
             } else {
                 "model detail: j/k scroll | i/o toggle blocks | esc/h/left feed | : commands"
                     .to_string()

@@ -9,8 +9,7 @@ mod traces;
 pub use state::{Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState};
 pub(crate) use traces::{
     first_llm_trace_index, next_error_trace_index, parent_trace_index, previous_error_trace_index,
-    root_trace_index, selected_trace_tree_span, trace_tree_hit, trace_tree_rows,
-    trace_tree_total_lines, visible_trace_tree_len,
+    root_trace_index, selected_trace_tree_span, trace_tree_hit, visible_trace_tree_len,
 };
 
 use ratatui::{
@@ -127,10 +126,22 @@ pub fn sync_detail_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut 
         snapshot.traces.len(),
         geometry::table_viewport_height(body),
     );
+    state.trace_list_scroll = geometry::follow_selected_offset(
+        state.trace_list_scroll,
+        snapshot.traces.len(),
+        state.selected_trace,
+        geometry::table_viewport_height(body),
+    );
     let [log_feed, _] = geometry::log_sections(body);
     state.log_feed_scroll = geometry::clamp_window_offset(
         state.log_feed_scroll,
         snapshot.logs.len(),
+        geometry::table_viewport_height(log_feed),
+    );
+    state.log_feed_scroll = geometry::follow_selected_offset(
+        state.log_feed_scroll,
+        snapshot.logs.len(),
+        state.selected_log,
         geometry::table_viewport_height(log_feed),
     );
     let [metric_feed, metric_right] = geometry::metric_sections(body);
@@ -139,11 +150,23 @@ pub fn sync_detail_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut 
         snapshot.metrics.len(),
         geometry::table_viewport_height(metric_feed),
     );
+    state.metric_feed_scroll = geometry::follow_selected_offset(
+        state.metric_feed_scroll,
+        snapshot.metrics.len(),
+        state.selected_metric,
+        geometry::table_viewport_height(metric_feed),
+    );
     let [llm_left, _] = geometry::llm_sections(body);
     let [_, _, _, llm_feed] = geometry::llm_left_sections(llm_left);
     state.llm_feed_scroll = geometry::clamp_window_offset(
         state.llm_feed_scroll,
         snapshot.llm.len(),
+        geometry::table_viewport_height(llm_feed),
+    );
+    state.llm_feed_scroll = geometry::follow_selected_offset(
+        state.llm_feed_scroll,
+        snapshot.llm.len(),
+        state.selected_llm,
         geometry::table_viewport_height(llm_feed),
     );
 

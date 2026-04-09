@@ -93,7 +93,7 @@ impl Tab {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct UiState {
     pub theme: Theme,
     pub active_tab: usize,

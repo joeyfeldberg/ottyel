@@ -4,11 +4,13 @@ use std::{io, time::Duration};
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind},
+    event::{
+        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind, MouseEventKind,
+    },
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::{sync::watch, time::interval};
 
@@ -89,6 +91,7 @@ async fn terminal_loop(
     };
     let mut snapshot = query.snapshot(&input::filters(&state, &[]))?;
     refresh_detail_state(query, &state, &mut snapshot)?;
+    let mut pending_event: Option<Event> = None;
     loop {
         input::sync_selection(&mut state, &snapshot);
         let size = terminal.size()?;
@@ -104,6 +107,21 @@ async fn terminal_loop(
         );
         terminal.draw(|frame| crate::ui::render(frame, &snapshot, &state))?;
 
+        if let Some(event) = pending_event.take() {
+            if handle_terminal_event(
+                event,
+                ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                &mut events,
+                &mut pending_event,
+                query,
+                &mut state,
+                &mut snapshot,
+            )? {
+                break;
+            }
+            continue;
+        }
+
         tokio::select! {
             _ = tick.tick() => {
                 snapshot = query.snapshot(&input::filters(&state, &snapshot.services))?;
@@ -118,20 +136,19 @@ async fn terminal_loop(
                         snapshot = query.snapshot(&input::filters(&state, &snapshot.services))?;
                         refresh_detail_state(query, &state, &mut snapshot)?;
                     }
-                    Some(Event::Mouse(mouse)) => {
-                        let needs_refresh = input::handle_mouse(
-                            mouse,
+                    Some(event) => {
+                        if handle_terminal_event(
+                            event,
                             ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                            &mut events,
+                            &mut pending_event,
+                            query,
                             &mut state,
-                            &snapshot,
-                        );
-                        if needs_refresh {
-                            snapshot = query.snapshot(&input::filters(&state, &snapshot.services))?;
-                            refresh_detail_state(query, &state, &mut snapshot)?;
+                            &mut snapshot,
+                        )? {
+                            break;
                         }
                     }
-                    Some(Event::Resize(_, _)) => {}
-                    Some(_) => {}
                     None => break,
                 }
             }
@@ -140,6 +157,71 @@ async fn terminal_loop(
 
     Ok(())
 }
+
+fn handle_terminal_event(
+    event: Event,
+    root: ratatui::layout::Rect,
+    events: &mut EventStream,
+    pending_event: &mut Option<Event>,
+    query: &QueryService,
+    state: &mut UiState,
+    snapshot: &mut crate::domain::DashboardSnapshot,
+) -> Result<bool> {
+    match event {
+        Event::Key(key) if key.kind == KeyEventKind::Press => {
+            if input::handle_key(key.code, key.modifiers, state, snapshot) {
+                return Ok(true);
+            }
+            *snapshot = query.snapshot(&input::filters(state, &snapshot.services))?;
+            refresh_detail_state(query, state, snapshot)?;
+        }
+        Event::Mouse(mouse) => {
+            let before = state.clone();
+            let needs_refresh = input::handle_mouse(mouse, root, state, snapshot);
+            if needs_refresh {
+                *snapshot = query.snapshot(&input::filters(state, &snapshot.services))?;
+                refresh_detail_state(query, state, snapshot)?;
+            } else if before == *state
+                && matches!(
+                    mouse.kind,
+                    MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
+                )
+            {
+                drain_stale_scroll_events(mouse.kind, events, pending_event)?;
+            }
+        }
+        Event::Resize(_, _) => {}
+        _ => {}
+    }
+
+    Ok(false)
+}
+
+fn drain_stale_scroll_events(
+    direction: MouseEventKind,
+    events: &mut EventStream,
+    pending_event: &mut Option<Event>,
+) -> Result<()> {
+    loop {
+        let Some(ready_event) = events.next().now_or_never() else {
+            break;
+        };
+        let Some(next_event) = ready_event.transpose()? else {
+            break;
+        };
+
+        match next_event {
+            Event::Mouse(mouse) if mouse.kind == direction => {}
+            other => {
+                *pending_event = Some(other);
+                break;
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn refresh_detail_state(
     query: &QueryService,
     state: &UiState,

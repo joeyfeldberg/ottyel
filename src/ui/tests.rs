@@ -243,7 +243,6 @@ fn global_status_owns_service_and_time_key_hints() {
     assert!(!status.contains("search=-"));
     assert!(!footer_text(&state).contains("s service"));
     assert!(!footer_text(&state).contains("t window"));
-    assert!(footer_text(&state).contains("/ global search"));
 
     state.search_query = "latency".to_string();
     assert!(global_status_text(&snapshot, &state).contains("search=latency"));
