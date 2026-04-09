@@ -89,7 +89,6 @@ async fn terminal_loop(
     };
     let mut snapshot = query.snapshot(&input::filters(&state, &[]))?;
     refresh_detail_state(query, &state, &mut snapshot)?;
-
     loop {
         input::sync_selection(&mut state, &snapshot);
         let size = terminal.size()?;
@@ -120,14 +119,16 @@ async fn terminal_loop(
                         refresh_detail_state(query, &state, &mut snapshot)?;
                     }
                     Some(Event::Mouse(mouse)) => {
-                        input::handle_mouse(
+                        let needs_refresh = input::handle_mouse(
                             mouse,
                             ratatui::layout::Rect::new(0, 0, size.width, size.height),
                             &mut state,
                             &snapshot,
                         );
-                        snapshot = query.snapshot(&input::filters(&state, &snapshot.services))?;
-                        refresh_detail_state(query, &state, &mut snapshot)?;
+                        if needs_refresh {
+                            snapshot = query.snapshot(&input::filters(&state, &snapshot.services))?;
+                            refresh_detail_state(query, &state, &mut snapshot)?;
+                        }
                     }
                     Some(Event::Resize(_, _)) => {}
                     Some(_) => {}
@@ -139,7 +140,6 @@ async fn terminal_loop(
 
     Ok(())
 }
-
 fn refresh_detail_state(
     query: &QueryService,
     state: &UiState,

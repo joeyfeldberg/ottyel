@@ -23,6 +23,8 @@ pub(crate) fn render(
         .traces
         .iter()
         .enumerate()
+        .skip(state.trace_list_scroll)
+        .take(geometry::table_viewport_height(area))
         .map(|(idx, trace)| {
             let style = if idx == state.selected_trace {
                 Style::default().fg(palette.background).bg(palette.accent)

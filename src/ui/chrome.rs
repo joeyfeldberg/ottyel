@@ -202,47 +202,47 @@ pub(crate) fn footer_text(state: &UiState) -> String {
 
     match Tab::ALL[state.active_tab] {
         Tab::Overview => {
-            "overview: tab switch panes | : commands | ? help | H hints | / global search | q quit"
+            "overview: tab switch panes | : commands | ? help | H hints | / global search"
                 .to_string()
         }
         Tab::Traces => match state.trace_focus {
             TraceFocus::TraceList => {
-                "traces: j/k select trace | enter open | : commands | ? help | H hints | e errors | / search | q quit"
+                "traces: j/k select trace | enter open | : commands | ? help | e errors"
                     .to_string()
             }
             TraceFocus::TraceTree => {
-                "trace tree: j/k move | l/right detail | esc list | space toggle subtree | : commands | ? help | H hints | e errors | / search | q quit"
+                "trace tree: j/k move | l/right detail | esc list | : commands | ? help | e errors"
                     .to_string()
             }
             TraceFocus::TraceDetail => {
-                "span detail: j/k scroll | h/left tree | esc list | : commands | ? help | H hints | e errors | / search | q quit"
+                "span detail: j/k scroll | h/left tree | esc list | : commands | ? help | e errors"
                     .to_string()
             }
         },
         Tab::Logs => {
             if state.logs_focus == PaneFocus::Primary {
-                "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation | : commands | ? help | H hints | / global search | q quit"
+                "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation | : commands"
                     .to_string()
             } else {
-                "log detail: j/k scroll | esc/h/left feed | : commands | ? help | H hints | / global search | q quit"
+                "log detail: j/k scroll | esc/h/left feed | : commands"
                     .to_string()
             }
         }
         Tab::Metrics => {
             if state.metrics_focus == PaneFocus::Primary {
-                "metrics: j/k move | l/right detail | : commands | ? help | H hints | / global search | q quit"
+                "metrics: j/k move | l/right detail | : commands"
                     .to_string()
             } else {
-                "metric detail: j/k scroll | esc/h/left feed | : commands | ? help | H hints | / global search | q quit"
+                "metric detail: j/k scroll | esc/h/left feed | : commands"
                     .to_string()
             }
         }
         Tab::Llm => {
             if state.llm_focus == PaneFocus::Primary {
-                "llm: j/k move | l/right detail | : commands | ? help | H hints | / global search | q quit"
+                "llm: j/k move | l/right detail | : commands"
                     .to_string()
             } else {
-                "model detail: j/k scroll | i/o toggle blocks | esc/h/left feed | : commands | ? help | H hints | q quit"
+                "model detail: j/k scroll | i/o toggle blocks | esc/h/left feed | : commands"
                     .to_string()
             }
         }

@@ -34,6 +34,8 @@ pub(crate) fn render_logs(
         .logs
         .iter()
         .enumerate()
+        .skip(state.log_feed_scroll)
+        .take(geometry::table_viewport_height(panels[0]))
         .map(|(idx, log)| {
             let style = if idx == state.selected_log {
                 Style::default().fg(palette.background).bg(palette.accent)
@@ -115,6 +117,8 @@ pub(crate) fn render_metrics(
         .metrics
         .iter()
         .enumerate()
+        .skip(state.metric_feed_scroll)
+        .take(geometry::table_viewport_height(panels[0]))
         .map(|(idx, metric)| {
             let style = if idx == state.selected_metric {
                 Style::default().fg(palette.background).bg(palette.accent)
@@ -211,6 +215,8 @@ pub(crate) fn render_llm(
         .llm
         .iter()
         .enumerate()
+        .skip(state.llm_feed_scroll)
+        .take(geometry::table_viewport_height(left[3]))
         .map(|(idx, item)| {
             let style = if idx == state.selected_llm {
                 Style::default().fg(palette.background).bg(palette.warning)

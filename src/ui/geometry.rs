@@ -89,10 +89,6 @@ pub(crate) fn log_detail_area(body: Rect) -> Rect {
     log_sections(body)[1]
 }
 
-pub(crate) fn metric_detail_area(body: Rect) -> Rect {
-    metric_right_sections(metric_sections(body)[1])[1]
-}
-
 pub(crate) fn llm_detail_area(body: Rect) -> Rect {
     llm_sections(body)[1]
 }
@@ -103,6 +99,32 @@ pub(crate) fn trace_tree_viewport_height(area: Rect) -> usize {
 
 pub(crate) fn detail_viewport_height(area: Rect) -> usize {
     area.height.saturating_sub(2) as usize
+}
+
+pub(crate) fn table_viewport_height(area: Rect) -> usize {
+    area.height.saturating_sub(3) as usize
+}
+
+pub(crate) fn scroll_window_offset(
+    current_offset: usize,
+    total_items: usize,
+    viewport_height: usize,
+    delta: isize,
+) -> usize {
+    if total_items == 0 || viewport_height == 0 || total_items <= viewport_height {
+        return 0;
+    }
+
+    let max_offset = total_items.saturating_sub(viewport_height);
+    (current_offset as isize + delta).clamp(0, max_offset as isize) as usize
+}
+
+pub(crate) fn clamp_window_offset(
+    current_offset: usize,
+    total_items: usize,
+    viewport_height: usize,
+) -> usize {
+    scroll_window_offset(current_offset, total_items, viewport_height, 0)
 }
 
 pub(crate) fn trace_tree_scroll_offset(
