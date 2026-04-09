@@ -433,6 +433,34 @@ fn llm_timeline_loads_only_selected_subtree() {
     assert!(!timeline.iter().any(|item| item.label == "cache lookup"));
 }
 
+#[test]
+fn llm_aggregate_sections_are_bounded() {
+    let tempdir = tempdir().unwrap();
+    let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+    let now = now_nanos();
+
+    for index in 0..10_u8 {
+        store
+            .ingest_traces(bounded_llm_trace_request(
+                now + i64::from(index) * 10_000_000,
+                index,
+            ))
+            .unwrap();
+    }
+
+    let rollups = store.llm_rollups(None, None, None).unwrap();
+    assert!(rollups.len() <= 15);
+
+    let sessions = store.llm_sessions(None, None, None).unwrap();
+    assert!(sessions.len() <= 5);
+
+    let comparisons = store.llm_model_comparisons(None, None, None).unwrap();
+    assert!(comparisons.len() <= 8);
+
+    let top_calls = store.llm_top_calls(None, None, None).unwrap();
+    assert!(top_calls.len() <= 8);
+}
+
 fn trace_request(now: i64) -> ExportTraceServiceRequest {
     trace_request_variant(
         now,
@@ -529,6 +557,57 @@ fn llm_timeline_trace_request(now: u64) -> ExportTraceServiceRequest {
                         flags: 0,
                     },
                 ],
+            }],
+        }],
+    }
+}
+
+fn bounded_llm_trace_request(now: i64, index: u8) -> ExportTraceServiceRequest {
+    let trace_byte = index.saturating_add(10);
+    let span_byte = index.saturating_add(40);
+    let now = now as u64;
+
+    ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![string_attr("service.name", "api")],
+                dropped_attributes_count: 0,
+                entity_refs: Vec::new(),
+            }),
+            schema_url: String::new(),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope::default()),
+                schema_url: String::new(),
+                spans: vec![Span {
+                    trace_id: vec![trace_byte; 16],
+                    span_id: vec![span_byte; 8],
+                    parent_span_id: vec![],
+                    trace_state: String::new(),
+                    name: format!("chat.completion.{index}"),
+                    kind: span::SpanKind::Server as i32,
+                    start_time_unix_nano: now,
+                    end_time_unix_nano: now + 2_000_000 + u64::from(index) * 1_000,
+                    attributes: vec![
+                        string_attr("llm.provider", "openai"),
+                        string_attr("llm.model_name", &format!("gpt-test-{index}")),
+                        string_attr("conversation.id", &format!("conv-{index}")),
+                        string_attr("input.value", "hello"),
+                        string_attr("output.value", "world"),
+                        int_attr("llm.token_count.prompt", 5 + i64::from(index)),
+                        int_attr("llm.token_count.completion", 7 + i64::from(index)),
+                        double_attr("llm.cost.total", 0.001 + f64::from(index) * 0.0001),
+                    ],
+                    dropped_attributes_count: 0,
+                    events: Vec::new(),
+                    dropped_events_count: 0,
+                    links: Vec::new(),
+                    dropped_links_count: 0,
+                    status: Some(Status {
+                        message: String::new(),
+                        code: 1,
+                    }),
+                    flags: 0,
+                }],
             }],
         }],
     }

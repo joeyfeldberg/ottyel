@@ -19,6 +19,12 @@ use super::{
     },
 };
 
+const LLM_ROLLUP_LIMIT: usize = 5;
+const LLM_SESSION_LIMIT: usize = 5;
+const LLM_SESSION_SCAN_LIMIT: usize = 256;
+const LLM_MODEL_COMPARISON_LIMIT: usize = 8;
+const LLM_TOP_CALL_LIMIT: usize = 4;
+
 impl Store {
     pub fn recent_traces_page(
         &self,
@@ -598,7 +604,7 @@ impl Store {
             sql.push_str(&where_clauses.join(" AND "));
         }
         sql.push_str(&format!(
-            " GROUP BY {column} ORDER BY total_tokens DESC, call_count DESC, label ASC LIMIT 5"
+            " GROUP BY {column} ORDER BY total_tokens DESC, call_count DESC, label ASC LIMIT {LLM_ROLLUP_LIMIT}"
         ));
 
         let mut stmt = conn.prepare(&sql)?;
@@ -625,7 +631,7 @@ impl Store {
         search_query: Option<&str>,
     ) -> Result<Vec<LlmSessionSummary>> {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        let mut sql = String::from(
+        let mut source_sql = String::from(
             r#"
             SELECT llm_spans.service_name, provider, model, total_tokens, cost, latency_ms, status,
                    raw_json, spans.start_time_unix_nano, spans.end_time_unix_nano
@@ -650,10 +656,13 @@ impl Store {
             ));
         }
         if !where_clauses.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&where_clauses.join(" AND "));
+            source_sql.push_str(" WHERE ");
+            source_sql.push_str(&where_clauses.join(" AND "));
         }
-        sql.push_str(" ORDER BY spans.start_time_unix_nano ASC");
+        source_sql.push_str(&format!(
+            " ORDER BY spans.start_time_unix_nano DESC LIMIT {LLM_SESSION_SCAN_LIMIT}"
+        ));
+        let sql = format!("SELECT * FROM ({source_sql}) ORDER BY start_time_unix_nano ASC");
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
@@ -696,7 +705,7 @@ impl Store {
                 .then_with(|| right.total_tokens.cmp(&left.total_tokens))
                 .then_with(|| left.correlation_id.cmp(&right.correlation_id))
         });
-        sessions.truncate(5);
+        sessions.truncate(LLM_SESSION_LIMIT);
         Ok(sessions)
     }
 
@@ -723,7 +732,9 @@ impl Store {
         }
         append_llm_where(&mut sql, service_filter, threshold_unix_nano, search_query);
         sql.push_str(
-            " GROUP BY provider, model ORDER BY total_tokens DESC, call_count DESC, provider ASC, model ASC LIMIT 8",
+            &format!(
+                " GROUP BY provider, model ORDER BY total_tokens DESC, call_count DESC, provider ASC, model ASC LIMIT {LLM_MODEL_COMPARISON_LIMIT}"
+            ),
         );
 
         let mut stmt = conn.prepare(&sql)?;
@@ -788,7 +799,9 @@ impl Store {
             LlmTopCallKind::Cost => "COALESCE(cost, -1) DESC, COALESCE(total_tokens, 0) DESC",
             LlmTopCallKind::Tokens => "COALESCE(total_tokens, 0) DESC, COALESCE(cost, -1) DESC",
         };
-        sql.push_str(&format!(" ORDER BY {order}, llm_spans.span_id ASC LIMIT 4"));
+        sql.push_str(&format!(
+            " ORDER BY {order}, llm_spans.span_id ASC LIMIT {LLM_TOP_CALL_LIMIT}"
+        ));
 
         let mut stmt = conn.prepare(&sql)?;
         let rows = stmt.query_map([], |row| {
