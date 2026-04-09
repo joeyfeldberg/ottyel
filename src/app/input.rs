@@ -12,12 +12,20 @@ use crate::{
 const COMMAND_PALETTE_VISIBLE_ROWS: usize = 8;
 const FAST_MOVE_STEP: isize = 5;
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum InputOutcome {
+    None,
+    RefreshDetails,
+    RefreshSnapshot,
+    Quit,
+}
+
 pub(super) fn handle_key(
     code: KeyCode,
     modifiers: KeyModifiers,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     if state.show_command_palette {
         return handle_command_palette_key(code, modifiers, state, snapshot);
     }
@@ -53,7 +61,9 @@ pub(super) fn handle_key(
             state.show_context_help = !state.show_context_help;
         }
         KeyCode::Char('g') => cycle_theme(state),
-        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => return true,
+        KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
+            return InputOutcome::Quit;
+        }
         KeyCode::Char('x') if Tab::ALL[state.active_tab] == Tab::Logs => {
             state.log_search_mode = true;
         }
@@ -67,7 +77,7 @@ pub(super) fn handle_key(
         {
             state.llm_expand_output = !state.llm_expand_output;
         }
-        KeyCode::Char('q') => return true,
+        KeyCode::Char('q') => return InputOutcome::Quit,
         KeyCode::Char('f') => {
             state.log_tail = !state.log_tail;
             if state.log_tail {
@@ -75,10 +85,12 @@ pub(super) fn handle_key(
             }
         }
         KeyCode::Char('v') if Tab::ALL[state.active_tab] == Tab::Logs => {
-            cycle_log_severity_filter(state)
+            cycle_log_severity_filter(state);
+            return InputOutcome::RefreshSnapshot;
         }
         KeyCode::Char('c') if Tab::ALL[state.active_tab] == Tab::Logs => {
-            cycle_log_correlation_filter(state)
+            cycle_log_correlation_filter(state);
+            return InputOutcome::RefreshSnapshot;
         }
         KeyCode::Tab => {
             state.active_tab = (state.active_tab + 1) % Tab::ALL.len();
@@ -90,7 +102,8 @@ pub(super) fn handle_key(
             if Tab::ALL[state.active_tab] == Tab::Traces
                 && state.trace_view_mode == TraceViewMode::List =>
         {
-            open_selected_trace(state)
+            open_selected_trace(state);
+            return InputOutcome::RefreshDetails;
         }
         KeyCode::Esc => go_back(state),
         KeyCode::Left | KeyCode::Char('h') => move_focus_left(state),
@@ -102,7 +115,10 @@ pub(super) fn handle_key(
         {
             toggle_selected_trace_subtree(state, snapshot)
         }
-        KeyCode::Char('e') => state.errors_only = !state.errors_only,
+        KeyCode::Char('e') => {
+            state.errors_only = !state.errors_only;
+            return InputOutcome::RefreshSnapshot;
+        }
         KeyCode::Char('[') if Tab::ALL[state.active_tab] == Tab::Traces => jump_to_trace_row(
             crate::ui::previous_error_trace_index(snapshot, state),
             state,
@@ -119,19 +135,23 @@ pub(super) fn handle_key(
         KeyCode::Char('m') if Tab::ALL[state.active_tab] == Tab::Traces => {
             jump_to_trace_row(crate::ui::first_llm_trace_index(snapshot, state), state)
         }
-        KeyCode::Char('t') => cycle_time_window(state),
+        KeyCode::Char('t') => {
+            cycle_time_window(state);
+            return InputOutcome::RefreshSnapshot;
+        }
         KeyCode::Char('s') if !snapshot.services.is_empty() => {
             state.service_filter_index = match state.service_filter_index {
                 None => Some(0),
                 Some(idx) if idx + 1 >= snapshot.services.len() => None,
                 Some(idx) => Some(idx + 1),
             };
+            return InputOutcome::RefreshSnapshot;
         }
-        KeyCode::Down | KeyCode::Char('j') => move_selection(move_step, state, snapshot),
-        KeyCode::Up | KeyCode::Char('k') => move_selection(-move_step, state, snapshot),
+        KeyCode::Down | KeyCode::Char('j') => return move_selection(move_step, state, snapshot),
+        KeyCode::Up | KeyCode::Char('k') => return move_selection(-move_step, state, snapshot),
         _ => {}
     }
-    false
+    InputOutcome::None
 }
 
 fn movement_step(modifiers: KeyModifiers) -> isize {
@@ -147,9 +167,9 @@ pub(super) fn handle_mouse(
     root: Rect,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     if state.show_command_palette || state.show_help || state.search_mode || state.log_search_mode {
-        return false;
+        return InputOutcome::None;
     }
 
     match event.kind {
@@ -162,7 +182,7 @@ pub(super) fn handle_mouse(
         MouseEventKind::ScrollUp => {
             handle_scroll(-1, event.column, event.row, root, state, snapshot)
         }
-        _ => false,
+        _ => InputOutcome::None,
     }
 }
 
@@ -243,18 +263,18 @@ fn handle_left_click(
     root: Rect,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     let [tabs_area, _, body, _] = crate::ui::geometry::root_sections(root);
     if crate::ui::geometry::contains(tabs_area, column, row) {
         click_tab(column, tabs_area, state);
-        return true;
+        return InputOutcome::None;
     }
     if !crate::ui::geometry::contains(body, column, row) {
-        return false;
+        return InputOutcome::None;
     }
 
     match Tab::ALL[state.active_tab] {
-        Tab::Overview => false,
+        Tab::Overview => InputOutcome::None,
         Tab::Traces => handle_trace_click(column, row, body, state, snapshot),
         Tab::Logs => handle_logs_click(column, row, body, state, snapshot),
         Tab::Metrics => handle_metrics_click(column, row, body, state, snapshot),
@@ -302,14 +322,14 @@ fn handle_scroll(
     root: Rect,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     let body = crate::ui::geometry::body_area(root);
     if !crate::ui::geometry::contains(body, column, row) {
-        return false;
+        return InputOutcome::None;
     }
 
     match Tab::ALL[state.active_tab] {
-        Tab::Overview => false,
+        Tab::Overview => InputOutcome::None,
         Tab::Traces => handle_trace_scroll(delta, column, row, body, state, snapshot),
         Tab::Logs => handle_logs_scroll(delta, column, row, body, state, snapshot),
         Tab::Metrics => handle_metrics_scroll(delta, column, row, body, state, snapshot),
@@ -323,7 +343,7 @@ fn handle_trace_click(
     body: Rect,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     if state.trace_view_mode == TraceViewMode::List {
         if let Some(index) = table_row_at(body, row, snapshot.traces.len(), state.trace_list_scroll)
         {
@@ -332,18 +352,18 @@ fn handle_trace_click(
             if was_selected {
                 open_selected_trace(state);
             }
-            return true;
+            return InputOutcome::RefreshDetails;
         }
-        return false;
+        return InputOutcome::None;
     }
 
     let [tree_area, detail_area] = crate::ui::geometry::trace_detail_sections(body);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.trace_focus = TraceFocus::TraceDetail;
-        return false;
+        return InputOutcome::None;
     }
     if !crate::ui::geometry::contains(tree_area, column, row) {
-        return false;
+        return InputOutcome::None;
     }
 
     state.trace_focus = TraceFocus::TraceTree;
@@ -356,9 +376,9 @@ fn handle_trace_click(
         if clicked_disclosure {
             toggle_selected_trace_subtree(state, snapshot);
         }
-        return true;
+        return InputOutcome::None;
     }
-    false
+    InputOutcome::None
 }
 
 fn handle_logs_click(
@@ -367,14 +387,14 @@ fn handle_logs_click(
     body: Rect,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     let [feed_area, detail_area] = crate::ui::geometry::log_sections(body);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.logs_focus = PaneFocus::Detail;
-        return false;
+        return InputOutcome::None;
     }
     if !crate::ui::geometry::contains(feed_area, column, row) {
-        return false;
+        return InputOutcome::None;
     }
 
     state.logs_focus = PaneFocus::Primary;
@@ -382,9 +402,9 @@ fn handle_logs_click(
     if let Some(index) = table_row_at(feed_area, row, snapshot.logs.len(), state.log_feed_scroll) {
         state.selected_log = index;
         state.log_detail_scroll = 0;
-        return true;
+        return InputOutcome::None;
     }
-    false
+    InputOutcome::None
 }
 
 fn handle_metrics_click(
@@ -393,15 +413,15 @@ fn handle_metrics_click(
     body: Rect,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     let [feed_area, right_area] = crate::ui::geometry::metric_sections(body);
     let detail_area = crate::ui::geometry::metric_right_sections(right_area)[1];
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.metrics_focus = PaneFocus::Detail;
-        return false;
+        return InputOutcome::None;
     }
     if !crate::ui::geometry::contains(feed_area, column, row) {
-        return false;
+        return InputOutcome::None;
     }
 
     state.metrics_focus = PaneFocus::Primary;
@@ -413,9 +433,9 @@ fn handle_metrics_click(
     ) {
         state.selected_metric = index;
         state.metric_detail_scroll = 0;
-        return true;
+        return InputOutcome::None;
     }
-    false
+    InputOutcome::None
 }
 
 fn handle_llm_click(
@@ -424,15 +444,15 @@ fn handle_llm_click(
     body: Rect,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     let [left_area, detail_area] = crate::ui::geometry::llm_sections(body);
     let [_, _, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.llm_focus = PaneFocus::Detail;
-        return false;
+        return InputOutcome::None;
     }
     if !crate::ui::geometry::contains(left_area, column, row) {
-        return false;
+        return InputOutcome::None;
     }
 
     state.llm_focus = PaneFocus::Primary;
@@ -441,9 +461,9 @@ fn handle_llm_click(
         state.llm_detail_scroll = 0;
         state.llm_expand_prompt = false;
         state.llm_expand_output = false;
-        return true;
+        return InputOutcome::RefreshDetails;
     }
-    false
+    InputOutcome::None
 }
 
 fn handle_trace_scroll(
@@ -453,7 +473,7 @@ fn handle_trace_scroll(
     body: Rect,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     if state.trace_view_mode == TraceViewMode::List {
         if crate::ui::geometry::contains(body, column, row) {
             state.trace_focus = TraceFocus::TraceList;
@@ -467,14 +487,14 @@ fn handle_trace_scroll(
                 state.collapsed_trace_spans.clear();
             }
         }
-        return false;
+        return InputOutcome::RefreshDetails;
     }
 
     let [tree_area, detail_area] = crate::ui::geometry::trace_detail_sections(body);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.trace_focus = TraceFocus::TraceDetail;
         scroll_detail(delta as i16, state);
-        return false;
+        return InputOutcome::None;
     }
     if crate::ui::geometry::contains(tree_area, column, row) {
         state.trace_focus = TraceFocus::TraceTree;
@@ -486,7 +506,7 @@ fn handle_trace_scroll(
             state.trace_detail_scroll = 0;
         }
     }
-    false
+    InputOutcome::None
 }
 
 fn handle_logs_scroll(
@@ -496,12 +516,12 @@ fn handle_logs_scroll(
     body: Rect,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     let [feed_area, detail_area] = crate::ui::geometry::log_sections(body);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.logs_focus = PaneFocus::Detail;
         scroll_detail(delta as i16, state);
-        return false;
+        return InputOutcome::None;
     }
     if crate::ui::geometry::contains(feed_area, column, row) {
         state.logs_focus = PaneFocus::Primary;
@@ -512,7 +532,7 @@ fn handle_logs_scroll(
             state.log_detail_scroll = 0;
         }
     }
-    false
+    InputOutcome::None
 }
 
 fn handle_metrics_scroll(
@@ -522,13 +542,13 @@ fn handle_metrics_scroll(
     body: Rect,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     let [feed_area, right_area] = crate::ui::geometry::metric_sections(body);
     let detail_area = crate::ui::geometry::metric_right_sections(right_area)[1];
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.metrics_focus = PaneFocus::Detail;
         scroll_detail(delta as i16, state);
-        return false;
+        return InputOutcome::None;
     }
     if crate::ui::geometry::contains(feed_area, column, row) {
         state.metrics_focus = PaneFocus::Primary;
@@ -538,7 +558,7 @@ fn handle_metrics_scroll(
             state.metric_detail_scroll = 0;
         }
     }
-    false
+    InputOutcome::None
 }
 
 fn handle_llm_scroll(
@@ -548,13 +568,13 @@ fn handle_llm_scroll(
     body: Rect,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     let [left_area, detail_area] = crate::ui::geometry::llm_sections(body);
     let [_, _, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.llm_focus = PaneFocus::Detail;
         scroll_detail(delta as i16, state);
-        return false;
+        return InputOutcome::None;
     }
     if crate::ui::geometry::contains(feed_area, column, row) {
         state.llm_focus = PaneFocus::Primary;
@@ -564,10 +584,10 @@ fn handle_llm_scroll(
             state.llm_detail_scroll = 0;
             state.llm_expand_prompt = false;
             state.llm_expand_output = false;
-            return true;
+            return InputOutcome::RefreshDetails;
         }
     }
-    false
+    InputOutcome::None
 }
 
 fn table_row_at(area: Rect, row: u16, item_count: usize, scroll_offset: usize) -> Option<usize> {
@@ -594,26 +614,28 @@ fn select_trace(index: usize, state: &mut UiState) {
     state.collapsed_trace_spans.clear();
 }
 
-fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapshot) {
+fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapshot) -> InputOutcome {
     match Tab::ALL[state.active_tab] {
         Tab::Overview => {}
         Tab::Traces => match state.trace_focus {
             TraceFocus::TraceList => {
                 if state.trace_view_mode != TraceViewMode::List {
-                    return;
+                    return InputOutcome::None;
                 }
                 let previous = state.selected_trace;
                 move_index(&mut state.selected_trace, snapshot.traces.len(), delta);
                 if state.selected_trace != previous {
                     state.selected_trace_span = 0;
                     state.trace_tree_scroll = 0;
+                    state.trace_tree_follow_selected = true;
                     state.trace_detail_scroll = 0;
                     state.collapsed_trace_spans.clear();
+                    return InputOutcome::RefreshDetails;
                 }
             }
             TraceFocus::TraceTree => {
                 if state.trace_view_mode != TraceViewMode::Detail {
-                    return;
+                    return InputOutcome::None;
                 }
                 let previous = state.selected_trace_span;
                 let visible_len = crate::ui::visible_trace_tree_len(snapshot, state);
@@ -659,11 +681,14 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapsho
                     state.llm_detail_scroll = 0;
                     state.llm_expand_prompt = false;
                     state.llm_expand_output = false;
+                    return InputOutcome::RefreshDetails;
                 }
             }
             PaneFocus::Detail => scroll_detail(delta as i16, state),
         },
     }
+
+    InputOutcome::None
 }
 
 fn move_index(selection: &mut usize, max: usize, delta: isize) {
@@ -811,7 +836,7 @@ fn go_back(state: &mut UiState) {
     }
 }
 
-fn handle_search_key(code: KeyCode, state: &mut UiState) -> bool {
+fn handle_search_key(code: KeyCode, state: &mut UiState) -> InputOutcome {
     match code {
         KeyCode::Esc | KeyCode::Enter => {
             state.search_mode = false;
@@ -827,10 +852,10 @@ fn handle_search_key(code: KeyCode, state: &mut UiState) -> bool {
         }
         _ => {}
     }
-    false
+    InputOutcome::RefreshSnapshot
 }
 
-fn handle_log_search_key(code: KeyCode, state: &mut UiState) -> bool {
+fn handle_log_search_key(code: KeyCode, state: &mut UiState) -> InputOutcome {
     match code {
         KeyCode::Esc | KeyCode::Enter => {
             state.log_search_mode = false;
@@ -846,17 +871,17 @@ fn handle_log_search_key(code: KeyCode, state: &mut UiState) -> bool {
         }
         _ => {}
     }
-    false
+    InputOutcome::RefreshSnapshot
 }
 
-fn handle_help_key(code: KeyCode, state: &mut UiState) -> bool {
+fn handle_help_key(code: KeyCode, state: &mut UiState) -> InputOutcome {
     match code {
         KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') => {
             state.show_help = false;
         }
         _ => {}
     }
-    false
+    InputOutcome::None
 }
 
 fn open_command_palette(state: &mut UiState) {
@@ -882,7 +907,7 @@ fn handle_command_palette_key(
     modifiers: KeyModifiers,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     match code {
         KeyCode::Esc => {
             close_command_palette(state);
@@ -909,7 +934,7 @@ fn handle_command_palette_key(
         }
         _ => {}
     }
-    false
+    InputOutcome::None
 }
 
 fn move_palette_selection(delta: isize, state: &mut UiState) {
@@ -945,7 +970,7 @@ fn execute_palette_action(
     action: PaletteAction,
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
-) -> bool {
+) -> InputOutcome {
     match action {
         PaletteAction::SwitchTab(tab) => {
             state.active_tab = tab_index(tab);
@@ -972,6 +997,7 @@ fn execute_palette_action(
         PaletteAction::CycleTimeWindow => cycle_time_window(state),
         PaletteAction::ToggleTraceErrors => {
             state.errors_only = !state.errors_only;
+            return InputOutcome::RefreshSnapshot;
         }
         PaletteAction::ReturnToTraceList => {
             state.active_tab = tab_index(Tab::Traces);
@@ -988,15 +1014,22 @@ fn execute_palette_action(
         PaletteAction::ClearGlobalSearch => {
             state.search_query.clear();
             state.search_mode = false;
+            return InputOutcome::RefreshSnapshot;
         }
         PaletteAction::ClearLogSearch => {
             state.active_tab = tab_index(Tab::Logs);
             state.log_search_query.clear();
             state.log_search_mode = false;
+            return InputOutcome::RefreshSnapshot;
         }
-        PaletteAction::Quit => return true,
+        PaletteAction::Quit => return InputOutcome::Quit,
     }
-    false
+    match action {
+        PaletteAction::CycleService
+        | PaletteAction::ClearService
+        | PaletteAction::CycleTimeWindow => InputOutcome::RefreshSnapshot,
+        _ => InputOutcome::None,
+    }
 }
 
 #[cfg(test)]
@@ -1004,7 +1037,7 @@ mod tests {
     use crossterm::event::{KeyCode, KeyModifiers, MouseButton, MouseEvent, MouseEventKind};
     use ratatui::layout::Rect;
 
-    use super::handle_mouse;
+    use super::{InputOutcome, handle_mouse};
     use crate::{
         domain::{DashboardSnapshot, LogSummary, OverviewStats, SpanDetail, TraceSummary},
         query::TimeWindow,
@@ -1115,14 +1148,14 @@ mod tests {
             selected_llm_timeline: Vec::new(),
         };
 
-        let should_quit = super::handle_key(
+        let outcome = super::handle_key(
             KeyCode::Char('j'),
             KeyModifiers::SHIFT,
             &mut state,
             &snapshot,
         );
 
-        assert!(!should_quit);
+        assert_eq!(outcome, InputOutcome::None);
         assert_eq!(state.selected_log, super::FAST_MOVE_STEP as usize);
     }
 
@@ -1231,7 +1264,7 @@ mod tests {
             selected_llm_timeline: Vec::new(),
         };
 
-        let needs_refresh = handle_mouse(
+        let outcome = handle_mouse(
             MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 column: 5,
@@ -1243,7 +1276,7 @@ mod tests {
             &snapshot,
         );
 
-        assert!(!needs_refresh);
+        assert_eq!(outcome, InputOutcome::None);
         assert_eq!(state.logs_focus, PaneFocus::Primary);
         assert_eq!(state.selected_log, 8);
         assert_eq!(state.log_feed_scroll, 0);
@@ -1287,7 +1320,7 @@ mod tests {
             selected_llm_timeline: Vec::new(),
         };
 
-        let needs_refresh = handle_mouse(
+        let outcome = handle_mouse(
             MouseEvent {
                 kind: MouseEventKind::ScrollDown,
                 column: 5,
@@ -1299,7 +1332,7 @@ mod tests {
             &snapshot,
         );
 
-        assert!(!needs_refresh);
+        assert_eq!(outcome, InputOutcome::None);
         assert_eq!(state.trace_focus, TraceFocus::TraceTree);
         assert_eq!(state.selected_trace_span, 8);
         assert_eq!(state.trace_tree_scroll, 0);

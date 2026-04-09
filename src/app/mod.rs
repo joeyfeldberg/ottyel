@@ -20,6 +20,7 @@ use crate::{
     store::Store,
     ui::UiState,
 };
+use input::InputOutcome;
 
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command.unwrap_or(Command::Serve(ServeArgs::default())) {
@@ -130,11 +131,12 @@ async fn terminal_loop(
             maybe_event = events.next() => {
                 match maybe_event.transpose()? {
                     Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        if input::handle_key(key.code, key.modifiers, &mut state, &snapshot) {
+                        let outcome =
+                            input::handle_key(key.code, key.modifiers, &mut state, &snapshot);
+                        if matches!(outcome, InputOutcome::Quit) {
                             break;
                         }
-                        snapshot = query.snapshot(&input::filters(&state, &snapshot.services))?;
-                        refresh_detail_state(query, &state, &mut snapshot)?;
+                        apply_input_outcome(outcome, query, &state, &mut snapshot)?;
                     }
                     Some(event) => {
                         if handle_terminal_event(
@@ -169,18 +171,17 @@ fn handle_terminal_event(
 ) -> Result<bool> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
-            if input::handle_key(key.code, key.modifiers, state, snapshot) {
+            let outcome = input::handle_key(key.code, key.modifiers, state, snapshot);
+            if matches!(outcome, InputOutcome::Quit) {
                 return Ok(true);
             }
-            *snapshot = query.snapshot(&input::filters(state, &snapshot.services))?;
-            refresh_detail_state(query, state, snapshot)?;
+            apply_input_outcome(outcome, query, state, snapshot)?;
         }
         Event::Mouse(mouse) => {
             let before = state.clone();
-            let needs_refresh = input::handle_mouse(mouse, root, state, snapshot);
-            if needs_refresh {
-                *snapshot = query.snapshot(&input::filters(state, &snapshot.services))?;
-                refresh_detail_state(query, state, snapshot)?;
+            let outcome = input::handle_mouse(mouse, root, state, snapshot);
+            if !matches!(outcome, InputOutcome::None) {
+                apply_input_outcome(outcome, query, state, snapshot)?;
             } else if before == *state
                 && matches!(
                     mouse.kind,
@@ -195,6 +196,27 @@ fn handle_terminal_event(
     }
 
     Ok(false)
+}
+
+fn apply_input_outcome(
+    outcome: InputOutcome,
+    query: &QueryService,
+    state: &UiState,
+    snapshot: &mut crate::domain::DashboardSnapshot,
+) -> Result<()> {
+    match outcome {
+        InputOutcome::None => {}
+        InputOutcome::RefreshDetails => {
+            refresh_detail_state(query, state, snapshot)?;
+        }
+        InputOutcome::RefreshSnapshot => {
+            *snapshot = query.snapshot(&input::filters(state, &snapshot.services))?;
+            refresh_detail_state(query, state, snapshot)?;
+        }
+        InputOutcome::Quit => {}
+    }
+
+    Ok(())
 }
 
 fn drain_stale_scroll_events(
