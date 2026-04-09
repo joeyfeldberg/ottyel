@@ -404,8 +404,9 @@ fn handle_trace_click(
             select_trace(index, state);
             if was_selected {
                 open_selected_trace(state);
+                return InputOutcome::RefreshDetails;
             }
-            return InputOutcome::RefreshDetails;
+            return InputOutcome::None;
         }
         return InputOutcome::None;
     }
@@ -540,7 +541,7 @@ fn handle_trace_scroll(
                 state.collapsed_trace_spans.clear();
             }
         }
-        return InputOutcome::RefreshDetails;
+        return InputOutcome::None;
     }
 
     let [tree_area, detail_area] = crate::ui::geometry::trace_detail_sections(body);
@@ -683,7 +684,6 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapsho
                     state.trace_tree_follow_selected = true;
                     state.trace_detail_scroll = 0;
                     state.collapsed_trace_spans.clear();
-                    return InputOutcome::RefreshDetails;
                 }
             }
             TraceFocus::TraceTree => {
@@ -1103,7 +1103,7 @@ mod tests {
         state.active_tab = Tab::Traces as usize;
         let snapshot = snapshot_with_trace();
 
-        handle_mouse(
+        let outcome = handle_mouse(
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 4,
@@ -1115,8 +1115,70 @@ mod tests {
             &snapshot,
         );
 
+        assert_eq!(outcome, InputOutcome::RefreshDetails);
         assert_eq!(state.trace_view_mode, TraceViewMode::Detail);
         assert_eq!(state.trace_focus, TraceFocus::TraceTree);
+    }
+
+    #[test]
+    fn clicking_new_trace_in_list_mode_does_not_refresh_details() {
+        let mut state = UiState {
+            active_tab: Tab::Traces as usize,
+            selected_trace: 0,
+            ..UiState::default()
+        };
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: OverviewStats {
+                trace_count: 2,
+                ..empty_overview()
+            },
+            traces: vec![
+                TraceSummary {
+                    trace_id: "trace-1".to_string(),
+                    service_name: "api".to_string(),
+                    root_name: "request".to_string(),
+                    span_count: 1,
+                    error_count: 0,
+                    duration_ms: 1.0,
+                    started_at_unix_nano: 1,
+                },
+                TraceSummary {
+                    trace_id: "trace-2".to_string(),
+                    service_name: "api".to_string(),
+                    root_name: "request".to_string(),
+                    span_count: 1,
+                    error_count: 0,
+                    duration_ms: 1.0,
+                    started_at_unix_nano: 2,
+                },
+            ],
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+
+        let outcome = handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::Down(MouseButton::Left),
+                column: 4,
+                row: 7,
+                modifiers: KeyModifiers::empty(),
+            },
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(outcome, InputOutcome::None);
+        assert_eq!(state.selected_trace, 1);
+        assert_eq!(state.trace_view_mode, TraceViewMode::List);
     }
 
     #[test]
@@ -1260,6 +1322,127 @@ mod tests {
 
         assert_eq!(outcome, InputOutcome::None);
         assert_eq!(state.selected_log, super::FAST_MOVE_STEP as usize);
+    }
+
+    #[test]
+    fn trace_list_keyboard_navigation_stays_local() {
+        let mut state = UiState {
+            active_tab: Tab::Traces as usize,
+            trace_focus: TraceFocus::TraceList,
+            trace_view_mode: TraceViewMode::List,
+            ..UiState::default()
+        };
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: OverviewStats {
+                trace_count: 2,
+                ..empty_overview()
+            },
+            traces: vec![
+                TraceSummary {
+                    trace_id: "trace-1".to_string(),
+                    service_name: "api".to_string(),
+                    root_name: "request".to_string(),
+                    span_count: 1,
+                    error_count: 0,
+                    duration_ms: 1.0,
+                    started_at_unix_nano: 1,
+                },
+                TraceSummary {
+                    trace_id: "trace-2".to_string(),
+                    service_name: "api".to_string(),
+                    root_name: "request".to_string(),
+                    span_count: 1,
+                    error_count: 0,
+                    duration_ms: 1.0,
+                    started_at_unix_nano: 2,
+                },
+            ],
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+
+        let outcome = super::handle_key(
+            KeyCode::Char('j'),
+            KeyModifiers::empty(),
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(outcome, InputOutcome::None);
+        assert_eq!(state.selected_trace, 1);
+        assert_eq!(state.trace_view_mode, TraceViewMode::List);
+    }
+
+    #[test]
+    fn trace_list_scroll_stays_local() {
+        let mut state = UiState {
+            active_tab: Tab::Traces as usize,
+            trace_focus: TraceFocus::TraceList,
+            trace_view_mode: TraceViewMode::List,
+            selected_trace: 0,
+            ..UiState::default()
+        };
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: OverviewStats {
+                trace_count: 2,
+                ..empty_overview()
+            },
+            traces: vec![
+                TraceSummary {
+                    trace_id: "trace-1".to_string(),
+                    service_name: "api".to_string(),
+                    root_name: "request".to_string(),
+                    span_count: 1,
+                    error_count: 0,
+                    duration_ms: 1.0,
+                    started_at_unix_nano: 1,
+                },
+                TraceSummary {
+                    trace_id: "trace-2".to_string(),
+                    service_name: "api".to_string(),
+                    root_name: "request".to_string(),
+                    span_count: 1,
+                    error_count: 0,
+                    duration_ms: 1.0,
+                    started_at_unix_nano: 2,
+                },
+            ],
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+
+        let outcome = handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 5,
+                row: 10,
+                modifiers: KeyModifiers::empty(),
+            },
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(outcome, InputOutcome::None);
+        assert_eq!(state.selected_trace, 1);
+        assert_eq!(state.trace_view_mode, TraceViewMode::List);
     }
 
     #[test]
