@@ -59,7 +59,7 @@ pub struct LlmCursor {
     pub span_id: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct QueryFilters {
     pub service: Option<String>,
     pub errors_only: bool,
@@ -68,7 +68,7 @@ pub struct QueryFilters {
     pub log_filters: LogFilters,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct LogFilters {
     pub severity: LogSeverityFilter,
     pub correlation: LogCorrelationFilter,
@@ -186,11 +186,6 @@ impl QueryService {
                 filters.search_query.as_deref(),
             )?
             .items;
-        let selected_trace = traces
-            .first()
-            .map(|summary| self.store.trace_detail(&summary.trace_id))
-            .transpose()?
-            .unwrap_or_default();
         let logs = self
             .store
             .recent_logs_page(
@@ -251,7 +246,7 @@ impl QueryService {
                 llm_count,
             },
             traces,
-            selected_trace,
+            selected_trace: Vec::new(),
             logs,
             metrics,
             llm,

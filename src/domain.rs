@@ -42,7 +42,7 @@ impl LlmAttributes {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TraceSummary {
     pub trace_id: String,
     pub service_name: String,
