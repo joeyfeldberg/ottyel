@@ -192,21 +192,27 @@ pub fn sync_detail_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut 
         state.trace_detail_scroll = 0;
     }
 
-    state.log_detail_scroll = geometry::clamp_scroll(
-        state.log_detail_scroll,
-        details::log_detail_lines(snapshot, state, palette).len(),
-        geometry::detail_viewport_height(geometry::log_detail_area(body)),
-    );
-    state.metric_detail_scroll = geometry::clamp_scroll(
-        state.metric_detail_scroll,
-        details::metric_detail_lines(snapshot, state, palette).len(),
-        geometry::detail_viewport_height(geometry::metric_right_sections(metric_right)[1]),
-    );
-    state.llm_detail_scroll = geometry::clamp_scroll(
-        state.llm_detail_scroll,
-        details::llm_detail_lines(snapshot, state, palette).len(),
-        geometry::detail_viewport_height(geometry::llm_detail_area(body)),
-    );
+    if Tab::ALL[state.active_tab] == Tab::Logs {
+        state.log_detail_scroll = geometry::clamp_scroll(
+            state.log_detail_scroll,
+            details::log_detail_lines(snapshot, state, palette).len(),
+            geometry::detail_viewport_height(geometry::log_detail_area(body)),
+        );
+    }
+    if Tab::ALL[state.active_tab] == Tab::Metrics {
+        state.metric_detail_scroll = geometry::clamp_scroll(
+            state.metric_detail_scroll,
+            details::metric_detail_lines(snapshot, state, palette).len(),
+            geometry::detail_viewport_height(geometry::metric_right_sections(metric_right)[1]),
+        );
+    }
+    if Tab::ALL[state.active_tab] == Tab::Llm {
+        state.llm_detail_scroll = geometry::clamp_scroll(
+            state.llm_detail_scroll,
+            details::llm_detail_lines(snapshot, state, palette).len(),
+            geometry::detail_viewport_height(geometry::llm_detail_area(body)),
+        );
+    }
 }
 
 #[cfg(test)]

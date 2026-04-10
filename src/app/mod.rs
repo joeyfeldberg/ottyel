@@ -20,10 +20,10 @@ use tokio::{
 
 use crate::{
     config::{Cli, Command, DoctorArgs, ServeArgs},
-    domain::{DashboardSnapshot, SpanDetail, TraceSummary},
+    domain::{DashboardSnapshot, LlmTimelineItem, SpanDetail, TraceSummary},
     query::{QueryFilters, QueryService},
     store::Store,
-    ui::UiState,
+    ui::{Tab, TraceViewMode, UiState},
 };
 use input::{InputOutcome, WheelTarget};
 
@@ -55,6 +55,31 @@ struct SnapshotRefreshResult {
     request_id: u64,
     filters: QueryFilters,
     snapshot: Result<DashboardSnapshot>,
+}
+
+#[derive(Debug, Default)]
+struct LlmTimelineCache {
+    key: Option<LlmTimelineCacheKey>,
+    items: Vec<LlmTimelineItem>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct LlmTimelineCacheKey {
+    trace_id: String,
+    span_id: String,
+}
+
+#[derive(Debug, Default)]
+struct LlmTimelineRefreshState {
+    in_flight: Option<LlmTimelineCacheKey>,
+    desired: Option<LlmTimelineCacheKey>,
+}
+
+#[derive(Debug)]
+struct LlmTimelineRefreshResult {
+    trace_id: String,
+    span_id: String,
+    timeline: Result<Vec<LlmTimelineItem>>,
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -130,8 +155,17 @@ async fn terminal_loop(
     };
     let mut snapshot = query.snapshot(&input::filters(&state, &[]))?;
     let mut trace_detail_cache = TraceDetailCache::default();
-    refresh_detail_state(query, &state, &mut snapshot, &mut trace_detail_cache)?;
+    let mut llm_timeline_cache = LlmTimelineCache::default();
+    let mut llm_timeline_refresh = LlmTimelineRefreshState::default();
+    refresh_detail_state(
+        query,
+        &state,
+        &mut snapshot,
+        &mut trace_detail_cache,
+        &llm_timeline_cache,
+    )?;
     let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel();
+    let (llm_refresh_tx, mut llm_refresh_rx) = mpsc::unbounded_channel();
     let mut refresh_in_flight = false;
     let mut next_refresh_request_id = 0_u64;
     let mut pending_event: Option<Event> = None;
@@ -148,6 +182,14 @@ async fn terminal_loop(
             &snapshot,
             &mut state,
         );
+        drive_llm_timeline_refresh(
+            query,
+            &state,
+            &mut snapshot,
+            &mut llm_timeline_cache,
+            &mut llm_timeline_refresh,
+            &llm_refresh_tx,
+        );
         terminal.draw(|frame| crate::ui::render(frame, &snapshot, &state))?;
 
         if let Some(event) = pending_event.take() {
@@ -160,6 +202,7 @@ async fn terminal_loop(
                 &mut state,
                 &mut snapshot,
                 &mut trace_detail_cache,
+                &llm_timeline_cache,
             )? {
                 break;
             }
@@ -185,9 +228,26 @@ async fn terminal_loop(
                     let current_filters = input::filters(&state, &snapshot.services);
                     if current_filters == result.filters {
                         snapshot = result.snapshot?;
-                        refresh_detail_state(query, &state, &mut snapshot, &mut trace_detail_cache)?;
+                        refresh_detail_state(
+                            query,
+                            &state,
+                            &mut snapshot,
+                            &mut trace_detail_cache,
+                            &llm_timeline_cache,
+                        )?;
                     }
                 }
+            }
+            Some(result) = llm_refresh_rx.recv() => {
+                apply_llm_timeline_refresh_result(
+                    result,
+                    &state,
+                    &mut snapshot,
+                    &mut llm_timeline_cache,
+                    &mut llm_timeline_refresh,
+                    query,
+                    &llm_refresh_tx,
+                );
             }
             maybe_event = events.next() => {
                 match maybe_event.transpose()? {
@@ -208,6 +268,7 @@ async fn terminal_loop(
                             &state,
                             &mut snapshot,
                             &mut trace_detail_cache,
+                            &llm_timeline_cache,
                         )?;
                     }
                     Some(event) => {
@@ -220,6 +281,7 @@ async fn terminal_loop(
                             &mut state,
                             &mut snapshot,
                             &mut trace_detail_cache,
+                            &llm_timeline_cache,
                         )? {
                             break;
                         }
@@ -242,6 +304,7 @@ fn handle_terminal_event(
     state: &mut UiState,
     snapshot: &mut DashboardSnapshot,
     trace_detail_cache: &mut TraceDetailCache,
+    llm_timeline_cache: &LlmTimelineCache,
 ) -> Result<bool> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -249,7 +312,14 @@ fn handle_terminal_event(
             if matches!(outcome, InputOutcome::Quit) {
                 return Ok(true);
             }
-            apply_input_outcome(outcome, query, state, snapshot, trace_detail_cache)?;
+            apply_input_outcome(
+                outcome,
+                query,
+                state,
+                snapshot,
+                trace_detail_cache,
+                llm_timeline_cache,
+            )?;
         }
         Event::Mouse(mouse) => {
             let wheel_target = input::wheel_target(mouse.column, mouse.row, root, state);
@@ -257,7 +327,14 @@ fn handle_terminal_event(
             let before = state.clone();
             let outcome = input::handle_mouse(mouse, root, state, snapshot);
             if !matches!(outcome, InputOutcome::None) {
-                apply_input_outcome(outcome, query, state, snapshot, trace_detail_cache)?;
+                apply_input_outcome(
+                    outcome,
+                    query,
+                    state,
+                    snapshot,
+                    trace_detail_cache,
+                    llm_timeline_cache,
+                )?;
                 record_wheel_debug(
                     state,
                     format!(
@@ -313,15 +390,28 @@ fn apply_input_outcome(
     state: &UiState,
     snapshot: &mut DashboardSnapshot,
     trace_detail_cache: &mut TraceDetailCache,
+    llm_timeline_cache: &LlmTimelineCache,
 ) -> Result<()> {
     match outcome {
         InputOutcome::None => {}
         InputOutcome::RefreshDetails => {
-            refresh_detail_state(query, state, snapshot, trace_detail_cache)?;
+            refresh_detail_state(
+                query,
+                state,
+                snapshot,
+                trace_detail_cache,
+                llm_timeline_cache,
+            )?;
         }
         InputOutcome::RefreshSnapshot => {
             *snapshot = query.snapshot(&input::filters(state, &snapshot.services))?;
-            refresh_detail_state(query, state, snapshot, trace_detail_cache)?;
+            refresh_detail_state(
+                query,
+                state,
+                snapshot,
+                trace_detail_cache,
+                llm_timeline_cache,
+            )?;
         }
         InputOutcome::Quit => {}
     }
@@ -360,27 +450,137 @@ fn refresh_detail_state(
     state: &UiState,
     snapshot: &mut DashboardSnapshot,
     trace_detail_cache: &mut TraceDetailCache,
+    llm_timeline_cache: &LlmTimelineCache,
 ) -> Result<()> {
-    let filters = input::filters(state, &snapshot.services);
-    if let Some(trace) = snapshot.traces.get(state.selected_trace) {
-        let next_key = TraceDetailCacheKey {
-            trace: trace.clone(),
-            filters,
-        };
-        if trace_detail_cache.key.as_ref() != Some(&next_key) {
-            trace_detail_cache.spans = query.trace_detail(&trace.trace_id)?;
-            trace_detail_cache.key = Some(next_key);
+    if Tab::ALL[state.active_tab] == Tab::Traces && state.trace_view_mode == TraceViewMode::Detail {
+        let filters = input::filters(state, &snapshot.services);
+        if let Some(trace) = snapshot.traces.get(state.selected_trace) {
+            let next_key = TraceDetailCacheKey {
+                trace: trace.clone(),
+                filters,
+            };
+            if trace_detail_cache.key.as_ref() != Some(&next_key) {
+                trace_detail_cache.spans = query.trace_detail(&trace.trace_id)?;
+                trace_detail_cache.key = Some(next_key);
+            }
+            snapshot.selected_trace = trace_detail_cache.spans.clone();
+        } else {
+            snapshot.selected_trace.clear();
         }
-        snapshot.selected_trace = trace_detail_cache.spans.clone();
     } else {
         snapshot.selected_trace.clear();
     }
-    if let Some(llm) = snapshot.llm.get(state.selected_llm) {
-        snapshot.selected_llm_timeline = query.llm_timeline(&llm.trace_id, &llm.span_id)?;
+    sync_llm_timeline_from_cache(state, snapshot, llm_timeline_cache);
+    Ok(())
+}
+
+fn sync_llm_timeline_from_cache(
+    state: &UiState,
+    snapshot: &mut DashboardSnapshot,
+    llm_timeline_cache: &LlmTimelineCache,
+) {
+    if Tab::ALL[state.active_tab] != Tab::Llm {
+        snapshot.selected_llm_timeline.clear();
+        return;
+    }
+
+    let Some(llm) = snapshot.llm.get(state.selected_llm) else {
+        snapshot.selected_llm_timeline.clear();
+        return;
+    };
+
+    let key = LlmTimelineCacheKey {
+        trace_id: llm.trace_id.clone(),
+        span_id: llm.span_id.clone(),
+    };
+    if llm_timeline_cache.key.as_ref() == Some(&key) {
+        snapshot.selected_llm_timeline = llm_timeline_cache.items.clone();
     } else {
         snapshot.selected_llm_timeline.clear();
     }
-    Ok(())
+}
+
+fn selected_llm_timeline_key(
+    state: &UiState,
+    snapshot: &DashboardSnapshot,
+) -> Option<LlmTimelineCacheKey> {
+    if Tab::ALL[state.active_tab] != Tab::Llm {
+        return None;
+    }
+
+    snapshot
+        .llm
+        .get(state.selected_llm)
+        .map(|llm| LlmTimelineCacheKey {
+            trace_id: llm.trace_id.clone(),
+            span_id: llm.span_id.clone(),
+        })
+}
+
+fn drive_llm_timeline_refresh(
+    query: &QueryService,
+    state: &UiState,
+    snapshot: &mut DashboardSnapshot,
+    llm_timeline_cache: &mut LlmTimelineCache,
+    llm_timeline_refresh: &mut LlmTimelineRefreshState,
+    llm_refresh_tx: &mpsc::UnboundedSender<LlmTimelineRefreshResult>,
+) {
+    let desired = selected_llm_timeline_key(state, snapshot);
+    llm_timeline_refresh.desired = desired.clone();
+    sync_llm_timeline_from_cache(state, snapshot, llm_timeline_cache);
+
+    let Some(desired) = desired else {
+        return;
+    };
+
+    if llm_timeline_cache.key.as_ref() == Some(&desired)
+        || llm_timeline_refresh.in_flight.as_ref() == Some(&desired)
+    {
+        return;
+    }
+
+    if llm_timeline_refresh.in_flight.is_some() {
+        return;
+    }
+
+    llm_timeline_refresh.in_flight = Some(desired.clone());
+    spawn_llm_timeline_refresh(query.clone(), desired, llm_refresh_tx.clone());
+}
+
+fn apply_llm_timeline_refresh_result(
+    result: LlmTimelineRefreshResult,
+    state: &UiState,
+    snapshot: &mut DashboardSnapshot,
+    llm_timeline_cache: &mut LlmTimelineCache,
+    llm_timeline_refresh: &mut LlmTimelineRefreshState,
+    query: &QueryService,
+    llm_refresh_tx: &mpsc::UnboundedSender<LlmTimelineRefreshResult>,
+) {
+    let key = LlmTimelineCacheKey {
+        trace_id: result.trace_id,
+        span_id: result.span_id,
+    };
+
+    if llm_timeline_refresh.in_flight.as_ref() == Some(&key) {
+        llm_timeline_refresh.in_flight = None;
+    }
+
+    if llm_timeline_refresh.desired.as_ref() == Some(&key)
+        && let Ok(timeline) = result.timeline
+    {
+        llm_timeline_cache.key = Some(key.clone());
+        llm_timeline_cache.items = timeline;
+    }
+
+    sync_llm_timeline_from_cache(state, snapshot, llm_timeline_cache);
+    drive_llm_timeline_refresh(
+        query,
+        state,
+        snapshot,
+        llm_timeline_cache,
+        llm_timeline_refresh,
+        llm_refresh_tx,
+    );
 }
 
 fn wheel_position(target: WheelTarget, state: &UiState) -> WheelPosition {
@@ -491,6 +691,21 @@ fn spawn_snapshot_refresh(
             request_id,
             filters,
             snapshot,
+        });
+    });
+}
+
+fn spawn_llm_timeline_refresh(
+    query: QueryService,
+    key: LlmTimelineCacheKey,
+    refresh_tx: mpsc::UnboundedSender<LlmTimelineRefreshResult>,
+) {
+    task::spawn_blocking(move || {
+        let timeline = query.llm_timeline(&key.trace_id, &key.span_id);
+        let _ = refresh_tx.send(LlmTimelineRefreshResult {
+            trace_id: key.trace_id,
+            span_id: key.span_id,
+            timeline,
         });
     });
 }
