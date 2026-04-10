@@ -34,7 +34,7 @@ pub(crate) fn render(
             };
             Row::new(vec![
                 Cell::from(truncate(&trace.service_name, 12)),
-                Cell::from(truncate(&trace.root_name, 24)),
+                Cell::from(truncate(&simplify_wrapper_name(&trace.root_name), 24)),
                 Cell::from(trace.span_count.to_string()),
                 Cell::from(trace.error_count.to_string()),
                 Cell::from(format!("{:.1}", trace.duration_ms)),
@@ -414,6 +414,13 @@ fn build_trace_tree_lines(
             let duration = format_duration_compact(row.span.duration_ms);
             let display_name = trace_row_display_name(&row.span);
             let badges = trace_row_badges(&row.span);
+            let name_style = if is_low_signal_wrapper_span(&row.span) {
+                Style::default().fg(palette.muted).patch(selection_style)
+            } else {
+                Style::default()
+                    .fg(palette.foreground)
+                    .patch(selection_style)
+            };
             let badge_width = badges
                 .iter()
                 .map(|badge| badge.label.chars().count() + 3)
@@ -438,12 +445,7 @@ fn build_trace_tree_lines(
                     prefix,
                     Style::default().fg(palette.muted).patch(selection_style),
                 ),
-                Span::styled(
-                    name,
-                    Style::default()
-                        .fg(palette.foreground)
-                        .patch(selection_style),
-                ),
+                Span::styled(name, name_style),
                 render_badges(&badges, selection_style),
                 Span::styled(spacer, selection_style),
                 Span::styled(
@@ -490,7 +492,7 @@ pub(crate) fn trace_row_display_name(span: &SpanDetail) -> String {
         return tool_name;
     }
 
-    span.span_name.clone()
+    simplify_wrapper_name(&span.span_name)
 }
 
 pub(crate) fn trace_row_badges(span: &SpanDetail) -> Vec<TraceRowBadge> {
@@ -509,12 +511,15 @@ pub(crate) fn trace_row_badges(span: &SpanDetail) -> Vec<TraceRowBadge> {
     }
 
     if let Some(llm) = &span.llm {
-        let mut label = "LLM".to_string();
         if let Some(model) = llm.model.as_deref().filter(|model| !model.is_empty()) {
-            label.push(' ');
-            label.push_str(model);
+            badges.push(TraceRowBadge {
+                label: format!("LLM {model}"),
+            });
+        } else if !is_low_signal_wrapper_span(span) {
+            badges.push(TraceRowBadge {
+                label: "LLM".to_string(),
+            });
         }
-        badges.push(TraceRowBadge { label });
     }
 
     badges
@@ -541,6 +546,38 @@ fn is_generic_tool_wrapper_name(name: &str) -> bool {
         || normalized.contains("running tools")
         || normalized == "tool"
         || normalized.contains("tool call")
+}
+
+fn simplify_wrapper_name(name: &str) -> String {
+    if let Some(prefix) = name.strip_suffix(" {name}") {
+        return prefix.to_string();
+    }
+    if let Some(prefix) = name.strip_suffix(" {task}") {
+        return prefix.to_string();
+    }
+    if let Some(prefix) = name.strip_prefix("case: {")
+        && prefix.ends_with('}')
+    {
+        return "case".to_string();
+    }
+    if let Some(prefix) = name.strip_prefix("evaluator: {")
+        && prefix.ends_with('}')
+    {
+        return "evaluator".to_string();
+    }
+    if let Some(prefix) = name.strip_prefix("Prompt: ") {
+        return prefix.to_string();
+    }
+
+    name.to_string()
+}
+
+fn is_low_signal_wrapper_span(span: &SpanDetail) -> bool {
+    let normalized = simplify_wrapper_name(&span.span_name).to_ascii_lowercase();
+    matches!(
+        normalized.as_str(),
+        "evaluate" | "case" | "execute" | "agent run" | "running output function" | "evaluator"
+    ) || span.span_name.starts_with("Prompt: ")
 }
 
 fn push_tree_rows(

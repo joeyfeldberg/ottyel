@@ -171,6 +171,84 @@ fn trace_row_display_name_prefers_tool_name_for_generic_wrappers() {
 }
 
 #[test]
+fn trace_row_display_name_simplifies_template_wrappers() {
+    assert_eq!(
+        trace_row_display_name(&span_with_parent(
+            "trace",
+            "a",
+            "root",
+            "evaluate {name}",
+            0,
+            1
+        )),
+        "evaluate"
+    );
+    assert_eq!(
+        trace_row_display_name(&span_with_parent(
+            "trace",
+            "b",
+            "root",
+            "case: {case_name}",
+            0,
+            1
+        )),
+        "case"
+    );
+    assert_eq!(
+        trace_row_display_name(&span_with_parent(
+            "trace",
+            "c",
+            "root",
+            "Prompt: Synthesizer:conversation",
+            0,
+            1
+        )),
+        "Synthesizer:conversation"
+    );
+}
+
+#[test]
+fn trace_list_root_names_use_wrapper_simplification() {
+    let snapshot = DashboardSnapshot {
+        services: Vec::new(),
+        overview: OverviewStats {
+            service_count: 0,
+            trace_count: 1,
+            error_span_count: 0,
+            log_count: 0,
+            metric_count: 0,
+            llm_count: 0,
+        },
+        traces: vec![crate::domain::TraceSummary {
+            trace_id: "trace-1".to_string(),
+            service_name: "api".to_string(),
+            root_name: "evaluate {name}".to_string(),
+            span_count: 1,
+            error_count: 0,
+            duration_ms: 10.0,
+            started_at_unix_nano: 1,
+        }],
+        selected_trace: Vec::new(),
+        logs: Vec::new(),
+        metrics: Vec::new(),
+        llm: Vec::new(),
+        llm_rollups: Vec::new(),
+        llm_sessions: Vec::new(),
+        llm_model_comparisons: Vec::new(),
+        llm_top_calls: Vec::new(),
+        selected_llm_timeline: Vec::new(),
+    };
+
+    assert_eq!(
+        trace_row_display_name(&SpanDetail {
+            span_name: snapshot.traces[0].root_name.clone(),
+            ..span_with_parent("trace", "root", "", "ignored", 0, 1)
+        }),
+        "evaluate"
+    );
+}
+
+#[test]
 fn trace_row_badges_include_error_tool_and_llm_metadata() {
     let mut span = span_with_parent("trace", "tool", "root", "chat", 0, 100);
     span.status_code = "STATUS_CODE_ERROR".to_string();
@@ -187,6 +265,16 @@ fn trace_row_badges_include_error_tool_and_llm_metadata() {
         .collect::<Vec<_>>();
 
     assert_eq!(badges, vec!["ERR", "tool product_tool", "LLM gpt-4o"]);
+}
+
+#[test]
+fn trace_row_badges_skip_plain_llm_badge_for_low_signal_wrappers() {
+    let span = SpanDetail {
+        llm: Some(LlmAttributes::default()),
+        ..span_with_parent("trace", "llm", "root", "agent run", 0, 1)
+    };
+
+    assert!(trace_row_badges(&span).is_empty());
 }
 
 #[test]
