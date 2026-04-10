@@ -1,6 +1,6 @@
 mod input;
 
-use std::{io, time::Duration};
+use std::{fs::OpenOptions, io, io::Write, time::Duration};
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -12,7 +12,11 @@ use crossterm::{
 };
 use futures::{FutureExt, StreamExt};
 use ratatui::{Terminal, backend::CrosstermBackend};
-use tokio::{sync::watch, time::interval};
+use tokio::{
+    sync::{mpsc, watch},
+    task,
+    time::interval,
+};
 
 use crate::{
     config::{Cli, Command, DoctorArgs, ServeArgs},
@@ -21,7 +25,11 @@ use crate::{
     store::Store,
     ui::UiState,
 };
-use input::InputOutcome;
+use input::{InputOutcome, WheelTarget};
+
+const WHEEL_DEBUG_LOG: &str = "/tmp/ottyel-wheel.log";
+const WHEEL_DEBUG_EVENT_LIMIT: usize = 30;
+const MIN_SNAPSHOT_REFRESH_MS: u64 = 3_000;
 
 #[derive(Debug, Default)]
 struct TraceDetailCache {
@@ -33,6 +41,20 @@ struct TraceDetailCache {
 struct TraceDetailCacheKey {
     trace: TraceSummary,
     filters: QueryFilters,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct WheelPosition {
+    primary: usize,
+    offset: usize,
+    detail_scroll: u16,
+}
+
+#[derive(Debug)]
+struct SnapshotRefreshResult {
+    request_id: u64,
+    filters: QueryFilters,
+    snapshot: Result<DashboardSnapshot>,
 }
 
 pub async fn run(cli: Cli) -> Result<()> {
@@ -99,6 +121,9 @@ async fn terminal_loop(
 ) -> Result<()> {
     let mut events = EventStream::new();
     let mut tick = interval(Duration::from_millis(args.tick_rate_ms));
+    let mut snapshot_tick = interval(Duration::from_millis(snapshot_refresh_interval_ms(
+        args.tick_rate_ms,
+    )));
     let mut state = UiState {
         theme: args.theme,
         ..UiState::default()
@@ -106,6 +131,9 @@ async fn terminal_loop(
     let mut snapshot = query.snapshot(&input::filters(&state, &[]))?;
     let mut trace_detail_cache = TraceDetailCache::default();
     refresh_detail_state(query, &state, &mut snapshot, &mut trace_detail_cache)?;
+    let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel();
+    let mut refresh_in_flight = false;
+    let mut next_refresh_request_id = 0_u64;
     let mut pending_event: Option<Event> = None;
     loop {
         input::sync_selection(&mut state, &snapshot);
@@ -140,8 +168,26 @@ async fn terminal_loop(
 
         tokio::select! {
             _ = tick.tick() => {
-                snapshot = query.snapshot(&input::filters(&state, &snapshot.services))?;
-                refresh_detail_state(query, &state, &mut snapshot, &mut trace_detail_cache)?;
+            }
+            _ = snapshot_tick.tick(), if !refresh_in_flight => {
+                refresh_in_flight = true;
+                next_refresh_request_id = next_refresh_request_id.saturating_add(1);
+                spawn_snapshot_refresh(
+                    query.clone(),
+                    input::filters(&state, &snapshot.services),
+                    next_refresh_request_id,
+                    refresh_tx.clone(),
+                );
+            }
+            Some(result) = refresh_rx.recv() => {
+                if result.request_id == next_refresh_request_id {
+                    refresh_in_flight = false;
+                    let current_filters = input::filters(&state, &snapshot.services);
+                    if current_filters == result.filters {
+                        snapshot = result.snapshot?;
+                        refresh_detail_state(query, &state, &mut snapshot, &mut trace_detail_cache)?;
+                    }
+                }
             }
             maybe_event = events.next() => {
                 match maybe_event.transpose()? {
@@ -206,17 +252,52 @@ fn handle_terminal_event(
             apply_input_outcome(outcome, query, state, snapshot, trace_detail_cache)?;
         }
         Event::Mouse(mouse) => {
+            let wheel_target = input::wheel_target(mouse.column, mouse.row, root, state);
+            let before_position = wheel_target.map(|target| wheel_position(target, state));
             let before = state.clone();
             let outcome = input::handle_mouse(mouse, root, state, snapshot);
             if !matches!(outcome, InputOutcome::None) {
                 apply_input_outcome(outcome, query, state, snapshot, trace_detail_cache)?;
+                record_wheel_debug(
+                    state,
+                    format!(
+                        "{} target={} before={} after={} outcome={:?}",
+                        wheel_direction_label(mouse.kind),
+                        wheel_target_label(wheel_target),
+                        wheel_position_label(before_position),
+                        wheel_position_label(
+                            wheel_target.map(|target| wheel_position(target, state))
+                        ),
+                        outcome,
+                    ),
+                );
             } else if before == *state
                 && matches!(
                     mouse.kind,
                     MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
                 )
             {
-                drain_stale_scroll_events(mouse.kind, events, pending_event)?;
+                let drained = drain_stale_scroll_events(mouse.kind, events, pending_event)?;
+                record_wheel_debug(
+                    state,
+                    format!(
+                        "{} target={} before={} -> noop drained-same-dir={drained}",
+                        wheel_direction_label(mouse.kind),
+                        wheel_target_label(wheel_target),
+                        wheel_position_label(before_position),
+                    ),
+                );
+            } else if let Some(target) = wheel_target {
+                record_wheel_debug(
+                    state,
+                    format!(
+                        "{} target={} before={} after={}",
+                        wheel_direction_label(mouse.kind),
+                        wheel_target_label(Some(target)),
+                        wheel_position_label(before_position),
+                        wheel_position_label(Some(wheel_position(target, state))),
+                    ),
+                );
             }
         }
         Event::Resize(_, _) => {}
@@ -252,7 +333,8 @@ fn drain_stale_scroll_events(
     direction: MouseEventKind,
     events: &mut EventStream,
     pending_event: &mut Option<Event>,
-) -> Result<()> {
+) -> Result<usize> {
+    let mut drained = 0;
     loop {
         let Some(ready_event) = events.next().now_or_never() else {
             break;
@@ -262,7 +344,7 @@ fn drain_stale_scroll_events(
         };
 
         match next_event {
-            Event::Mouse(mouse) if mouse.kind == direction => {}
+            Event::Mouse(mouse) if mouse.kind == direction => drained += 1,
             other => {
                 *pending_event = Some(other);
                 break;
@@ -270,7 +352,7 @@ fn drain_stale_scroll_events(
         }
     }
 
-    Ok(())
+    Ok(drained)
 }
 
 fn refresh_detail_state(
@@ -301,9 +383,121 @@ fn refresh_detail_state(
     Ok(())
 }
 
+fn wheel_position(target: WheelTarget, state: &UiState) -> WheelPosition {
+    match target {
+        WheelTarget::TraceList => WheelPosition {
+            primary: state.selected_trace,
+            offset: state.trace_list_scroll,
+            detail_scroll: 0,
+        },
+        WheelTarget::TraceTree | WheelTarget::TraceDetail => WheelPosition {
+            primary: state.selected_trace_span,
+            offset: state.trace_tree_scroll,
+            detail_scroll: state.trace_detail_scroll,
+        },
+        WheelTarget::LogsFeed | WheelTarget::LogsDetail => WheelPosition {
+            primary: state.selected_log,
+            offset: state.log_feed_scroll,
+            detail_scroll: state.log_detail_scroll,
+        },
+        WheelTarget::MetricsFeed | WheelTarget::MetricsDetail => WheelPosition {
+            primary: state.selected_metric,
+            offset: state.metric_feed_scroll,
+            detail_scroll: state.metric_detail_scroll,
+        },
+        WheelTarget::LlmFeed | WheelTarget::LlmDetail => WheelPosition {
+            primary: state.selected_llm,
+            offset: state.llm_feed_scroll,
+            detail_scroll: state.llm_detail_scroll,
+        },
+    }
+}
+
+fn wheel_direction_label(kind: MouseEventKind) -> &'static str {
+    match kind {
+        MouseEventKind::ScrollDown => "down",
+        MouseEventKind::ScrollUp => "up",
+        _ => "-",
+    }
+}
+
+fn wheel_target_label(target: Option<WheelTarget>) -> &'static str {
+    match target {
+        Some(WheelTarget::TraceList) => "trace-list",
+        Some(WheelTarget::TraceTree) => "trace-tree",
+        Some(WheelTarget::TraceDetail) => "trace-detail",
+        Some(WheelTarget::LogsFeed) => "logs-feed",
+        Some(WheelTarget::LogsDetail) => "logs-detail",
+        Some(WheelTarget::MetricsFeed) => "metrics-feed",
+        Some(WheelTarget::MetricsDetail) => "metrics-detail",
+        Some(WheelTarget::LlmFeed) => "llm-feed",
+        Some(WheelTarget::LlmDetail) => "llm-detail",
+        None => "-",
+    }
+}
+
+fn wheel_position_label(position: Option<WheelPosition>) -> String {
+    position
+        .map(|position| {
+            format!(
+                "sel={} offset={} detail={}",
+                position.primary, position.offset, position.detail_scroll
+            )
+        })
+        .unwrap_or_else(|| "-".to_string())
+}
+
+fn record_wheel_debug(state: &mut UiState, line: String) {
+    if !state.show_wheel_debug {
+        return;
+    }
+
+    let timestamp = wheel_timestamp();
+    let full_line = format!("{timestamp} {line}");
+    state.wheel_debug_events.push_back(full_line.clone());
+    while state.wheel_debug_events.len() > WHEEL_DEBUG_EVENT_LIMIT {
+        state.wheel_debug_events.pop_front();
+    }
+
+    if let Ok(mut file) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(WHEEL_DEBUG_LOG)
+    {
+        let _ = writeln!(file, "{full_line}");
+    }
+}
+
+fn wheel_timestamp() -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default();
+    format!("{:>10}.{:03}", now.as_secs(), now.subsec_millis())
+}
+
+fn snapshot_refresh_interval_ms(tick_rate_ms: u64) -> u64 {
+    (tick_rate_ms.saturating_mul(4)).max(MIN_SNAPSHOT_REFRESH_MS)
+}
+
+fn spawn_snapshot_refresh(
+    query: QueryService,
+    filters: QueryFilters,
+    request_id: u64,
+    refresh_tx: mpsc::UnboundedSender<SnapshotRefreshResult>,
+) {
+    task::spawn_blocking(move || {
+        let snapshot = query.snapshot(&filters);
+        let _ = refresh_tx.send(SnapshotRefreshResult {
+            request_id,
+            filters,
+            snapshot,
+        });
+    });
+}
+
 #[cfg(test)]
 mod tests {
-    use super::TraceDetailCacheKey;
+    use super::{MIN_SNAPSHOT_REFRESH_MS, TraceDetailCacheKey, snapshot_refresh_interval_ms};
     use crate::{
         domain::TraceSummary,
         query::{LogFilters, QueryFilters, TimeWindow},
@@ -357,5 +551,11 @@ mod tests {
         };
 
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn snapshot_refresh_interval_is_slower_than_render_tick() {
+        assert_eq!(snapshot_refresh_interval_ms(750), MIN_SNAPSHOT_REFRESH_MS);
+        assert_eq!(snapshot_refresh_interval_ms(1_000), 4_000);
     }
 }

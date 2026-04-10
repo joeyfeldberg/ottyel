@@ -13,6 +13,19 @@ const COMMAND_PALETTE_VISIBLE_ROWS: usize = 8;
 const FAST_MOVE_STEP: isize = 5;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub(super) enum WheelTarget {
+    TraceList,
+    TraceTree,
+    TraceDetail,
+    LogsFeed,
+    LogsDetail,
+    MetricsFeed,
+    MetricsDetail,
+    LlmFeed,
+    LlmDetail,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum InputOutcome {
     None,
     RefreshDetails,
@@ -60,6 +73,9 @@ pub(super) fn handle_key(
         }
         KeyCode::Char('H') => {
             state.show_context_help = !state.show_context_help;
+        }
+        KeyCode::Char('D') => {
+            state.show_wheel_debug = !state.show_wheel_debug;
         }
         KeyCode::Char('g') => cycle_theme(state),
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -236,6 +252,26 @@ pub(super) fn handle_mouse(
             handle_scroll(-1, event.column, event.row, root, state, snapshot)
         }
         _ => InputOutcome::None,
+    }
+}
+
+pub(super) fn wheel_target(
+    column: u16,
+    row: u16,
+    root: Rect,
+    state: &UiState,
+) -> Option<WheelTarget> {
+    let body = crate::ui::geometry::body_area(root);
+    if !crate::ui::geometry::contains(body, column, row) {
+        return None;
+    }
+
+    match Tab::ALL[state.active_tab] {
+        Tab::Overview => None,
+        Tab::Traces => trace_wheel_target(column, row, body, state),
+        Tab::Logs => log_wheel_target(column, row, body),
+        Tab::Metrics => metric_wheel_target(column, row, body),
+        Tab::Llm => llm_wheel_target(column, row, body),
     }
 }
 
@@ -435,6 +471,56 @@ fn handle_trace_click(
     InputOutcome::None
 }
 
+fn trace_wheel_target(column: u16, row: u16, body: Rect, state: &UiState) -> Option<WheelTarget> {
+    if state.trace_view_mode == TraceViewMode::List {
+        return crate::ui::geometry::contains(body, column, row).then_some(WheelTarget::TraceList);
+    }
+
+    let [tree_area, detail_area] = crate::ui::geometry::trace_detail_sections(body);
+    if crate::ui::geometry::contains(detail_area, column, row) {
+        Some(WheelTarget::TraceDetail)
+    } else if crate::ui::geometry::contains(tree_area, column, row) {
+        Some(WheelTarget::TraceTree)
+    } else {
+        None
+    }
+}
+
+fn log_wheel_target(column: u16, row: u16, body: Rect) -> Option<WheelTarget> {
+    let [feed_area, detail_area] = crate::ui::geometry::log_sections(body);
+    if crate::ui::geometry::contains(detail_area, column, row) {
+        Some(WheelTarget::LogsDetail)
+    } else if crate::ui::geometry::contains(feed_area, column, row) {
+        Some(WheelTarget::LogsFeed)
+    } else {
+        None
+    }
+}
+
+fn metric_wheel_target(column: u16, row: u16, body: Rect) -> Option<WheelTarget> {
+    let [feed_area, right_area] = crate::ui::geometry::metric_sections(body);
+    let detail_area = crate::ui::geometry::metric_right_sections(right_area)[1];
+    if crate::ui::geometry::contains(detail_area, column, row) {
+        Some(WheelTarget::MetricsDetail)
+    } else if crate::ui::geometry::contains(feed_area, column, row) {
+        Some(WheelTarget::MetricsFeed)
+    } else {
+        None
+    }
+}
+
+fn llm_wheel_target(column: u16, row: u16, body: Rect) -> Option<WheelTarget> {
+    let [left_area, detail_area] = crate::ui::geometry::llm_sections(body);
+    let [_, _, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
+    if crate::ui::geometry::contains(detail_area, column, row) {
+        Some(WheelTarget::LlmDetail)
+    } else if crate::ui::geometry::contains(feed_area, column, row) {
+        Some(WheelTarget::LlmFeed)
+    } else {
+        None
+    }
+}
+
 fn handle_logs_click(
     column: u16,
     row: u16,
@@ -455,6 +541,7 @@ fn handle_logs_click(
     state.log_tail = false;
     if let Some(index) = table_row_at(feed_area, row, snapshot.logs.len(), state.log_feed_scroll) {
         state.selected_log = index;
+        state.log_feed_follow_selected = true;
         state.log_detail_scroll = 0;
         return InputOutcome::None;
     }
@@ -486,6 +573,7 @@ fn handle_metrics_click(
         state.metric_feed_scroll,
     ) {
         state.selected_metric = index;
+        state.metric_feed_follow_selected = true;
         state.metric_detail_scroll = 0;
         return InputOutcome::None;
     }
@@ -512,6 +600,7 @@ fn handle_llm_click(
     state.llm_focus = PaneFocus::Primary;
     if let Some(index) = table_row_at(feed_area, row, snapshot.llm.len(), state.llm_feed_scroll) {
         state.selected_llm = index;
+        state.llm_feed_follow_selected = true;
         state.llm_detail_scroll = 0;
         state.llm_expand_prompt = false;
         state.llm_expand_output = false;
@@ -531,15 +620,13 @@ fn handle_trace_scroll(
     if state.trace_view_mode == TraceViewMode::List {
         if crate::ui::geometry::contains(body, column, row) {
             state.trace_focus = TraceFocus::TraceList;
-            let previous = state.selected_trace;
-            move_index(&mut state.selected_trace, snapshot.traces.len(), delta);
-            if state.selected_trace != previous {
-                state.selected_trace_span = 0;
-                state.trace_tree_scroll = 0;
-                state.trace_tree_follow_selected = true;
-                state.trace_detail_scroll = 0;
-                state.collapsed_trace_spans.clear();
-            }
+            state.trace_list_follow_selected = false;
+            state.trace_list_scroll = crate::ui::geometry::scroll_window_offset(
+                state.trace_list_scroll,
+                snapshot.traces.len(),
+                crate::ui::geometry::table_viewport_height(body),
+                delta,
+            );
         }
         return InputOutcome::None;
     }
@@ -552,13 +639,15 @@ fn handle_trace_scroll(
     }
     if crate::ui::geometry::contains(tree_area, column, row) {
         state.trace_focus = TraceFocus::TraceTree;
-        let previous = state.selected_trace_span;
-        let visible_len = crate::ui::visible_trace_tree_len(snapshot, state);
-        move_index(&mut state.selected_trace_span, visible_len, delta);
-        if state.selected_trace_span != previous {
-            state.trace_tree_follow_selected = true;
-            state.trace_detail_scroll = 0;
-        }
+        let tree_rows =
+            crate::ui::trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
+        state.trace_tree_follow_selected = false;
+        state.trace_tree_scroll = crate::ui::geometry::scroll_window_offset(
+            state.trace_tree_scroll,
+            crate::ui::trace_tree_total_lines(&tree_rows, snapshot.traces.is_empty()),
+            crate::ui::geometry::trace_tree_viewport_height(tree_area),
+            delta,
+        );
     }
     InputOutcome::None
 }
@@ -580,11 +669,13 @@ fn handle_logs_scroll(
     if crate::ui::geometry::contains(feed_area, column, row) {
         state.logs_focus = PaneFocus::Primary;
         state.log_tail = false;
-        let previous = state.selected_log;
-        move_index(&mut state.selected_log, snapshot.logs.len(), delta);
-        if state.selected_log != previous {
-            state.log_detail_scroll = 0;
-        }
+        state.log_feed_follow_selected = false;
+        state.log_feed_scroll = crate::ui::geometry::scroll_window_offset(
+            state.log_feed_scroll,
+            snapshot.logs.len(),
+            crate::ui::geometry::table_viewport_height(feed_area),
+            delta,
+        );
     }
     InputOutcome::None
 }
@@ -606,11 +697,13 @@ fn handle_metrics_scroll(
     }
     if crate::ui::geometry::contains(feed_area, column, row) {
         state.metrics_focus = PaneFocus::Primary;
-        let previous = state.selected_metric;
-        move_index(&mut state.selected_metric, snapshot.metrics.len(), delta);
-        if state.selected_metric != previous {
-            state.metric_detail_scroll = 0;
-        }
+        state.metric_feed_follow_selected = false;
+        state.metric_feed_scroll = crate::ui::geometry::scroll_window_offset(
+            state.metric_feed_scroll,
+            snapshot.metrics.len(),
+            crate::ui::geometry::table_viewport_height(feed_area),
+            delta,
+        );
     }
     InputOutcome::None
 }
@@ -632,14 +725,13 @@ fn handle_llm_scroll(
     }
     if crate::ui::geometry::contains(feed_area, column, row) {
         state.llm_focus = PaneFocus::Primary;
-        let previous = state.selected_llm;
-        move_index(&mut state.selected_llm, snapshot.llm.len(), delta);
-        if state.selected_llm != previous {
-            state.llm_detail_scroll = 0;
-            state.llm_expand_prompt = false;
-            state.llm_expand_output = false;
-            return InputOutcome::RefreshDetails;
-        }
+        state.llm_feed_follow_selected = false;
+        state.llm_feed_scroll = crate::ui::geometry::scroll_window_offset(
+            state.llm_feed_scroll,
+            snapshot.llm.len(),
+            crate::ui::geometry::table_viewport_height(feed_area),
+            delta,
+        );
     }
     InputOutcome::None
 }
@@ -662,6 +754,7 @@ fn select_trace(index: usize, state: &mut UiState) {
 
     state.selected_trace = index;
     state.selected_trace_span = 0;
+    state.trace_list_follow_selected = true;
     state.trace_tree_scroll = 0;
     state.trace_tree_follow_selected = true;
     state.trace_detail_scroll = 0;
@@ -680,6 +773,7 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapsho
                 move_index(&mut state.selected_trace, snapshot.traces.len(), delta);
                 if state.selected_trace != previous {
                     state.selected_trace_span = 0;
+                    state.trace_list_follow_selected = true;
                     state.trace_tree_scroll = 0;
                     state.trace_tree_follow_selected = true;
                     state.trace_detail_scroll = 0;
@@ -711,6 +805,7 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapsho
                     state.log_tail = false;
                 }
                 if state.selected_log != previous {
+                    state.log_feed_follow_selected = true;
                     state.log_detail_scroll = 0;
                 }
             }
@@ -721,6 +816,7 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapsho
                 let previous = state.selected_metric;
                 move_index(&mut state.selected_metric, snapshot.metrics.len(), delta);
                 if state.selected_metric != previous {
+                    state.metric_feed_follow_selected = true;
                     state.metric_detail_scroll = 0;
                 }
             }
@@ -731,6 +827,7 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapsho
                 let previous = state.selected_llm;
                 move_index(&mut state.selected_llm, snapshot.llm.len(), delta);
                 if state.selected_llm != previous {
+                    state.llm_feed_follow_selected = true;
                     state.llm_detail_scroll = 0;
                     state.llm_expand_prompt = false;
                     state.llm_expand_output = false;
@@ -1394,29 +1491,20 @@ mod tests {
         let snapshot = DashboardSnapshot {
             services: Vec::new(),
             overview: OverviewStats {
-                trace_count: 2,
+                trace_count: 40,
                 ..empty_overview()
             },
-            traces: vec![
-                TraceSummary {
-                    trace_id: "trace-1".to_string(),
+            traces: (0..40)
+                .map(|index| TraceSummary {
+                    trace_id: format!("trace-{index}"),
                     service_name: "api".to_string(),
                     root_name: "request".to_string(),
                     span_count: 1,
                     error_count: 0,
                     duration_ms: 1.0,
-                    started_at_unix_nano: 1,
-                },
-                TraceSummary {
-                    trace_id: "trace-2".to_string(),
-                    service_name: "api".to_string(),
-                    root_name: "request".to_string(),
-                    span_count: 1,
-                    error_count: 0,
-                    duration_ms: 1.0,
-                    started_at_unix_nano: 2,
-                },
-            ],
+                    started_at_unix_nano: index,
+                })
+                .collect(),
             selected_trace: Vec::new(),
             logs: Vec::new(),
             metrics: Vec::new(),
@@ -1441,7 +1529,9 @@ mod tests {
         );
 
         assert_eq!(outcome, InputOutcome::None);
-        assert_eq!(state.selected_trace, 1);
+        assert_eq!(state.selected_trace, 0);
+        assert_eq!(state.trace_list_scroll, 1);
+        assert!(!state.trace_list_follow_selected);
         assert_eq!(state.trace_view_mode, TraceViewMode::List);
     }
 
@@ -1576,7 +1666,7 @@ mod tests {
     }
 
     #[test]
-    fn scrolling_log_feed_moves_selection_not_window() {
+    fn scrolling_log_feed_moves_window_not_selection() {
         let mut state = UiState {
             active_tab: Tab::Logs as usize,
             logs_focus: PaneFocus::Primary,
@@ -1627,13 +1717,14 @@ mod tests {
 
         assert_eq!(outcome, InputOutcome::None);
         assert_eq!(state.logs_focus, PaneFocus::Primary);
-        assert_eq!(state.selected_log, 8);
-        assert_eq!(state.log_feed_scroll, 0);
+        assert_eq!(state.selected_log, 7);
+        assert_eq!(state.log_feed_scroll, 1);
+        assert!(!state.log_feed_follow_selected);
         assert!(!state.log_tail);
     }
 
     #[test]
-    fn scrolling_trace_tree_moves_selection_not_window() {
+    fn scrolling_trace_tree_moves_window_not_selection() {
         let mut state = UiState {
             active_tab: Tab::Traces as usize,
             trace_view_mode: TraceViewMode::Detail,
@@ -1683,9 +1774,9 @@ mod tests {
 
         assert_eq!(outcome, InputOutcome::None);
         assert_eq!(state.trace_focus, TraceFocus::TraceTree);
-        assert_eq!(state.selected_trace_span, 8);
-        assert_eq!(state.trace_tree_scroll, 0);
-        assert!(state.trace_tree_follow_selected);
+        assert_eq!(state.selected_trace_span, 7);
+        assert_eq!(state.trace_tree_scroll, 1);
+        assert!(!state.trace_tree_follow_selected);
     }
 
     #[test]

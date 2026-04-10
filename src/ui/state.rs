@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, VecDeque};
 
 use ratatui::prelude::Color;
 
@@ -100,6 +100,7 @@ pub struct UiState {
     pub trace_view_mode: TraceViewMode,
     pub selected_trace: usize,
     pub trace_list_scroll: usize,
+    pub trace_list_follow_selected: bool,
     pub selected_trace_span: usize,
     pub trace_tree_scroll: usize,
     pub trace_tree_follow_selected: bool,
@@ -107,6 +108,7 @@ pub struct UiState {
     pub collapsed_trace_spans: HashSet<String>,
     pub show_help: bool,
     pub show_context_help: bool,
+    pub show_wheel_debug: bool,
     pub show_command_palette: bool,
     pub command_query: String,
     pub selected_command: usize,
@@ -114,14 +116,17 @@ pub struct UiState {
     pub logs_focus: PaneFocus,
     pub selected_log: usize,
     pub log_feed_scroll: usize,
+    pub log_feed_follow_selected: bool,
     pub log_detail_scroll: u16,
     pub metrics_focus: PaneFocus,
     pub selected_metric: usize,
     pub metric_feed_scroll: usize,
+    pub metric_feed_follow_selected: bool,
     pub metric_detail_scroll: u16,
     pub llm_focus: PaneFocus,
     pub selected_llm: usize,
     pub llm_feed_scroll: usize,
+    pub llm_feed_follow_selected: bool,
     pub llm_detail_scroll: u16,
     pub llm_expand_prompt: bool,
     pub llm_expand_output: bool,
@@ -136,6 +141,7 @@ pub struct UiState {
     pub log_severity_filter: LogSeverityFilter,
     pub log_correlation_filter: LogCorrelationFilter,
     pub log_tail: bool,
+    pub wheel_debug_events: VecDeque<String>,
 }
 
 impl Default for UiState {
@@ -146,6 +152,7 @@ impl Default for UiState {
             trace_view_mode: TraceViewMode::List,
             selected_trace: 0,
             trace_list_scroll: 0,
+            trace_list_follow_selected: true,
             selected_trace_span: 0,
             trace_tree_scroll: 0,
             trace_tree_follow_selected: true,
@@ -153,6 +160,7 @@ impl Default for UiState {
             collapsed_trace_spans: HashSet::new(),
             show_help: false,
             show_context_help: false,
+            show_wheel_debug: false,
             show_command_palette: false,
             command_query: String::new(),
             selected_command: 0,
@@ -160,14 +168,17 @@ impl Default for UiState {
             logs_focus: PaneFocus::Primary,
             selected_log: 0,
             log_feed_scroll: 0,
+            log_feed_follow_selected: true,
             log_detail_scroll: 0,
             metrics_focus: PaneFocus::Primary,
             selected_metric: 0,
             metric_feed_scroll: 0,
+            metric_feed_follow_selected: true,
             metric_detail_scroll: 0,
             llm_focus: PaneFocus::Primary,
             selected_llm: 0,
             llm_feed_scroll: 0,
+            llm_feed_follow_selected: true,
             llm_detail_scroll: 0,
             llm_expand_prompt: false,
             llm_expand_output: false,
@@ -182,6 +193,7 @@ impl Default for UiState {
             log_severity_filter: LogSeverityFilter::All,
             log_correlation_filter: LogCorrelationFilter::All,
             log_tail: false,
+            wheel_debug_events: VecDeque::new(),
         }
     }
 }
