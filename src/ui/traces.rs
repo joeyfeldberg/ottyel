@@ -7,6 +7,7 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
 };
+use serde_json::Value;
 
 use crate::domain::{DashboardSnapshot, SpanDetail, truncate};
 
@@ -411,19 +412,18 @@ fn build_trace_tree_lines(
             let indent = "  ".repeat(row.depth);
             let prefix = format!("{indent}{}", row.disclosure());
             let duration = format_duration_compact(row.span.duration_ms);
-            let llm_badge = row.span.llm.is_some().then_some(" LLM").unwrap_or_default();
-            let error_badge = if row.span.status_code == "STATUS_CODE_ERROR" {
-                " ERR"
-            } else {
-                ""
-            };
-            let badge_width = llm_badge.chars().count() + error_badge.chars().count();
+            let display_name = trace_row_display_name(&row.span);
+            let badges = trace_row_badges(&row.span);
+            let badge_width = badges
+                .iter()
+                .map(|badge| badge.label.chars().count() + 3)
+                .sum::<usize>();
             let name_width = line_width
                 .saturating_sub(
                     prefix.chars().count() + timeline_width + duration_width + badge_width + 2,
                 )
                 .max(8);
-            let name = truncate(&row.span.span_name, name_width);
+            let name = truncate(&display_name, name_width);
             let rendered_width = prefix.chars().count()
                 + name.chars().count()
                 + badge_width
@@ -444,14 +444,7 @@ fn build_trace_tree_lines(
                         .fg(palette.foreground)
                         .patch(selection_style),
                 ),
-                Span::styled(
-                    llm_badge,
-                    Style::default().fg(palette.warning).patch(selection_style),
-                ),
-                Span::styled(
-                    error_badge,
-                    Style::default().fg(palette.warning).patch(selection_style),
-                ),
+                render_badges(&badges, selection_style),
                 Span::styled(spacer, selection_style),
                 Span::styled(
                     timeline.before,
@@ -475,6 +468,79 @@ fn build_trace_tree_lines(
             ])
         })
         .collect()
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct TraceRowBadge {
+    pub(crate) label: String,
+}
+
+fn render_badges(badges: &[TraceRowBadge], selection_style: Style) -> Span<'static> {
+    let rendered = badges
+        .iter()
+        .map(|badge| format!(" [{}]", badge.label))
+        .collect::<String>();
+    Span::styled(rendered, selection_style)
+}
+
+pub(crate) fn trace_row_display_name(span: &SpanDetail) -> String {
+    if let Some(tool_name) = span_tool_name(span)
+        && is_generic_tool_wrapper_name(&span.span_name)
+    {
+        return tool_name;
+    }
+
+    span.span_name.clone()
+}
+
+pub(crate) fn trace_row_badges(span: &SpanDetail) -> Vec<TraceRowBadge> {
+    let mut badges = Vec::new();
+
+    if span.status_code == "STATUS_CODE_ERROR" {
+        badges.push(TraceRowBadge {
+            label: "ERR".to_string(),
+        });
+    }
+
+    if let Some(tool_name) = span_tool_name(span) {
+        badges.push(TraceRowBadge {
+            label: format!("tool {tool_name}"),
+        });
+    }
+
+    if let Some(llm) = &span.llm {
+        let mut label = "LLM".to_string();
+        if let Some(model) = llm.model.as_deref().filter(|model| !model.is_empty()) {
+            label.push(' ');
+            label.push_str(model);
+        }
+        badges.push(TraceRowBadge { label });
+    }
+
+    badges
+}
+
+fn span_tool_name(span: &SpanDetail) -> Option<String> {
+    span.attributes
+        .get("tool.name")
+        .and_then(Value::as_str)
+        .filter(|name| !name.is_empty())
+        .map(ToString::to_string)
+        .or_else(|| {
+            span.llm
+                .as_ref()
+                .and_then(|llm| llm.tool_name.as_deref())
+                .filter(|name| !name.is_empty())
+                .map(ToString::to_string)
+        })
+}
+
+fn is_generic_tool_wrapper_name(name: &str) -> bool {
+    let normalized = name.to_ascii_lowercase();
+    normalized.contains("running tool")
+        || normalized.contains("running tools")
+        || normalized == "tool"
+        || normalized.contains("tool call")
 }
 
 fn push_tree_rows(

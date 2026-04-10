@@ -21,8 +21,8 @@ use super::{
     geometry::trace_tree_scroll_offset,
     traces::{
         first_llm_trace_index, format_duration_compact, next_error_trace_index, parent_trace_index,
-        previous_error_trace_index, root_trace_index, selected_trace_row, trace_tree_rows,
-        trace_window, waterfall_bar,
+        previous_error_trace_index, root_trace_index, selected_trace_row, trace_row_badges,
+        trace_row_display_name, trace_tree_rows, trace_window, waterfall_bar,
     },
 };
 
@@ -159,6 +159,34 @@ fn duration_format_compacts_long_values() {
     assert_eq!(format_duration_compact(58.6), "58.6ms");
     assert_eq!(format_duration_compact(1_101.7), "1.10s");
     assert_eq!(format_duration_compact(62_500.0), "1.0m");
+}
+
+#[test]
+fn trace_row_display_name_prefers_tool_name_for_generic_wrappers() {
+    let mut span = span_with_parent("trace", "tool", "root", "running tool", 0, 100);
+    span.attributes
+        .insert("tool.name".to_string(), json!("product_tool"));
+
+    assert_eq!(trace_row_display_name(&span), "product_tool");
+}
+
+#[test]
+fn trace_row_badges_include_error_tool_and_llm_metadata() {
+    let mut span = span_with_parent("trace", "tool", "root", "chat", 0, 100);
+    span.status_code = "STATUS_CODE_ERROR".to_string();
+    span.attributes
+        .insert("tool.name".to_string(), json!("product_tool"));
+    span.llm = Some(LlmAttributes {
+        model: Some("gpt-4o".to_string()),
+        ..LlmAttributes::default()
+    });
+
+    let badges = trace_row_badges(&span)
+        .into_iter()
+        .map(|badge| badge.label)
+        .collect::<Vec<_>>();
+
+    assert_eq!(badges, vec!["ERR", "tool product_tool", "LLM gpt-4o"]);
 }
 
 #[test]

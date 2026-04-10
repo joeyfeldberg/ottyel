@@ -11,6 +11,7 @@ use crate::{
 
 const COMMAND_PALETTE_VISIBLE_ROWS: usize = 8;
 const FAST_MOVE_STEP: isize = 5;
+const FASTER_MOVE_STEP: isize = 20;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum WheelTarget {
@@ -188,10 +189,13 @@ pub(super) fn handle_key(
 }
 
 fn movement_step(modifiers: KeyModifiers) -> isize {
-    if modifiers.contains(KeyModifiers::SHIFT) {
-        FAST_MOVE_STEP
-    } else {
-        1
+    match (
+        modifiers.contains(KeyModifiers::CONTROL),
+        modifiers.contains(KeyModifiers::SHIFT),
+    ) {
+        (true, true) => FASTER_MOVE_STEP,
+        (true, false) | (false, true) => FAST_MOVE_STEP,
+        (false, false) => 1,
     }
 }
 
@@ -1419,6 +1423,54 @@ mod tests {
 
         assert_eq!(outcome, InputOutcome::None);
         assert_eq!(state.selected_log, super::FAST_MOVE_STEP as usize);
+    }
+
+    #[test]
+    fn ctrl_shift_j_moves_selection_even_faster() {
+        let mut state = UiState {
+            active_tab: Tab::Logs as usize,
+            logs_focus: PaneFocus::Primary,
+            ..UiState::default()
+        };
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: OverviewStats {
+                log_count: 50,
+                ..empty_overview()
+            },
+            traces: Vec::new(),
+            selected_trace: Vec::new(),
+            logs: (0..50)
+                .map(|index| LogSummary {
+                    service_name: "api".to_string(),
+                    timestamp_unix_nano: index,
+                    severity: "INFO".to_string(),
+                    body: format!("log {index}"),
+                    trace_id: String::new(),
+                    span_id: String::new(),
+                    resource_attributes: Default::default(),
+                    attributes: Default::default(),
+                })
+                .collect(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+
+        let outcome = super::handle_key(
+            KeyCode::Char('j'),
+            KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(outcome, InputOutcome::None);
+        assert_eq!(state.selected_log, super::FASTER_MOVE_STEP as usize);
     }
 
     #[test]
