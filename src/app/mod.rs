@@ -10,7 +10,7 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use futures::{FutureExt, StreamExt};
+use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::{
     sync::{mpsc, watch},
@@ -168,7 +168,6 @@ async fn terminal_loop(
     let (llm_refresh_tx, mut llm_refresh_rx) = mpsc::unbounded_channel();
     let mut refresh_in_flight = false;
     let mut next_refresh_request_id = 0_u64;
-    let mut pending_event: Option<Event> = None;
     loop {
         input::sync_selection(&mut state, &snapshot);
         let size = terminal.size()?;
@@ -191,23 +190,6 @@ async fn terminal_loop(
             &llm_refresh_tx,
         );
         terminal.draw(|frame| crate::ui::render(frame, &snapshot, &state))?;
-
-        if let Some(event) = pending_event.take() {
-            if handle_terminal_event(
-                event,
-                ratatui::layout::Rect::new(0, 0, size.width, size.height),
-                &mut events,
-                &mut pending_event,
-                query,
-                &mut state,
-                &mut snapshot,
-                &mut trace_detail_cache,
-                &llm_timeline_cache,
-            )? {
-                break;
-            }
-            continue;
-        }
 
         tokio::select! {
             _ = tick.tick() => {
@@ -275,8 +257,6 @@ async fn terminal_loop(
                         if handle_terminal_event(
                             event,
                             ratatui::layout::Rect::new(0, 0, size.width, size.height),
-                            &mut events,
-                            &mut pending_event,
                             query,
                             &mut state,
                             &mut snapshot,
@@ -298,8 +278,6 @@ async fn terminal_loop(
 fn handle_terminal_event(
     event: Event,
     root: ratatui::layout::Rect,
-    events: &mut EventStream,
-    pending_event: &mut Option<Event>,
     query: &QueryService,
     state: &mut UiState,
     snapshot: &mut DashboardSnapshot,
@@ -354,11 +332,10 @@ fn handle_terminal_event(
                     MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
                 )
             {
-                let drained = drain_stale_scroll_events(mouse.kind, events, pending_event)?;
                 record_wheel_debug(
                     state,
                     format!(
-                        "{} target={} before={} -> noop drained-same-dir={drained}",
+                        "{} target={} before={} -> noop",
                         wheel_direction_label(mouse.kind),
                         wheel_target_label(wheel_target),
                         wheel_position_label(before_position),
@@ -418,33 +395,6 @@ fn apply_input_outcome(
 
     Ok(())
 }
-
-fn drain_stale_scroll_events(
-    direction: MouseEventKind,
-    events: &mut EventStream,
-    pending_event: &mut Option<Event>,
-) -> Result<usize> {
-    let mut drained = 0;
-    loop {
-        let Some(ready_event) = events.next().now_or_never() else {
-            break;
-        };
-        let Some(next_event) = ready_event.transpose()? else {
-            break;
-        };
-
-        match next_event {
-            Event::Mouse(mouse) if mouse.kind == direction => drained += 1,
-            other => {
-                *pending_event = Some(other);
-                break;
-            }
-        }
-    }
-
-    Ok(drained)
-}
-
 fn refresh_detail_state(
     query: &QueryService,
     state: &UiState,

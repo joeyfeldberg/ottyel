@@ -33,6 +33,7 @@ pub(crate) fn render(
                 Style::default().fg(palette.foreground)
             };
             Row::new(vec![
+                Cell::from(format_trace_timestamp(trace.started_at_unix_nano)),
                 Cell::from(truncate(&trace.service_name, 12)),
                 Cell::from(truncate(&simplify_wrapper_name(&trace.root_name), 24)),
                 Cell::from(trace.span_count.to_string()),
@@ -45,6 +46,7 @@ pub(crate) fn render(
     let table = Table::new(
         rows,
         [
+            Constraint::Length(8),
             Constraint::Length(12),
             Constraint::Min(20),
             Constraint::Length(6),
@@ -53,7 +55,7 @@ pub(crate) fn render(
         ],
     )
     .header(
-        Row::new(vec!["service", "root", "spans", "errs", "ms"]).style(
+        Row::new(vec!["time", "service", "root", "spans", "errs", "ms"]).style(
             Style::default()
                 .fg(palette.muted)
                 .add_modifier(ratatui::prelude::Modifier::BOLD),
@@ -154,6 +156,15 @@ pub(crate) fn render(
             ),
         detail_area,
     );
+}
+
+pub(crate) fn format_trace_timestamp(started_at_unix_nano: i64) -> String {
+    let total_seconds = started_at_unix_nano.div_euclid(1_000_000_000);
+    let seconds_of_day = total_seconds.rem_euclid(86_400);
+    let hours = seconds_of_day / 3_600;
+    let minutes = (seconds_of_day % 3_600) / 60;
+    let seconds = seconds_of_day % 60;
+    format!("{hours:02}:{minutes:02}:{seconds:02}")
 }
 
 pub(crate) fn trace_tree_rows(

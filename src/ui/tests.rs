@@ -20,9 +20,10 @@ use super::{
     details::{build_log_detail_lines, format_log_body, llm_detail_lines, metric_chart_values},
     geometry::trace_tree_scroll_offset,
     traces::{
-        first_llm_trace_index, format_duration_compact, next_error_trace_index, parent_trace_index,
-        previous_error_trace_index, root_trace_index, selected_trace_row, trace_row_badges,
-        trace_row_display_name, trace_tree_rows, trace_window, waterfall_bar,
+        first_llm_trace_index, format_duration_compact, format_trace_timestamp,
+        next_error_trace_index, parent_trace_index, previous_error_trace_index, root_trace_index,
+        selected_trace_row, trace_row_badges, trace_row_display_name, trace_tree_rows,
+        trace_window, waterfall_bar,
     },
 };
 
@@ -159,6 +160,11 @@ fn duration_format_compacts_long_values() {
     assert_eq!(format_duration_compact(58.6), "58.6ms");
     assert_eq!(format_duration_compact(1_101.7), "1.10s");
     assert_eq!(format_duration_compact(62_500.0), "1.0m");
+}
+
+#[test]
+fn trace_timestamp_formats_as_hms() {
+    assert_eq!(format_trace_timestamp(65_956_000_000_000), "18:19:16");
 }
 
 #[test]
