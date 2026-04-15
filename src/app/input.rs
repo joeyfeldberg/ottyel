@@ -14,19 +14,6 @@ const FAST_MOVE_STEP: isize = 5;
 const FASTER_MOVE_STEP: isize = 20;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub(super) enum WheelTarget {
-    TraceList,
-    TraceTree,
-    TraceDetail,
-    LogsFeed,
-    LogsDetail,
-    MetricsFeed,
-    MetricsDetail,
-    LlmFeed,
-    LlmDetail,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum InputOutcome {
     None,
     RefreshDetails,
@@ -74,9 +61,6 @@ pub(super) fn handle_key(
         }
         KeyCode::Char('H') => {
             state.show_context_help = !state.show_context_help;
-        }
-        KeyCode::Char('D') => {
-            state.show_wheel_debug = !state.show_wheel_debug;
         }
         KeyCode::Char('g') => cycle_theme(state),
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
@@ -256,26 +240,6 @@ pub(super) fn handle_mouse(
             handle_scroll(-1, event.column, event.row, root, state, snapshot)
         }
         _ => InputOutcome::None,
-    }
-}
-
-pub(super) fn wheel_target(
-    column: u16,
-    row: u16,
-    root: Rect,
-    state: &UiState,
-) -> Option<WheelTarget> {
-    let body = crate::ui::geometry::body_area(root);
-    if !crate::ui::geometry::contains(body, column, row) {
-        return None;
-    }
-
-    match Tab::ALL[state.active_tab] {
-        Tab::Overview => None,
-        Tab::Traces => trace_wheel_target(column, row, body, state),
-        Tab::Logs => log_wheel_target(column, row, body),
-        Tab::Metrics => metric_wheel_target(column, row, body),
-        Tab::Llm => llm_wheel_target(column, row, body),
     }
 }
 
@@ -473,56 +437,6 @@ fn handle_trace_click(
         return InputOutcome::None;
     }
     InputOutcome::None
-}
-
-fn trace_wheel_target(column: u16, row: u16, body: Rect, state: &UiState) -> Option<WheelTarget> {
-    if state.trace_view_mode == TraceViewMode::List {
-        return crate::ui::geometry::contains(body, column, row).then_some(WheelTarget::TraceList);
-    }
-
-    let [tree_area, detail_area] = crate::ui::geometry::trace_detail_sections(body);
-    if crate::ui::geometry::contains(detail_area, column, row) {
-        Some(WheelTarget::TraceDetail)
-    } else if crate::ui::geometry::contains(tree_area, column, row) {
-        Some(WheelTarget::TraceTree)
-    } else {
-        None
-    }
-}
-
-fn log_wheel_target(column: u16, row: u16, body: Rect) -> Option<WheelTarget> {
-    let [feed_area, detail_area] = crate::ui::geometry::log_sections(body);
-    if crate::ui::geometry::contains(detail_area, column, row) {
-        Some(WheelTarget::LogsDetail)
-    } else if crate::ui::geometry::contains(feed_area, column, row) {
-        Some(WheelTarget::LogsFeed)
-    } else {
-        None
-    }
-}
-
-fn metric_wheel_target(column: u16, row: u16, body: Rect) -> Option<WheelTarget> {
-    let [feed_area, right_area] = crate::ui::geometry::metric_sections(body);
-    let detail_area = crate::ui::geometry::metric_right_sections(right_area)[1];
-    if crate::ui::geometry::contains(detail_area, column, row) {
-        Some(WheelTarget::MetricsDetail)
-    } else if crate::ui::geometry::contains(feed_area, column, row) {
-        Some(WheelTarget::MetricsFeed)
-    } else {
-        None
-    }
-}
-
-fn llm_wheel_target(column: u16, row: u16, body: Rect) -> Option<WheelTarget> {
-    let [left_area, detail_area] = crate::ui::geometry::llm_sections(body);
-    let [_, _, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
-    if crate::ui::geometry::contains(detail_area, column, row) {
-        Some(WheelTarget::LlmDetail)
-    } else if crate::ui::geometry::contains(feed_area, column, row) {
-        Some(WheelTarget::LlmFeed)
-    } else {
-        None
-    }
 }
 
 fn handle_logs_click(

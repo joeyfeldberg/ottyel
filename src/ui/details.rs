@@ -12,6 +12,55 @@ use super::{Palette, UiState, traces};
 
 const LLM_PREVIEW_LINE_LIMIT: usize = 8;
 
+#[derive(Debug, Default)]
+pub(crate) struct TraceDetailLinesCache {
+    key: Option<TraceDetailLinesKey>,
+    lines: Vec<Line<'static>>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct TraceDetailLinesKey {
+    trace_id: String,
+    span_id: String,
+    end_time_unix_nano: i64,
+    attribute_count: usize,
+    resource_attribute_count: usize,
+    event_count: usize,
+    link_count: usize,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LogDetailLinesCache {
+    key: Option<crate::domain::LogSummary>,
+    lines: Vec<Line<'static>>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct MetricDetailLinesCache {
+    key: Option<MetricDetailLinesKey>,
+    lines: Vec<Line<'static>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct MetricDetailLinesKey {
+    selected: MetricSummary,
+    series: Vec<MetricSummary>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct LlmDetailLinesCache {
+    key: Option<LlmDetailLinesKey>,
+    lines: Vec<Line<'static>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct LlmDetailLinesKey {
+    item: crate::domain::LlmSummary,
+    timeline: Vec<LlmTimelineItem>,
+    expand_prompt: bool,
+    expand_output: bool,
+}
+
 pub(crate) fn selected_metric_series(
     snapshot: &DashboardSnapshot,
     selected_index: usize,
@@ -62,20 +111,42 @@ pub(crate) fn metric_chart_values(series: &[MetricSummary]) -> Vec<u64> {
         .collect()
 }
 
-pub(crate) fn trace_detail_lines(
+pub(crate) fn sync_trace_detail_lines_cache(
     snapshot: &DashboardSnapshot,
     state: &UiState,
     palette: Palette,
-) -> Vec<Line<'static>> {
-    traces::selected_trace_span_detail(snapshot, state)
-        .map(|span| build_span_detail_lines(&span, palette))
-        .unwrap_or_else(|| {
-            vec![Line::raw(
-                "Select a trace and move focus to the tree to inspect spans.",
-            )]
-        })
+    cache: &mut TraceDetailLinesCache,
+) {
+    let Some(span) = traces::selected_trace_span_detail(snapshot, state) else {
+        cache.key = None;
+        cache.lines = vec![Line::raw(
+            "Select a trace and move focus to the tree to inspect spans.",
+        )];
+        return;
+    };
+
+    let next_key = TraceDetailLinesKey {
+        trace_id: span.trace_id.clone(),
+        span_id: span.span_id.clone(),
+        end_time_unix_nano: span.end_time_unix_nano,
+        attribute_count: span.attributes.len(),
+        resource_attribute_count: span.resource_attributes.len(),
+        event_count: span.events.len(),
+        link_count: span.links.len(),
+    };
+
+    if cache.key.as_ref() != Some(&next_key) {
+        cache.lines = build_span_detail_lines(&span, palette);
+        cache.key = Some(next_key);
+    }
 }
 
+pub(crate) fn cached_trace_detail_lines(cache: &TraceDetailLinesCache) -> &[Line<'static>] {
+    &cache.lines
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn log_detail_lines(
     snapshot: &DashboardSnapshot,
     state: &UiState,
@@ -88,6 +159,30 @@ pub(crate) fn log_detail_lines(
         .unwrap_or_else(|| vec![Line::raw("No log selected.")])
 }
 
+pub(crate) fn sync_log_detail_lines_cache(
+    snapshot: &DashboardSnapshot,
+    state: &UiState,
+    palette: Palette,
+    cache: &mut LogDetailLinesCache,
+) {
+    let Some(log) = snapshot.logs.get(state.selected_log) else {
+        cache.key = None;
+        cache.lines = vec![Line::raw("No log selected.")];
+        return;
+    };
+
+    if cache.key.as_ref() != Some(log) {
+        cache.lines = build_log_detail_lines(log, palette);
+        cache.key = Some(log.clone());
+    }
+}
+
+pub(crate) fn cached_log_detail_lines(cache: &LogDetailLinesCache) -> &[Line<'static>] {
+    &cache.lines
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn metric_detail_lines(
     snapshot: &DashboardSnapshot,
     state: &UiState,
@@ -97,6 +192,36 @@ pub(crate) fn metric_detail_lines(
     build_metric_detail_lines(snapshot, state.selected_metric, &series, palette)
 }
 
+pub(crate) fn sync_metric_detail_lines_cache(
+    snapshot: &DashboardSnapshot,
+    state: &UiState,
+    palette: Palette,
+    cache: &mut MetricDetailLinesCache,
+) {
+    let Some(selected) = snapshot.metrics.get(state.selected_metric) else {
+        cache.key = None;
+        cache.lines = vec![Line::raw("No metric selected.")];
+        return;
+    };
+
+    let series = selected_metric_series(snapshot, state.selected_metric);
+    let next_key = MetricDetailLinesKey {
+        selected: selected.clone(),
+        series: series.clone(),
+    };
+
+    if cache.key.as_ref() != Some(&next_key) {
+        cache.lines = build_metric_detail_lines(snapshot, state.selected_metric, &series, palette);
+        cache.key = Some(next_key);
+    }
+}
+
+pub(crate) fn cached_metric_detail_lines(cache: &MetricDetailLinesCache) -> &[Line<'static>] {
+    &cache.lines
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
 pub(crate) fn llm_detail_lines(
     snapshot: &DashboardSnapshot,
     state: &UiState,
@@ -107,6 +232,35 @@ pub(crate) fn llm_detail_lines(
         .get(state.selected_llm)
         .map(|item| build_llm_detail_lines(item, &snapshot.selected_llm_timeline, state, palette))
         .unwrap_or_else(|| vec![Line::raw("No LLM spans yet.")])
+}
+
+pub(crate) fn sync_llm_detail_lines_cache(
+    snapshot: &DashboardSnapshot,
+    state: &UiState,
+    palette: Palette,
+    cache: &mut LlmDetailLinesCache,
+) {
+    let Some(item) = snapshot.llm.get(state.selected_llm) else {
+        cache.key = None;
+        cache.lines = vec![Line::raw("No LLM spans yet.")];
+        return;
+    };
+
+    let next_key = LlmDetailLinesKey {
+        item: item.clone(),
+        timeline: snapshot.selected_llm_timeline.clone(),
+        expand_prompt: state.llm_expand_prompt,
+        expand_output: state.llm_expand_output,
+    };
+
+    if cache.key.as_ref() != Some(&next_key) {
+        cache.lines = build_llm_detail_lines(item, &snapshot.selected_llm_timeline, state, palette);
+        cache.key = Some(next_key);
+    }
+}
+
+pub(crate) fn cached_llm_detail_lines(cache: &LlmDetailLinesCache) -> &[Line<'static>] {
+    &cache.lines
 }
 
 pub(crate) fn build_log_detail_lines(log: &LogSummary, palette: Palette) -> Vec<Line<'static>> {

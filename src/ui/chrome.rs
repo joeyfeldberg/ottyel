@@ -72,47 +72,6 @@ pub(crate) fn render_context_help_overlay(
     );
 }
 
-pub(crate) fn render_wheel_debug_overlay(
-    frame: &mut Frame<'_>,
-    area: Rect,
-    state: &UiState,
-    palette: Palette,
-) {
-    let width = 88_u16.min(area.width.saturating_sub(4)).max(42);
-    let height = 18_u16.min(area.height.saturating_sub(4)).max(8);
-    let popup = Rect {
-        x: area.x + area.width.saturating_sub(width + 2),
-        y: area.y + area.height.saturating_sub(height + 2),
-        width,
-        height,
-    };
-    let mut lines = vec![Line::from(Span::styled(
-        "/tmp/ottyel-wheel.log",
-        Style::default().fg(palette.muted),
-    ))];
-    lines.push(Line::raw(""));
-    if state.wheel_debug_events.is_empty() {
-        lines.push(Line::raw("No wheel events captured yet."));
-    } else {
-        lines.extend(state.wheel_debug_events.iter().cloned().map(Line::raw));
-    }
-
-    frame.render_widget(Clear, popup);
-    frame.render_widget(
-        Paragraph::new(lines)
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title("Wheel Debug")
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette.warning)),
-            )
-            .style(Style::default().fg(palette.foreground))
-            .alignment(Alignment::Left),
-        popup,
-    );
-}
-
 pub(crate) fn render_command_palette(
     frame: &mut Frame<'_>,
     area: Rect,
@@ -216,9 +175,6 @@ pub(crate) fn global_status_text(snapshot: &DashboardSnapshot, state: &UiState) 
     ];
     if state.search_mode || !state.search_query.is_empty() {
         parts.push(format!("search={}", search_label(state)));
-    }
-    if state.show_wheel_debug {
-        parts.push("wheel-debug".to_string());
     }
     parts.push(format!(
         "panes traces={} logs={} metrics={} llm={}",

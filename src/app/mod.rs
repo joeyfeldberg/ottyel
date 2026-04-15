@@ -1,12 +1,10 @@
 mod input;
 
-use std::{fs::OpenOptions, io, io::Write, time::Duration};
+use std::{io, time::Duration};
 
 use anyhow::{Context, Result};
 use crossterm::{
-    event::{
-        DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind, MouseEventKind,
-    },
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind},
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
@@ -15,7 +13,7 @@ use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::{
     sync::{mpsc, watch},
     task,
-    time::interval,
+    time::{MissedTickBehavior, interval},
 };
 
 use crate::{
@@ -23,12 +21,11 @@ use crate::{
     domain::{DashboardSnapshot, LlmTimelineItem, SpanDetail, TraceSummary},
     query::{QueryFilters, QueryService},
     store::Store,
-    ui::{Tab, TraceViewMode, UiState},
+    ui::{RenderCache, Tab, TraceViewMode, UiState},
 };
-use input::{InputOutcome, WheelTarget};
+use input::InputOutcome;
 
-const WHEEL_DEBUG_LOG: &str = "/tmp/ottyel-wheel.log";
-const WHEEL_DEBUG_EVENT_LIMIT: usize = 30;
+const RENDER_FRAME_MS: u64 = 16;
 const MIN_SNAPSHOT_REFRESH_MS: u64 = 3_000;
 
 #[derive(Debug, Default)]
@@ -41,13 +38,6 @@ struct TraceDetailCache {
 struct TraceDetailCacheKey {
     trace: TraceSummary,
     filters: QueryFilters,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct WheelPosition {
-    primary: usize,
-    offset: usize,
-    detail_scroll: u16,
 }
 
 #[derive(Debug)]
@@ -145,15 +135,18 @@ async fn terminal_loop(
     args: &ServeArgs,
 ) -> Result<()> {
     let mut events = EventStream::new();
-    let mut tick = interval(Duration::from_millis(args.tick_rate_ms));
+    let mut render_tick = interval(Duration::from_millis(RENDER_FRAME_MS));
+    render_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut snapshot_tick = interval(Duration::from_millis(snapshot_refresh_interval_ms(
         args.tick_rate_ms,
     )));
+    snapshot_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut state = UiState {
         theme: args.theme,
         ..UiState::default()
     };
     let mut snapshot = query.snapshot(&input::filters(&state, &[]))?;
+    let mut render_cache = RenderCache::default();
     let mut trace_detail_cache = TraceDetailCache::default();
     let mut llm_timeline_cache = LlmTimelineCache::default();
     let mut llm_timeline_refresh = LlmTimelineRefreshState::default();
@@ -168,32 +161,39 @@ async fn terminal_loop(
     let (llm_refresh_tx, mut llm_refresh_rx) = mpsc::unbounded_channel();
     let mut refresh_in_flight = false;
     let mut next_refresh_request_id = 0_u64;
+    let mut needs_redraw = true;
+    let mut render_ready = true;
     loop {
-        input::sync_selection(&mut state, &snapshot);
-        let size = terminal.size()?;
-        crate::ui::sync_trace_tree_scroll(
-            ratatui::layout::Rect::new(0, 0, size.width, size.height),
-            &snapshot,
-            &mut state,
-        );
-        crate::ui::sync_detail_scroll(
-            ratatui::layout::Rect::new(0, 0, size.width, size.height),
-            &snapshot,
-            &mut state,
-        );
-        drive_llm_timeline_refresh(
-            query,
-            &state,
-            &mut snapshot,
-            &mut llm_timeline_cache,
-            &mut llm_timeline_refresh,
-            &llm_refresh_tx,
-        );
-        terminal.draw(|frame| crate::ui::render(frame, &snapshot, &state))?;
+        if needs_redraw && render_ready {
+            input::sync_selection(&mut state, &snapshot);
+            let size = terminal.size()?;
+            crate::ui::sync_trace_tree_scroll(
+                ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                &snapshot,
+                &mut state,
+            );
+            crate::ui::sync_render_cache(&snapshot, &state, &mut render_cache);
+            crate::ui::sync_detail_scroll(
+                ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                &snapshot,
+                &mut state,
+                &render_cache,
+            );
+            drive_llm_timeline_refresh(
+                query,
+                &state,
+                &mut snapshot,
+                &mut llm_timeline_cache,
+                &mut llm_timeline_refresh,
+                &llm_refresh_tx,
+            );
+            terminal.draw(|frame| crate::ui::render(frame, &snapshot, &state, &render_cache))?;
+            needs_redraw = false;
+            render_ready = false;
+        }
 
         tokio::select! {
-            _ = tick.tick() => {
-            }
+            _ = render_tick.tick() => render_ready = true,
             _ = snapshot_tick.tick(), if !refresh_in_flight => {
                 refresh_in_flight = true;
                 next_refresh_request_id = next_refresh_request_id.saturating_add(1);
@@ -217,6 +217,7 @@ async fn terminal_loop(
                             &mut trace_detail_cache,
                             &llm_timeline_cache,
                         )?;
+                        needs_redraw = true;
                     }
                 }
             }
@@ -230,21 +231,23 @@ async fn terminal_loop(
                     query,
                     &llm_refresh_tx,
                 );
+                needs_redraw = true;
             }
             maybe_event = events.next() => {
                 match maybe_event.transpose()? {
                         Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
+                        let before = state.clone();
                         let outcome = input::handle_key(
                             key.code,
                             key.modifiers,
-                            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                            ratatui::layout::Rect::new(0, 0, terminal.size()?.width, terminal.size()?.height),
                             &mut state,
                             &snapshot,
                         );
                         if matches!(outcome, InputOutcome::Quit) {
                             break;
                         }
-                        apply_input_outcome(
+                        let changed = apply_input_outcome(
                             outcome,
                             query,
                             &state,
@@ -252,16 +255,18 @@ async fn terminal_loop(
                             &mut trace_detail_cache,
                             &llm_timeline_cache,
                         )?;
+                        needs_redraw |= changed || before != state;
                     }
                     Some(event) => {
                         if handle_terminal_event(
                             event,
-                            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                            ratatui::layout::Rect::new(0, 0, terminal.size()?.width, terminal.size()?.height),
                             query,
                             &mut state,
                             &mut snapshot,
                             &mut trace_detail_cache,
                             &llm_timeline_cache,
+                            &mut needs_redraw,
                         )? {
                             break;
                         }
@@ -283,14 +288,16 @@ fn handle_terminal_event(
     snapshot: &mut DashboardSnapshot,
     trace_detail_cache: &mut TraceDetailCache,
     llm_timeline_cache: &LlmTimelineCache,
+    needs_redraw: &mut bool,
 ) -> Result<bool> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
+            let before = state.clone();
             let outcome = input::handle_key(key.code, key.modifiers, root, state, snapshot);
             if matches!(outcome, InputOutcome::Quit) {
                 return Ok(true);
             }
-            apply_input_outcome(
+            let changed = apply_input_outcome(
                 outcome,
                 query,
                 state,
@@ -298,14 +305,14 @@ fn handle_terminal_event(
                 trace_detail_cache,
                 llm_timeline_cache,
             )?;
+            *needs_redraw |= changed || before != *state;
         }
         Event::Mouse(mouse) => {
-            let wheel_target = input::wheel_target(mouse.column, mouse.row, root, state);
-            let before_position = wheel_target.map(|target| wheel_position(target, state));
             let before = state.clone();
             let outcome = input::handle_mouse(mouse, root, state, snapshot);
+            let state_changed = before != *state;
             if !matches!(outcome, InputOutcome::None) {
-                apply_input_outcome(
+                let changed = apply_input_outcome(
                     outcome,
                     query,
                     state,
@@ -313,48 +320,12 @@ fn handle_terminal_event(
                     trace_detail_cache,
                     llm_timeline_cache,
                 )?;
-                record_wheel_debug(
-                    state,
-                    format!(
-                        "{} target={} before={} after={} outcome={:?}",
-                        wheel_direction_label(mouse.kind),
-                        wheel_target_label(wheel_target),
-                        wheel_position_label(before_position),
-                        wheel_position_label(
-                            wheel_target.map(|target| wheel_position(target, state))
-                        ),
-                        outcome,
-                    ),
-                );
-            } else if before == *state
-                && matches!(
-                    mouse.kind,
-                    MouseEventKind::ScrollDown | MouseEventKind::ScrollUp
-                )
-            {
-                record_wheel_debug(
-                    state,
-                    format!(
-                        "{} target={} before={} -> noop",
-                        wheel_direction_label(mouse.kind),
-                        wheel_target_label(wheel_target),
-                        wheel_position_label(before_position),
-                    ),
-                );
-            } else if let Some(target) = wheel_target {
-                record_wheel_debug(
-                    state,
-                    format!(
-                        "{} target={} before={} after={}",
-                        wheel_direction_label(mouse.kind),
-                        wheel_target_label(Some(target)),
-                        wheel_position_label(before_position),
-                        wheel_position_label(Some(wheel_position(target, state))),
-                    ),
-                );
+                *needs_redraw |= changed || state_changed;
+            } else if state_changed {
+                *needs_redraw = true;
             }
         }
-        Event::Resize(_, _) => {}
+        Event::Resize(_, _) => *needs_redraw = true,
         _ => {}
     }
 
@@ -368,9 +339,9 @@ fn apply_input_outcome(
     snapshot: &mut DashboardSnapshot,
     trace_detail_cache: &mut TraceDetailCache,
     llm_timeline_cache: &LlmTimelineCache,
-) -> Result<()> {
+) -> Result<bool> {
     match outcome {
-        InputOutcome::None => {}
+        InputOutcome::None => Ok(false),
         InputOutcome::RefreshDetails => {
             refresh_detail_state(
                 query,
@@ -379,6 +350,7 @@ fn apply_input_outcome(
                 trace_detail_cache,
                 llm_timeline_cache,
             )?;
+            Ok(true)
         }
         InputOutcome::RefreshSnapshot => {
             *snapshot = query.snapshot(&input::filters(state, &snapshot.services))?;
@@ -389,11 +361,10 @@ fn apply_input_outcome(
                 trace_detail_cache,
                 llm_timeline_cache,
             )?;
+            Ok(true)
         }
-        InputOutcome::Quit => {}
+        InputOutcome::Quit => Ok(false),
     }
-
-    Ok(())
 }
 fn refresh_detail_state(
     query: &QueryService,
@@ -531,98 +502,6 @@ fn apply_llm_timeline_refresh_result(
         llm_timeline_refresh,
         llm_refresh_tx,
     );
-}
-
-fn wheel_position(target: WheelTarget, state: &UiState) -> WheelPosition {
-    match target {
-        WheelTarget::TraceList => WheelPosition {
-            primary: state.selected_trace,
-            offset: state.trace_list_scroll,
-            detail_scroll: 0,
-        },
-        WheelTarget::TraceTree | WheelTarget::TraceDetail => WheelPosition {
-            primary: state.selected_trace_span,
-            offset: state.trace_tree_scroll,
-            detail_scroll: state.trace_detail_scroll,
-        },
-        WheelTarget::LogsFeed | WheelTarget::LogsDetail => WheelPosition {
-            primary: state.selected_log,
-            offset: state.log_feed_scroll,
-            detail_scroll: state.log_detail_scroll,
-        },
-        WheelTarget::MetricsFeed | WheelTarget::MetricsDetail => WheelPosition {
-            primary: state.selected_metric,
-            offset: state.metric_feed_scroll,
-            detail_scroll: state.metric_detail_scroll,
-        },
-        WheelTarget::LlmFeed | WheelTarget::LlmDetail => WheelPosition {
-            primary: state.selected_llm,
-            offset: state.llm_feed_scroll,
-            detail_scroll: state.llm_detail_scroll,
-        },
-    }
-}
-
-fn wheel_direction_label(kind: MouseEventKind) -> &'static str {
-    match kind {
-        MouseEventKind::ScrollDown => "down",
-        MouseEventKind::ScrollUp => "up",
-        _ => "-",
-    }
-}
-
-fn wheel_target_label(target: Option<WheelTarget>) -> &'static str {
-    match target {
-        Some(WheelTarget::TraceList) => "trace-list",
-        Some(WheelTarget::TraceTree) => "trace-tree",
-        Some(WheelTarget::TraceDetail) => "trace-detail",
-        Some(WheelTarget::LogsFeed) => "logs-feed",
-        Some(WheelTarget::LogsDetail) => "logs-detail",
-        Some(WheelTarget::MetricsFeed) => "metrics-feed",
-        Some(WheelTarget::MetricsDetail) => "metrics-detail",
-        Some(WheelTarget::LlmFeed) => "llm-feed",
-        Some(WheelTarget::LlmDetail) => "llm-detail",
-        None => "-",
-    }
-}
-
-fn wheel_position_label(position: Option<WheelPosition>) -> String {
-    position
-        .map(|position| {
-            format!(
-                "sel={} offset={} detail={}",
-                position.primary, position.offset, position.detail_scroll
-            )
-        })
-        .unwrap_or_else(|| "-".to_string())
-}
-
-fn record_wheel_debug(state: &mut UiState, line: String) {
-    if !state.show_wheel_debug {
-        return;
-    }
-
-    let timestamp = wheel_timestamp();
-    let full_line = format!("{timestamp} {line}");
-    state.wheel_debug_events.push_back(full_line.clone());
-    while state.wheel_debug_events.len() > WHEEL_DEBUG_EVENT_LIMIT {
-        state.wheel_debug_events.pop_front();
-    }
-
-    if let Ok(mut file) = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(WHEEL_DEBUG_LOG)
-    {
-        let _ = writeln!(file, "{full_line}");
-    }
-}
-
-fn wheel_timestamp() -> String {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap_or_default();
-    format!("{:>10}.{:03}", now.as_secs(), now.subsec_millis())
 }
 
 fn snapshot_refresh_interval_ms(tick_rate_ms: u64) -> u64 {

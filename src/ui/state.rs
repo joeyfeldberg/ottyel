@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 
 use ratatui::prelude::Color;
 
@@ -108,7 +108,6 @@ pub struct UiState {
     pub collapsed_trace_spans: HashSet<String>,
     pub show_help: bool,
     pub show_context_help: bool,
-    pub show_wheel_debug: bool,
     pub show_command_palette: bool,
     pub command_query: String,
     pub selected_command: usize,
@@ -141,7 +140,6 @@ pub struct UiState {
     pub log_severity_filter: LogSeverityFilter,
     pub log_correlation_filter: LogCorrelationFilter,
     pub log_tail: bool,
-    pub wheel_debug_events: VecDeque<String>,
 }
 
 impl Default for UiState {
@@ -160,7 +158,6 @@ impl Default for UiState {
             collapsed_trace_spans: HashSet::new(),
             show_help: false,
             show_context_help: false,
-            show_wheel_debug: false,
             show_command_palette: false,
             command_query: String::new(),
             selected_command: 0,
@@ -193,7 +190,6 @@ impl Default for UiState {
             log_severity_filter: LogSeverityFilter::All,
             log_correlation_filter: LogCorrelationFilter::All,
             log_tail: false,
-            wheel_debug_events: VecDeque::new(),
         }
     }
 }

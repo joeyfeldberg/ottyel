@@ -11,13 +11,14 @@ use serde_json::Value;
 
 use crate::domain::{DashboardSnapshot, SpanDetail, truncate};
 
-use super::{Palette, TraceFocus, TraceViewMode, UiState, chrome, details, geometry};
+use super::{Palette, TraceFocus, TraceViewMode, UiState, chrome, geometry};
 
 pub(crate) fn render(
     frame: &mut Frame<'_>,
     area: Rect,
     snapshot: &DashboardSnapshot,
     state: &UiState,
+    trace_detail_lines: &[Line<'static>],
     palette: Palette,
 ) {
     let rows: Vec<Row<'_>> = snapshot
@@ -143,9 +144,8 @@ pub(crate) fn render(
     } else {
         palette.muted
     };
-    let span_detail = details::trace_detail_lines(snapshot, state, palette);
     frame.render_widget(
-        Paragraph::new(span_detail)
+        Paragraph::new(trace_detail_lines.to_vec())
             .scroll((state.trace_detail_scroll, 0))
             .wrap(Wrap { trim: false })
             .block(

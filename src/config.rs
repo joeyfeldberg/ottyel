@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
+use directories::ProjectDirs;
 
 #[derive(Debug, Clone, Parser)]
 #[command(
@@ -29,7 +30,7 @@ pub struct ServeArgs {
     pub http_bind: String,
     #[arg(long, default_value = "127.0.0.1:4317")]
     pub grpc_bind: String,
-    #[arg(long, default_value = ".ottyel/ottyel.db")]
+    #[arg(long, default_value_os_t = default_db_path())]
     pub db_path: PathBuf,
     #[arg(long, default_value_t = 24)]
     pub retention_hours: u64,
@@ -48,7 +49,7 @@ impl Default for ServeArgs {
         Self {
             http_bind: "127.0.0.1:4318".to_string(),
             grpc_bind: "127.0.0.1:4317".to_string(),
-            db_path: PathBuf::from(".ottyel/ottyel.db"),
+            db_path: default_db_path(),
             retention_hours: 24,
             max_spans: 100_000,
             tick_rate_ms: 750,
@@ -60,8 +61,14 @@ impl Default for ServeArgs {
 
 #[derive(Debug, Clone, Args)]
 pub struct DoctorArgs {
-    #[arg(long, default_value = ".ottyel/ottyel.db")]
+    #[arg(long, default_value_os_t = default_db_path())]
     pub db_path: PathBuf,
+}
+
+fn default_db_path() -> PathBuf {
+    ProjectDirs::from("", "", "ottyel")
+        .map(|dirs| dirs.data_local_dir().join("ottyel.db"))
+        .unwrap_or_else(|| PathBuf::from(".ottyel/ottyel.db"))
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]

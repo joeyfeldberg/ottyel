@@ -23,7 +23,33 @@ use ratatui::{
 
 use crate::domain::DashboardSnapshot;
 
-pub fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &UiState) {
+#[derive(Debug, Default)]
+pub struct RenderCache {
+    trace_detail: details::TraceDetailLinesCache,
+    log_detail: details::LogDetailLinesCache,
+    metric_detail: details::MetricDetailLinesCache,
+    llm_detail: details::LlmDetailLinesCache,
+}
+
+pub fn sync_render_cache(snapshot: &DashboardSnapshot, state: &UiState, cache: &mut RenderCache) {
+    let palette = Palette::from_theme(state.theme);
+    if Tab::ALL[state.active_tab] == Tab::Traces && state.trace_view_mode == TraceViewMode::Detail {
+        details::sync_trace_detail_lines_cache(snapshot, state, palette, &mut cache.trace_detail);
+    } else if Tab::ALL[state.active_tab] == Tab::Logs {
+        details::sync_log_detail_lines_cache(snapshot, state, palette, &mut cache.log_detail);
+    } else if Tab::ALL[state.active_tab] == Tab::Metrics {
+        details::sync_metric_detail_lines_cache(snapshot, state, palette, &mut cache.metric_detail);
+    } else if Tab::ALL[state.active_tab] == Tab::Llm {
+        details::sync_llm_detail_lines_cache(snapshot, state, palette, &mut cache.llm_detail);
+    }
+}
+
+pub fn render(
+    frame: &mut Frame<'_>,
+    snapshot: &DashboardSnapshot,
+    state: &UiState,
+    cache: &RenderCache,
+) {
     let palette = Palette::from_theme(state.theme);
     let root = frame.area();
     frame.render_widget(
@@ -75,10 +101,38 @@ pub fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &UiSta
 
     match Tab::ALL[state.active_tab] {
         Tab::Overview => overview::render(frame, layout[2], snapshot, palette),
-        Tab::Traces => traces::render(frame, layout[2], snapshot, state, palette),
-        Tab::Logs => panes::render_logs(frame, layout[2], snapshot, state, palette),
-        Tab::Metrics => panes::render_metrics(frame, layout[2], snapshot, state, palette),
-        Tab::Llm => panes::render_llm(frame, layout[2], snapshot, state, palette),
+        Tab::Traces => traces::render(
+            frame,
+            layout[2],
+            snapshot,
+            state,
+            details::cached_trace_detail_lines(&cache.trace_detail),
+            palette,
+        ),
+        Tab::Logs => panes::render_logs(
+            frame,
+            layout[2],
+            snapshot,
+            state,
+            details::cached_log_detail_lines(&cache.log_detail),
+            palette,
+        ),
+        Tab::Metrics => panes::render_metrics(
+            frame,
+            layout[2],
+            snapshot,
+            state,
+            details::cached_metric_detail_lines(&cache.metric_detail),
+            palette,
+        ),
+        Tab::Llm => panes::render_llm(
+            frame,
+            layout[2],
+            snapshot,
+            state,
+            details::cached_llm_detail_lines(&cache.llm_detail),
+            palette,
+        ),
     }
 
     frame.render_widget(
@@ -93,9 +147,6 @@ pub fn render(frame: &mut Frame<'_>, snapshot: &DashboardSnapshot, state: &UiSta
         chrome::render_help_overlay(frame, root, state, palette);
     } else if state.show_context_help {
         chrome::render_context_help_overlay(frame, root, state, palette);
-    }
-    if state.show_wheel_debug {
-        chrome::render_wheel_debug_overlay(frame, root, state, palette);
     }
 }
 
@@ -122,8 +173,12 @@ pub fn sync_trace_tree_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &
     }
 }
 
-pub fn sync_detail_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut UiState) {
-    let palette = Palette::from_theme(state.theme);
+pub fn sync_detail_scroll(
+    root: Rect,
+    snapshot: &DashboardSnapshot,
+    state: &mut UiState,
+    cache: &RenderCache,
+) {
     let body = geometry::body_area(root);
     state.trace_list_scroll = geometry::clamp_window_offset(
         state.trace_list_scroll,
@@ -185,7 +240,7 @@ pub fn sync_detail_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut 
     if Tab::ALL[state.active_tab] == Tab::Traces && state.trace_view_mode == TraceViewMode::Detail {
         state.trace_detail_scroll = geometry::clamp_scroll(
             state.trace_detail_scroll,
-            details::trace_detail_lines(snapshot, state, palette).len(),
+            details::cached_trace_detail_lines(&cache.trace_detail).len(),
             geometry::detail_viewport_height(geometry::trace_detail_area(body)),
         );
     } else {
@@ -195,21 +250,21 @@ pub fn sync_detail_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &mut 
     if Tab::ALL[state.active_tab] == Tab::Logs {
         state.log_detail_scroll = geometry::clamp_scroll(
             state.log_detail_scroll,
-            details::log_detail_lines(snapshot, state, palette).len(),
+            details::cached_log_detail_lines(&cache.log_detail).len(),
             geometry::detail_viewport_height(geometry::log_detail_area(body)),
         );
     }
     if Tab::ALL[state.active_tab] == Tab::Metrics {
         state.metric_detail_scroll = geometry::clamp_scroll(
             state.metric_detail_scroll,
-            details::metric_detail_lines(snapshot, state, palette).len(),
+            details::cached_metric_detail_lines(&cache.metric_detail).len(),
             geometry::detail_viewport_height(geometry::metric_right_sections(metric_right)[1]),
         );
     }
     if Tab::ALL[state.active_tab] == Tab::Llm {
         state.llm_detail_scroll = geometry::clamp_scroll(
             state.llm_detail_scroll,
-            details::llm_detail_lines(snapshot, state, palette).len(),
+            details::cached_llm_detail_lines(&cache.llm_detail).len(),
             geometry::detail_viewport_height(geometry::llm_detail_area(body)),
         );
     }

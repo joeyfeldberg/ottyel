@@ -87,7 +87,7 @@ pub struct SpanDetail {
     pub llm: Option<LlmAttributes>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LogSummary {
     pub service_name: String,
     pub timestamp_unix_nano: i64,
@@ -99,7 +99,7 @@ pub struct LogSummary {
     pub attributes: AttributeMap,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricSummary {
     pub service_name: String,
     pub metric_name: String,
@@ -109,7 +109,7 @@ pub struct MetricSummary {
     pub summary: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmSummary {
     pub trace_id: String,
     pub span_id: String,
@@ -238,7 +238,7 @@ impl LlmTimelineKind {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmTimelineItem {
     pub kind: LlmTimelineKind,
     pub label: String,

@@ -15,6 +15,7 @@ pub(crate) fn render_logs(
     area: Rect,
     snapshot: &DashboardSnapshot,
     state: &UiState,
+    detail_lines: &[Line<'static>],
     palette: Palette,
 ) {
     let panels = geometry::log_sections(area);
@@ -75,9 +76,8 @@ pub(crate) fn render_logs(
     );
     frame.render_widget(table, panels[0]);
 
-    let detail = details::log_detail_lines(snapshot, state, palette);
     frame.render_widget(
-        Paragraph::new(detail)
+        Paragraph::new(detail_lines.to_vec())
             .scroll((state.log_detail_scroll, 0))
             .wrap(Wrap { trim: false })
             .block(
@@ -98,6 +98,7 @@ pub(crate) fn render_metrics(
     area: Rect,
     snapshot: &DashboardSnapshot,
     state: &UiState,
+    detail_lines: &[Line<'static>],
     palette: Palette,
 ) {
     let panels = geometry::metric_sections(area);
@@ -172,9 +173,8 @@ pub(crate) fn render_metrics(
         .data(&chart_values);
     frame.render_widget(sparkline, right[0]);
 
-    let detail = details::metric_detail_lines(snapshot, state, palette);
     frame.render_widget(
-        Paragraph::new(detail)
+        Paragraph::new(detail_lines.to_vec())
             .scroll((state.metric_detail_scroll, 0))
             .wrap(Wrap { trim: false })
             .block(
@@ -195,6 +195,7 @@ pub(crate) fn render_llm(
     area: Rect,
     snapshot: &DashboardSnapshot,
     state: &UiState,
+    detail_lines: &[Line<'static>],
     palette: Palette,
 ) {
     let panels = geometry::llm_sections(area);
@@ -271,9 +272,8 @@ pub(crate) fn render_llm(
     frame.render_widget(llm_session_panel(snapshot, palette), left[2]);
     frame.render_widget(table, left[3]);
 
-    let detail = details::llm_detail_lines(snapshot, state, palette);
     frame.render_widget(
-        Paragraph::new(detail)
+        Paragraph::new(detail_lines.to_vec())
             .scroll((state.llm_detail_scroll, 0))
             .wrap(Wrap { trim: false })
             .block(
