@@ -301,6 +301,12 @@ impl Store {
                 "(body LIKE '{pattern}' ESCAPE '\\' OR severity LIKE '{pattern}' ESCAPE '\\' OR trace_id LIKE '{pattern}' ESCAPE '\\' OR span_id LIKE '{pattern}' ESCAPE '\\' OR attributes_json LIKE '{pattern}' ESCAPE '\\' OR resource_attributes_json LIKE '{pattern}' ESCAPE '\\')"
             ));
         }
+        if let Some(trace_id) = log_filters.pinned_trace_id.as_deref() {
+            where_clauses.push(format!("trace_id = '{}'", escape_sql(trace_id)));
+        }
+        if let Some(span_id) = log_filters.pinned_span_id.as_deref() {
+            where_clauses.push(format!("span_id = '{}'", escape_sql(span_id)));
+        }
         if let Some(cursor) = &page.cursor {
             where_clauses.push(format!(
                 "(timestamp_unix_nano < {timestamp} OR (timestamp_unix_nano = {timestamp} AND id < {row_id}))",

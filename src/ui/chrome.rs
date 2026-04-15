@@ -210,20 +210,29 @@ pub(crate) fn footer_text(state: &UiState) -> String {
                 "traces: j/k select trace | enter open | : commands | ? help | e errors".to_string()
             }
             TraceFocus::TraceTree => {
-                "trace tree: j/k move | l/right detail | esc list | : commands | ? help | e errors"
+                "trace tree: j/k move | l/right detail | L logs | esc list | : commands | ? help | e errors"
                     .to_string()
             }
             TraceFocus::TraceDetail => {
-                "span detail: j/k scroll | h/left tree | esc list | : commands | ? help | e errors"
+                "span detail: j/k scroll | h/left tree | L logs | esc list | : commands | ? help | e errors"
                     .to_string()
             }
         },
         Tab::Logs => {
             if state.logs_focus == PaneFocus::Primary {
-                "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation | : commands"
-                    .to_string()
+                let mut text = "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation".to_string();
+                if state.log_pinned_trace_id.is_some() || state.log_pinned_span_id.is_some() {
+                    text.push_str(" | u clear pin");
+                }
+                text.push_str(" | : commands");
+                text
             } else {
-                "log detail: j/k scroll | esc/h/left feed | : commands".to_string()
+                let mut text = "log detail: j/k scroll | esc/h/left feed".to_string();
+                if state.log_pinned_trace_id.is_some() || state.log_pinned_span_id.is_some() {
+                    text.push_str(" | u clear pin");
+                }
+                text.push_str(" | : commands");
+                text
             }
         }
         Tab::Metrics => {
@@ -311,6 +320,7 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
                 lines.push(Line::raw("  p                jump to parent span"));
                 lines.push(Line::raw("  r                jump to root span"));
                 lines.push(Line::raw("  m                jump to first llm span"));
+                lines.push(Line::raw("  shift-l          pivot to correlated logs"));
                 lines.push(Line::raw("  esc              back to trace list"));
                 lines.push(Line::raw("  l / right        focus span detail"));
                 lines.push(Line::raw("  space / enter    collapse or expand subtree"));
@@ -323,6 +333,7 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
                 lines.push(Line::raw("  p                jump to parent span"));
                 lines.push(Line::raw("  r                jump to root span"));
                 lines.push(Line::raw("  m                jump to first llm span"));
+                lines.push(Line::raw("  shift-l          pivot to correlated logs"));
                 lines.push(Line::raw("  h / left         focus trace tree"));
                 lines.push(Line::raw("  esc              back to trace list"));
             }
@@ -336,10 +347,16 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
                 lines.push(Line::raw("  x                log-only text search"));
                 lines.push(Line::raw("  v                cycle severity filter"));
                 lines.push(Line::raw("  c                cycle correlation filter"));
+                if state.log_pinned_trace_id.is_some() || state.log_pinned_span_id.is_some() {
+                    lines.push(Line::raw("  u                clear trace/span pin"));
+                }
             } else {
                 lines.push(Line::raw("log detail"));
                 lines.push(Line::raw("  j / k            scroll detail"));
                 lines.push(Line::raw("  esc / h / left   back to logs feed"));
+                if state.log_pinned_trace_id.is_some() || state.log_pinned_span_id.is_some() {
+                    lines.push(Line::raw("  u                clear trace/span pin"));
+                }
             }
         }
         Tab::Metrics => {
@@ -515,6 +532,12 @@ pub(crate) fn log_feed_title(state: &UiState) -> String {
     }
     if state.log_correlation_filter != LogCorrelationFilter::All {
         parts.push(format!("corr={}", state.log_correlation_filter.label()));
+    }
+    if let Some(trace_id) = state.log_pinned_trace_id.as_deref() {
+        parts.push(format!("trace={}", truncate(trace_id, 12)));
+    }
+    if let Some(span_id) = state.log_pinned_span_id.as_deref() {
+        parts.push(format!("span={}", truncate(span_id, 12)));
     }
     if !state.log_search_query.is_empty() {
         parts.push(format!("text={}", truncate(&state.log_search_query, 18)));

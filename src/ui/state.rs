@@ -139,6 +139,8 @@ pub struct UiState {
     pub log_search_mode: bool,
     pub log_severity_filter: LogSeverityFilter,
     pub log_correlation_filter: LogCorrelationFilter,
+    pub log_pinned_trace_id: Option<String>,
+    pub log_pinned_span_id: Option<String>,
     pub log_tail: bool,
 }
 
@@ -189,6 +191,8 @@ impl Default for UiState {
             log_search_mode: false,
             log_severity_filter: LogSeverityFilter::All,
             log_correlation_filter: LogCorrelationFilter::All,
+            log_pinned_trace_id: None,
+            log_pinned_span_id: None,
             log_tail: false,
         }
     }

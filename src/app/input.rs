@@ -94,6 +94,11 @@ pub(super) fn handle_key(
             cycle_log_correlation_filter(state);
             return InputOutcome::RefreshSnapshot;
         }
+        KeyCode::Char('u') if Tab::ALL[state.active_tab] == Tab::Logs => {
+            if clear_log_pivot(state) {
+                return InputOutcome::RefreshSnapshot;
+            }
+        }
         KeyCode::Tab => {
             state.active_tab = (state.active_tab + 1) % Tab::ALL.len();
         }
@@ -147,6 +152,11 @@ pub(super) fn handle_key(
         }
         KeyCode::Char('m') if Tab::ALL[state.active_tab] == Tab::Traces => {
             jump_to_trace_row(crate::ui::first_llm_trace_index(snapshot, state), state)
+        }
+        KeyCode::Char('L') if Tab::ALL[state.active_tab] == Tab::Traces => {
+            if pivot_trace_span_to_logs(state, snapshot) {
+                return InputOutcome::RefreshSnapshot;
+            }
         }
         KeyCode::Char('t') => {
             cycle_time_window(state);
@@ -310,6 +320,8 @@ pub(super) fn filters(state: &UiState, services: &[String]) -> QueryFilters {
             correlation: state.log_correlation_filter,
             search_query: (!state.log_search_query.is_empty())
                 .then(|| state.log_search_query.clone()),
+            pinned_trace_id: state.log_pinned_trace_id.clone(),
+            pinned_span_id: state.log_pinned_span_id.clone(),
         },
     }
 }
@@ -800,6 +812,35 @@ fn cycle_log_correlation_filter(state: &mut UiState) {
         .unwrap_or(0);
     state.log_correlation_filter =
         LogCorrelationFilter::ALL[(current + 1) % LogCorrelationFilter::ALL.len()];
+}
+
+fn clear_log_pivot(state: &mut UiState) -> bool {
+    let had_pivot = state.log_pinned_trace_id.is_some() || state.log_pinned_span_id.is_some();
+    state.log_pinned_trace_id = None;
+    state.log_pinned_span_id = None;
+    had_pivot
+}
+
+fn pivot_trace_span_to_logs(state: &mut UiState, snapshot: &DashboardSnapshot) -> bool {
+    if state.trace_view_mode != TraceViewMode::Detail {
+        return false;
+    }
+
+    let Some(span) = crate::ui::selected_trace_span_detail(snapshot, state) else {
+        return false;
+    };
+
+    state.active_tab = tab_index(Tab::Logs);
+    state.logs_focus = PaneFocus::Primary;
+    state.selected_log = 0;
+    state.log_feed_scroll = 0;
+    state.log_feed_follow_selected = true;
+    state.log_detail_scroll = 0;
+    state.log_tail = false;
+    state.log_correlation_filter = LogCorrelationFilter::All;
+    state.log_pinned_trace_id = Some(span.trace_id);
+    state.log_pinned_span_id = Some(span.span_id);
+    true
 }
 
 fn toggle_selected_trace_subtree(state: &mut UiState, snapshot: &DashboardSnapshot) {
@@ -1629,6 +1670,96 @@ mod tests {
 
         assert_eq!(state.llm_focus, PaneFocus::Detail);
         assert_eq!(state.llm_detail_scroll, 1);
+    }
+
+    #[test]
+    fn shift_l_pivots_selected_span_to_logs() {
+        let mut state = UiState {
+            active_tab: Tab::Traces as usize,
+            trace_view_mode: TraceViewMode::Detail,
+            trace_focus: TraceFocus::TraceTree,
+            selected_trace_span: 1,
+            ..UiState::default()
+        };
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: OverviewStats {
+                trace_count: 1,
+                ..empty_overview()
+            },
+            traces: vec![TraceSummary {
+                trace_id: "trace-1".to_string(),
+                service_name: "api".to_string(),
+                root_name: "request".to_string(),
+                span_count: 2,
+                error_count: 0,
+                duration_ms: 42.0,
+                started_at_unix_nano: 1,
+            }],
+            selected_trace: vec![span("root", "", 1), span("child", "root", 2)],
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+
+        let outcome = super::handle_key(
+            KeyCode::Char('L'),
+            KeyModifiers::SHIFT,
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(outcome, InputOutcome::RefreshSnapshot);
+        assert_eq!(state.active_tab, Tab::Logs as usize);
+        assert_eq!(state.logs_focus, PaneFocus::Primary);
+        assert_eq!(state.log_pinned_trace_id.as_deref(), Some("trace-1"));
+        assert_eq!(state.log_pinned_span_id.as_deref(), Some("child"));
+        assert_eq!(
+            state.log_correlation_filter,
+            crate::query::LogCorrelationFilter::All
+        );
+    }
+
+    #[test]
+    fn u_clears_log_pivot() {
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: empty_overview(),
+            traces: Vec::new(),
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+        let mut state = UiState {
+            active_tab: Tab::Logs as usize,
+            log_pinned_trace_id: Some("trace-1".to_string()),
+            log_pinned_span_id: Some("span-1".to_string()),
+            ..UiState::default()
+        };
+
+        let outcome = super::handle_key(
+            KeyCode::Char('u'),
+            KeyModifiers::empty(),
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(outcome, InputOutcome::RefreshSnapshot);
+        assert_eq!(state.log_pinned_trace_id, None);
+        assert_eq!(state.log_pinned_span_id, None);
     }
 
     #[test]

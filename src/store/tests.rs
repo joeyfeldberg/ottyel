@@ -189,6 +189,41 @@ fn recent_logs_apply_severity_correlation_and_text_filters() {
         .unwrap();
     assert_eq!(pane_text.len(), 1);
     assert!(pane_text[0].body.contains("validation"));
+
+    let pinned_trace = store
+        .recent_logs(
+            None,
+            10,
+            None,
+            None,
+            &LogFilters {
+                pinned_trace_id: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+                ..LogFilters::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(pinned_trace.len(), 2);
+    assert!(
+        pinned_trace
+            .iter()
+            .all(|log| log.trace_id == "0102030405060708090a0b0c0d0e0f10")
+    );
+
+    let pinned_span = store
+        .recent_logs(
+            None,
+            10,
+            None,
+            None,
+            &LogFilters {
+                pinned_trace_id: Some("0102030405060708090a0b0c0d0e0f10".to_string()),
+                pinned_span_id: Some("0102030405060708".to_string()),
+                ..LogFilters::default()
+            },
+        )
+        .unwrap();
+    assert_eq!(pinned_span.len(), 1);
+    assert_eq!(pinned_span[0].span_id, "0102030405060708");
 }
 
 #[test]

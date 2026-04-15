@@ -9,8 +9,8 @@ mod traces;
 pub use state::{Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState};
 pub(crate) use traces::{
     first_llm_trace_index, next_error_trace_index, parent_trace_index, previous_error_trace_index,
-    root_trace_index, selected_trace_tree_span, trace_tree_hit, trace_tree_rows,
-    trace_tree_total_lines, visible_trace_tree_len,
+    root_trace_index, selected_trace_span_detail, selected_trace_tree_span, trace_tree_hit,
+    trace_tree_rows, trace_tree_total_lines, visible_trace_tree_len,
 };
 
 use ratatui::{

@@ -73,6 +73,8 @@ pub struct LogFilters {
     pub severity: LogSeverityFilter,
     pub correlation: LogCorrelationFilter,
     pub search_query: Option<String>,
+    pub pinned_trace_id: Option<String>,
+    pub pinned_span_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Default)]
