@@ -265,7 +265,9 @@ pub fn sync_detail_scroll(
         state.llm_detail_scroll = geometry::clamp_scroll(
             state.llm_detail_scroll,
             details::cached_llm_detail_lines(&cache.llm_detail).len(),
-            geometry::detail_viewport_height(geometry::llm_detail_area(body)),
+            geometry::detail_viewport_height(
+                geometry::llm_detail_sections(geometry::llm_detail_area(body))[0],
+            ),
         );
     }
 }

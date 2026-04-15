@@ -93,6 +93,14 @@ pub(crate) fn llm_detail_area(body: Rect) -> Rect {
     llm_sections(body)[1]
 }
 
+pub(crate) fn llm_detail_sections(area: Rect) -> [Rect; 2] {
+    let split = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(12), Constraint::Length(9)])
+        .split(area);
+    [split[0], split[1]]
+}
+
 pub(crate) fn trace_tree_viewport_height(area: Rect) -> usize {
     area.height.saturating_sub(2) as usize
 }

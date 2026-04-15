@@ -200,6 +200,7 @@ pub(crate) fn render_llm(
 ) {
     let panels = geometry::llm_sections(area);
     let left = geometry::llm_left_sections(panels[0]);
+    let right = geometry::llm_detail_sections(panels[1]);
 
     let feed_border = if state.llm_focus == PaneFocus::Primary {
         palette.warning
@@ -272,6 +273,7 @@ pub(crate) fn render_llm(
     frame.render_widget(llm_session_panel(snapshot, palette), left[2]);
     frame.render_widget(table, left[3]);
 
+    frame.render_widget(Clear, right[0]);
     frame.render_widget(
         Paragraph::new(detail_lines.to_vec())
             .scroll((state.llm_detail_scroll, 0))
@@ -285,7 +287,20 @@ pub(crate) fn render_llm(
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(detail_border)),
             ),
-        panels[1],
+        right[0],
+    );
+
+    frame.render_widget(Clear, right[1]);
+    frame.render_widget(
+        Paragraph::new(details::llm_timeline_panel_lines(snapshot, state, palette))
+            .wrap(Wrap { trim: false })
+            .block(
+                Block::default()
+                    .title("Timeline")
+                    .borders(Borders::ALL)
+                    .border_style(Style::default().fg(palette.warning)),
+            ),
+        right[1],
     );
 
     if snapshot.llm.is_empty() {

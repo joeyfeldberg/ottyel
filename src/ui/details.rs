@@ -230,7 +230,7 @@ pub(crate) fn llm_detail_lines(
     snapshot
         .llm
         .get(state.selected_llm)
-        .map(|item| build_llm_detail_lines(item, &snapshot.selected_llm_timeline, state, palette))
+        .map(|item| build_llm_detail_lines(item, state, palette))
         .unwrap_or_else(|| vec![Line::raw("No LLM spans yet.")])
 }
 
@@ -253,14 +253,31 @@ pub(crate) fn sync_llm_detail_lines_cache(
         expand_output: state.llm_expand_output,
     };
 
-    if cache.key.as_ref() != Some(&next_key) {
-        cache.lines = build_llm_detail_lines(item, &snapshot.selected_llm_timeline, state, palette);
-        cache.key = Some(next_key);
-    }
+    // Rebuild LLM detail lines on each sync instead of relying on the cache key.
+    // The selected row can change while the timeline refresh is still catching up,
+    // and a stale cached block is more noticeable here than the rebuild cost.
+    cache.lines = build_llm_detail_lines(item, state, palette);
+    cache.key = Some(next_key);
 }
 
 pub(crate) fn cached_llm_detail_lines(cache: &LlmDetailLinesCache) -> &[Line<'static>] {
     &cache.lines
+}
+
+pub(crate) fn llm_timeline_panel_lines(
+    snapshot: &DashboardSnapshot,
+    state: &UiState,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let Some(_) = snapshot.llm.get(state.selected_llm) else {
+        return vec![Line::raw("No LLM spans yet.")];
+    };
+
+    if snapshot.selected_llm_timeline.is_empty() {
+        return vec![Line::raw("")];
+    }
+
+    llm_timeline_lines(&snapshot.selected_llm_timeline, palette)
 }
 
 pub(crate) fn build_log_detail_lines(log: &LogSummary, palette: Palette) -> Vec<Line<'static>> {
@@ -362,7 +379,6 @@ pub(crate) fn format_log_body(body: &str) -> Vec<String> {
 
 fn build_llm_detail_lines(
     item: &crate::domain::LlmSummary,
-    timeline: &[LlmTimelineItem],
     state: &UiState,
     palette: Palette,
 ) -> Vec<Line<'static>> {
@@ -454,12 +470,6 @@ fn build_llm_detail_lines(
             lines.push(Line::from("args"));
             lines.extend(multiline_block(args).into_iter().map(Line::from));
         }
-    }
-
-    if !timeline.is_empty() {
-        lines.push(Line::raw(""));
-        lines.push(section_header("timeline", palette.warning));
-        lines.extend(llm_timeline_lines(timeline, palette));
     }
 
     lines.push(Line::raw(""));

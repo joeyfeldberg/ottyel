@@ -17,7 +17,10 @@ use super::{
         command_palette_window, context_help_lines, context_help_title, footer_text,
         global_status_text, help_lines, help_title,
     },
-    details::{build_log_detail_lines, format_log_body, llm_detail_lines, metric_chart_values},
+    details::{
+        build_log_detail_lines, format_log_body, llm_detail_lines, llm_timeline_panel_lines,
+        metric_chart_values,
+    },
     geometry::trace_tree_scroll_offset,
     traces::{
         first_llm_trace_index, format_duration_compact, format_trace_timestamp,
@@ -591,17 +594,90 @@ fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
     assert!(rendered.iter().any(|line| line.contains("output")));
     assert!(rendered.iter().any(|line| line.contains("world")));
     assert!(rendered.iter().any(|line| line.contains("lookup_customer")));
-    assert!(rendered.iter().any(|line| line.contains("timeline")));
-    assert!(
-        rendered
-            .iter()
-            .any(|line| line.contains("tool lookup_customer"))
-    );
     assert!(rendered.iter().any(|line| line.contains("normalized")));
     assert!(
         rendered
             .iter()
             .any(|line| line.contains("\"provider\": \"openai\""))
+    );
+}
+
+#[test]
+fn llm_timeline_panel_lines_show_timeline_steps() {
+    let snapshot = crate::domain::DashboardSnapshot {
+        services: Vec::new(),
+        overview: crate::domain::OverviewStats {
+            service_count: 0,
+            trace_count: 0,
+            error_span_count: 0,
+            log_count: 0,
+            metric_count: 0,
+            llm_count: 1,
+        },
+        traces: Vec::new(),
+        selected_trace: Vec::new(),
+        logs: Vec::new(),
+        metrics: Vec::new(),
+        llm: vec![LlmSummary {
+            trace_id: "trace-1".to_string(),
+            span_id: "span-1".to_string(),
+            service_name: "api".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            operation: "chat".to_string(),
+            span_kind: None,
+            session_id: None,
+            conversation_id: None,
+            prompt_preview: None,
+            output_preview: None,
+            tool_name: None,
+            tool_args: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cost: None,
+            latency_ms: None,
+            status: "STATUS_CODE_OK".to_string(),
+            raw_json: json!({}),
+        }],
+        llm_rollups: Vec::new(),
+        llm_sessions: Vec::new(),
+        llm_model_comparisons: Vec::new(),
+        llm_top_calls: Vec::new(),
+        selected_llm_timeline: vec![
+            crate::domain::LlmTimelineItem {
+                kind: crate::domain::LlmTimelineKind::Prompt,
+                label: "input".to_string(),
+                detail: Some("hello".to_string()),
+                offset_ms: 0.0,
+                duration_ms: None,
+                status: None,
+            },
+            crate::domain::LlmTimelineItem {
+                kind: crate::domain::LlmTimelineKind::Tool,
+                label: "lookup_customer".to_string(),
+                detail: Some("{\"customer_id\":\"123\"}".to_string()),
+                offset_ms: 12.0,
+                duration_ms: Some(8.0),
+                status: Some("STATUS_CODE_OK".to_string()),
+            },
+        ],
+    };
+
+    let rendered = llm_timeline_panel_lines(
+        &snapshot,
+        &UiState::default(),
+        Palette::from_theme(Theme::Ember),
+    )
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>();
+
+    assert!(rendered.iter().any(|line| line.contains("prompt input")));
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("tool lookup_customer"))
     );
 }
 

@@ -255,7 +255,11 @@ async fn terminal_loop(
                             &mut trace_detail_cache,
                             &llm_timeline_cache,
                         )?;
-                        needs_redraw |= changed || before != state;
+                        let state_changed = before != state;
+                        needs_redraw |= changed || state_changed;
+                        if changed || state_changed {
+                            render_ready = true;
+                        }
                     }
                     Some(event) => {
                         if handle_terminal_event(
@@ -267,6 +271,7 @@ async fn terminal_loop(
                             &mut trace_detail_cache,
                             &llm_timeline_cache,
                             &mut needs_redraw,
+                            &mut render_ready,
                         )? {
                             break;
                         }
@@ -289,6 +294,7 @@ fn handle_terminal_event(
     trace_detail_cache: &mut TraceDetailCache,
     llm_timeline_cache: &LlmTimelineCache,
     needs_redraw: &mut bool,
+    render_ready: &mut bool,
 ) -> Result<bool> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
@@ -305,9 +311,18 @@ fn handle_terminal_event(
                 trace_detail_cache,
                 llm_timeline_cache,
             )?;
-            *needs_redraw |= changed || before != *state;
+            let state_changed = before != *state;
+            *needs_redraw |= changed || state_changed;
+            if changed || state_changed {
+                *render_ready = true;
+            }
         }
         Event::Mouse(mouse) => {
+            let is_wheel = matches!(
+                mouse.kind,
+                crossterm::event::MouseEventKind::ScrollDown
+                    | crossterm::event::MouseEventKind::ScrollUp
+            );
             let before = state.clone();
             let outcome = input::handle_mouse(mouse, root, state, snapshot);
             let state_changed = before != *state;
@@ -321,11 +336,20 @@ fn handle_terminal_event(
                     llm_timeline_cache,
                 )?;
                 *needs_redraw |= changed || state_changed;
+                if (changed || state_changed) && !is_wheel {
+                    *render_ready = true;
+                }
             } else if state_changed {
                 *needs_redraw = true;
+                if !is_wheel {
+                    *render_ready = true;
+                }
             }
         }
-        Event::Resize(_, _) => *needs_redraw = true,
+        Event::Resize(_, _) => {
+            *needs_redraw = true;
+            *render_ready = true;
+        }
         _ => {}
     }
 

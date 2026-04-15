@@ -214,9 +214,13 @@ fn active_detail_pane_height(root: Rect, state: &UiState) -> Option<usize> {
                 crate::ui::geometry::metric_right_sections(right)[1],
             ))
         }
-        Tab::Llm if state.llm_focus == PaneFocus::Detail => Some(
-            crate::ui::geometry::detail_viewport_height(crate::ui::geometry::llm_detail_area(body)),
-        ),
+        Tab::Llm if state.llm_focus == PaneFocus::Detail => {
+            Some(crate::ui::geometry::detail_viewport_height(
+                crate::ui::geometry::llm_detail_sections(crate::ui::geometry::llm_detail_area(
+                    body,
+                ))[0],
+            ))
+        }
         _ => None,
     }
 }
