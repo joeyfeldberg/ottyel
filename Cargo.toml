@@ -3,6 +3,10 @@ name = "ottyel"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+description = "A local OpenTelemetry and LLM telemetry workstation for the terminal"
+readme = "README.md"
+keywords = ["opentelemetry", "otel", "tui", "observability", "llm"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 anyhow = "1.0"
