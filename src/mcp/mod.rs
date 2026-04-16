@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use crate::query::QueryService;
 
 use protocol::{JsonRpcRequest, initialize_result};
-use resources::{resources_list_result, resources_read_result};
+use resources::{resource_templates_list_result, resources_list_result, resources_read_result};
 use tools::{tools_call_result, tools_list_result};
 
 pub fn serve_stdio(query: QueryService) -> Result<()> {
@@ -45,6 +45,7 @@ fn handle_request(query: &QueryService, request: JsonRpcRequest) -> Option<Value
         "initialize" => initialize_result(&request.params),
         "ping" => Ok(json!({})),
         "resources/list" => Ok(resources_list_result()),
+        "resources/templates/list" => Ok(resource_templates_list_result()),
         "resources/read" => resources_read_result(query, &request.params),
         "tools/list" => Ok(tools_list_result()),
         "tools/call" => tools_call_result(query, &request.params),

@@ -10,7 +10,10 @@ use opentelemetry_proto::tonic::{
 use serde_json::{Value, json};
 use tempfile::NamedTempFile;
 
-use super::{handle_request, protocol::JsonRpcRequest, tools::tools_list_result};
+use super::{
+    handle_request, protocol::JsonRpcRequest, resources::resource_templates_list_result,
+    tools::tools_list_result,
+};
 use crate::{query::QueryService, store::Store};
 
 #[test]
@@ -44,6 +47,63 @@ fn tools_list_exposes_trace_and_llm_tools() {
     assert!(names.contains(&"get_trace"));
     assert!(names.contains(&"search_llm"));
     assert!(names.contains(&"get_llm_timeline"));
+}
+
+#[test]
+fn resource_templates_list_exposes_entity_templates() {
+    let result = resource_templates_list_result();
+    let templates = result["resourceTemplates"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|template| template["uriTemplate"].as_str().unwrap())
+        .collect::<Vec<_>>();
+
+    assert!(templates.contains(&"ottyel://trace/{trace_id}"));
+    assert!(templates.contains(&"ottyel://logs/{trace_id}"));
+    assert!(templates.contains(&"ottyel://llm/{trace_id}/{span_id}/timeline"));
+}
+
+#[test]
+fn trace_resource_template_reads_trace_detail() {
+    let query = query_with_trace_and_logs();
+    let response = handle_request(
+        &query,
+        JsonRpcRequest {
+            id: Some(json!("trace-resource")),
+            method: "resources/read".to_string(),
+            params: json!({
+                "uri": "ottyel://trace/02020202020202020202020202020202"
+            }),
+        },
+    )
+    .unwrap();
+    let text = response["result"]["contents"][0]["text"].as_str().unwrap();
+    let payload = serde_json::from_str::<Value>(text).unwrap();
+
+    assert_eq!(payload["traceId"], "02020202020202020202020202020202");
+    assert_eq!(payload["spans"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn logs_resource_template_reads_trace_logs() {
+    let query = query_with_trace_and_logs();
+    let response = handle_request(
+        &query,
+        JsonRpcRequest {
+            id: Some(json!("logs-resource")),
+            method: "resources/read".to_string(),
+            params: json!({
+                "uri": "ottyel://logs/01010101010101010101010101010101"
+            }),
+        },
+    )
+    .unwrap();
+    let text = response["result"]["contents"][0]["text"].as_str().unwrap();
+    let payload = serde_json::from_str::<Value>(text).unwrap();
+
+    assert_eq!(payload["traceId"], "01010101010101010101010101010101");
+    assert_eq!(payload["logs"].as_array().unwrap().len(), 2);
 }
 
 #[test]
