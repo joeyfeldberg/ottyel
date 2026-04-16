@@ -1,3 +1,5 @@
+use std::fmt;
+
 use anyhow::Result;
 use serde_json::{Value, json};
 
@@ -51,3 +53,40 @@ pub(super) fn initialize_result(params: &Value) -> Result<Value> {
         },
     }))
 }
+
+#[derive(Debug)]
+pub(super) struct McpError {
+    pub code: i64,
+    pub message: String,
+}
+
+impl McpError {
+    pub fn method_not_found(message: impl Into<String>) -> Self {
+        Self {
+            code: -32601,
+            message: message.into(),
+        }
+    }
+
+    pub fn invalid_params(message: impl Into<String>) -> Self {
+        Self {
+            code: -32602,
+            message: message.into(),
+        }
+    }
+
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self {
+            code: -32603,
+            message: message.into(),
+        }
+    }
+}
+
+impl fmt::Display for McpError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for McpError {}

@@ -1,4 +1,4 @@
-use anyhow::{Context, Result, anyhow};
+use anyhow::Context;
 use serde_json::{Value, json};
 
 use crate::query::{
@@ -7,6 +7,7 @@ use crate::query::{
 };
 
 use super::common::{optional_string, required_str};
+use super::protocol::McpError;
 
 pub(super) fn tools_list_result() -> Value {
     json!({
@@ -120,63 +121,71 @@ fn tool(name: &str, title: &str, description: &str, input_schema: Value) -> Valu
     })
 }
 
-pub(super) fn tools_call_result(query: &QueryService, params: &Value) -> Result<Value> {
+pub(super) fn tools_call_result(query: &QueryService, params: &Value) -> Result<Value, McpError> {
     let name = required_str(params, "name")?;
     let arguments = params.get("arguments").unwrap_or(&Value::Null);
     let payload = match name {
         "search_traces" => {
             let filters = filters_from_args(arguments)?;
-            let page = query.traces_page(
-                &filters,
-                &PageRequest {
-                    limit: limit(arguments),
-                    cursor: parse_cursor::<TraceCursor>(arguments)?,
-                },
-            )?;
+            let page = query
+                .traces_page(
+                    &filters,
+                    &PageRequest {
+                        limit: limit(arguments),
+                        cursor: parse_cursor::<TraceCursor>(arguments)?,
+                    },
+                )
+                .map_err(internal_error)?;
             json!({"traces": page.items, "nextCursor": page.next_cursor})
         }
         "get_trace" => {
             let trace_id = required_str(arguments, "traceId")?;
-            json!({"traceId": trace_id, "spans": query.trace_detail(trace_id)?})
+            json!({"traceId": trace_id, "spans": query.trace_detail(trace_id).map_err(internal_error)?})
         }
         "search_logs" => {
             let filters = filters_from_args(arguments)?;
-            let page = query.logs_page(
-                &filters,
-                &PageRequest {
-                    limit: limit(arguments),
-                    cursor: parse_cursor::<LogCursor>(arguments)?,
-                },
-            )?;
+            let page = query
+                .logs_page(
+                    &filters,
+                    &PageRequest {
+                        limit: limit(arguments),
+                        cursor: parse_cursor::<LogCursor>(arguments)?,
+                    },
+                )
+                .map_err(internal_error)?;
             json!({"logs": page.items, "nextCursor": page.next_cursor})
         }
         "search_metrics" => {
             let filters = filters_from_args(arguments)?;
-            let page = query.metrics_page(
-                &filters,
-                &PageRequest {
-                    limit: limit(arguments),
-                    cursor: parse_cursor::<MetricCursor>(arguments)?,
-                },
-            )?;
+            let page = query
+                .metrics_page(
+                    &filters,
+                    &PageRequest {
+                        limit: limit(arguments),
+                        cursor: parse_cursor::<MetricCursor>(arguments)?,
+                    },
+                )
+                .map_err(internal_error)?;
             json!({"metrics": page.items, "nextCursor": page.next_cursor})
         }
         "search_llm" => {
             let filters = filters_from_args(arguments)?;
-            let page = query.llm_page(
-                &filters,
-                &PageRequest {
-                    limit: limit(arguments),
-                    cursor: parse_cursor::<LlmCursor>(arguments)?,
-                },
-            )?;
+            let page = query
+                .llm_page(
+                    &filters,
+                    &PageRequest {
+                        limit: limit(arguments),
+                        cursor: parse_cursor::<LlmCursor>(arguments)?,
+                    },
+                )
+                .map_err(internal_error)?;
             json!({
                 "llm": page.items,
                 "nextCursor": page.next_cursor,
-                "rollups": query.llm_rollups(&filters)?,
-                "sessions": query.llm_sessions(&filters)?,
-                "models": query.llm_model_comparisons(&filters)?,
-                "topCalls": query.llm_top_calls(&filters)?,
+                "rollups": query.llm_rollups(&filters).map_err(internal_error)?,
+                "sessions": query.llm_sessions(&filters).map_err(internal_error)?,
+                "models": query.llm_model_comparisons(&filters).map_err(internal_error)?,
+                "topCalls": query.llm_top_calls(&filters).map_err(internal_error)?,
             })
         }
         "get_llm_timeline" => {
@@ -185,26 +194,30 @@ pub(super) fn tools_call_result(query: &QueryService, params: &Value) -> Result<
             json!({
                 "traceId": trace_id,
                 "spanId": span_id,
-                "timeline": query.llm_timeline(trace_id, span_id)?,
+                "timeline": query.llm_timeline(trace_id, span_id).map_err(internal_error)?,
             })
         }
-        _ => return Err(anyhow!("unknown MCP tool: {name}")),
+        _ => {
+            return Err(McpError::method_not_found(format!(
+                "unknown MCP tool: {name}"
+            )));
+        }
     };
 
     tool_result(payload)
 }
 
-fn tool_result(payload: Value) -> Result<Value> {
+fn tool_result(payload: Value) -> Result<Value, McpError> {
     Ok(json!({
         "content": [{
             "type": "text",
-            "text": serde_json::to_string_pretty(&payload)?,
+            "text": serde_json::to_string_pretty(&payload).map_err(internal_error)?,
         }],
         "structuredContent": payload,
     }))
 }
 
-fn filters_from_args(args: &Value) -> Result<QueryFilters> {
+fn filters_from_args(args: &Value) -> Result<QueryFilters, McpError> {
     let mut filters = QueryFilters::default();
     filters.service = optional_string(args, "service");
     filters.search_query = optional_string(args, "query");
@@ -245,7 +258,7 @@ fn limit(args: &Value) -> usize {
         .clamp(1, 500) as usize
 }
 
-fn parse_cursor<C>(args: &Value) -> Result<Option<C>>
+fn parse_cursor<C>(args: &Value) -> Result<Option<C>, McpError>
 where
     C: serde::de::DeserializeOwned,
 {
@@ -253,38 +266,49 @@ where
         Some(Value::Null) | None => Ok(None),
         Some(value) => Ok(Some(
             serde_json::from_value(value.clone())
-                .with_context(|| "cursor shape does not match this MCP tool")?,
+                .with_context(|| "cursor shape does not match this MCP tool")
+                .map_err(|error| McpError::invalid_params(error.to_string()))?,
         )),
     }
 }
 
-fn parse_time_window(value: &str) -> Result<TimeWindow> {
+fn parse_time_window(value: &str) -> Result<TimeWindow, McpError> {
     match value {
         "15m" => Ok(TimeWindow::FifteenMinutes),
         "1h" => Ok(TimeWindow::OneHour),
         "6h" => Ok(TimeWindow::SixHours),
         "24h" => Ok(TimeWindow::TwentyFourHours),
-        _ => Err(anyhow!("unsupported timeWindow: {value}")),
+        _ => Err(McpError::invalid_params(format!(
+            "unsupported timeWindow: {value}"
+        ))),
     }
 }
 
-fn parse_log_severity(value: &str) -> Result<LogSeverityFilter> {
+fn parse_log_severity(value: &str) -> Result<LogSeverityFilter, McpError> {
     match value {
         "all" => Ok(LogSeverityFilter::All),
         "error" => Ok(LogSeverityFilter::Error),
         "warn" => Ok(LogSeverityFilter::Warn),
         "info" => Ok(LogSeverityFilter::Info),
         "debug" => Ok(LogSeverityFilter::Debug),
-        _ => Err(anyhow!("unsupported severity: {value}")),
+        _ => Err(McpError::invalid_params(format!(
+            "unsupported severity: {value}"
+        ))),
     }
 }
 
-fn parse_log_correlation(value: &str) -> Result<LogCorrelationFilter> {
+fn parse_log_correlation(value: &str) -> Result<LogCorrelationFilter, McpError> {
     match value {
         "all" => Ok(LogCorrelationFilter::All),
         "trace-linked" => Ok(LogCorrelationFilter::TraceLinked),
         "span-linked" => Ok(LogCorrelationFilter::SpanLinked),
         "uncorrelated" => Ok(LogCorrelationFilter::Uncorrelated),
-        _ => Err(anyhow!("unsupported correlation: {value}")),
+        _ => Err(McpError::invalid_params(format!(
+            "unsupported correlation: {value}"
+        ))),
     }
+}
+
+fn internal_error(error: impl std::fmt::Display) -> McpError {
+    McpError::internal(error.to_string())
 }

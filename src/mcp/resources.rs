@@ -1,9 +1,9 @@
-use anyhow::{Result, anyhow};
 use serde_json::{Value, json};
 
 use crate::query::{LogFilters, PageRequest, QueryFilters, QueryService};
 
 use super::common::required_str;
+use super::protocol::McpError;
 
 pub(super) fn resources_list_result() -> Value {
     json!({
@@ -58,13 +58,16 @@ fn resource_template(uri_template: &str, name: &str, description: &str) -> Value
     })
 }
 
-pub(super) fn resources_read_result(query: &QueryService, params: &Value) -> Result<Value> {
+pub(super) fn resources_read_result(
+    query: &QueryService,
+    params: &Value,
+) -> Result<Value, McpError> {
     let uri = required_str(params, "uri")?;
     let filters = QueryFilters::default();
     let payload = if let Some(trace_id) = uri.strip_prefix("ottyel://trace/") {
         json!({
             "traceId": trace_id,
-            "spans": query.trace_detail(trace_id)?,
+            "spans": query.trace_detail(trace_id).map_err(internal_error)?,
         })
     } else if let Some(trace_id) = uri.strip_prefix("ottyel://logs/") {
         let mut filters = QueryFilters::default();
@@ -74,42 +77,46 @@ pub(super) fn resources_read_result(query: &QueryService, params: &Value) -> Res
         };
         json!({
             "traceId": trace_id,
-            "logs": query.logs_page(&filters, &PageRequest::first(100))?.items,
+            "logs": query.logs_page(&filters, &PageRequest::first(100)).map_err(internal_error)?.items,
         })
     } else if let Some((trace_id, span_id)) = parse_llm_timeline_uri(uri) {
         json!({
             "traceId": trace_id,
             "spanId": span_id,
-            "timeline": query.llm_timeline(trace_id, span_id)?,
+            "timeline": query.llm_timeline(trace_id, span_id).map_err(internal_error)?,
         })
     } else {
         match uri {
             "ottyel://overview" => {
-                let snapshot = query.snapshot(&filters)?;
+                let snapshot = query.snapshot(&filters).map_err(internal_error)?;
                 json!({
                     "overview": snapshot.overview,
                     "services": snapshot.services,
                 })
             }
             "ottyel://traces/recent" => json!({
-                "traces": query.traces_page(&filters, &PageRequest::first(50))?.items,
+            "traces": query.traces_page(&filters, &PageRequest::first(50)).map_err(internal_error)?.items,
             }),
             "ottyel://logs/recent" => json!({
-                "logs": query.logs_page(&filters, &PageRequest::first(50))?.items,
+            "logs": query.logs_page(&filters, &PageRequest::first(50)).map_err(internal_error)?.items,
             }),
             "ottyel://metrics/recent" => json!({
-                "metrics": query.metrics_page(&filters, &PageRequest::first(50))?.items,
+            "metrics": query.metrics_page(&filters, &PageRequest::first(50)).map_err(internal_error)?.items,
             }),
             "ottyel://llm/recent" => json!({
-                "llm": query.llm_page(&filters, &PageRequest::first(50))?.items,
+            "llm": query.llm_page(&filters, &PageRequest::first(50)).map_err(internal_error)?.items,
             }),
             "ottyel://llm/rollups" => json!({
-                "rollups": query.llm_rollups(&filters)?,
-                "sessions": query.llm_sessions(&filters)?,
-                "models": query.llm_model_comparisons(&filters)?,
-                "top_calls": query.llm_top_calls(&filters)?,
+                "rollups": query.llm_rollups(&filters).map_err(internal_error)?,
+                "sessions": query.llm_sessions(&filters).map_err(internal_error)?,
+                "models": query.llm_model_comparisons(&filters).map_err(internal_error)?,
+                "top_calls": query.llm_top_calls(&filters).map_err(internal_error)?,
             }),
-            _ => return Err(anyhow!("unknown resource uri: {uri}")),
+            _ => {
+                return Err(McpError::invalid_params(format!(
+                    "unknown resource uri: {uri}"
+                )));
+            }
         }
     };
 
@@ -117,7 +124,7 @@ pub(super) fn resources_read_result(query: &QueryService, params: &Value) -> Res
         "contents": [{
             "uri": uri,
             "mimeType": "application/json",
-            "text": serde_json::to_string_pretty(&payload)?,
+            "text": serde_json::to_string_pretty(&payload).map_err(internal_error)?,
         }],
     }))
 }
@@ -130,4 +137,8 @@ fn parse_llm_timeline_uri(uri: &str) -> Option<(&str, &str)> {
         return None;
     }
     Some((trace_id, span_id))
+}
+
+fn internal_error(error: impl std::fmt::Display) -> McpError {
+    McpError::internal(error.to_string())
 }

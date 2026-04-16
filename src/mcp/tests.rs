@@ -34,6 +34,76 @@ fn initialize_advertises_tools_and_resources() {
 }
 
 #[test]
+fn unsupported_method_uses_method_not_found_error() {
+    let response = handle_request(
+        &empty_query(),
+        JsonRpcRequest {
+            id: Some(json!(1)),
+            method: "unknown/method".to_string(),
+            params: json!({}),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(response["error"]["code"], -32601);
+}
+
+#[test]
+fn unknown_tool_uses_method_not_found_error() {
+    let response = handle_request(
+        &empty_query(),
+        JsonRpcRequest {
+            id: Some(json!(1)),
+            method: "tools/call".to_string(),
+            params: json!({
+                "name": "not_a_tool",
+                "arguments": {}
+            }),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(response["error"]["code"], -32601);
+}
+
+#[test]
+fn invalid_tool_params_use_invalid_params_error() {
+    let response = handle_request(
+        &empty_query(),
+        JsonRpcRequest {
+            id: Some(json!(1)),
+            method: "tools/call".to_string(),
+            params: json!({
+                "name": "search_traces",
+                "arguments": {
+                    "timeWindow": "forever"
+                }
+            }),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(response["error"]["code"], -32602);
+}
+
+#[test]
+fn unknown_resource_uses_invalid_params_error() {
+    let response = handle_request(
+        &empty_query(),
+        JsonRpcRequest {
+            id: Some(json!(1)),
+            method: "resources/read".to_string(),
+            params: json!({
+                "uri": "ottyel://missing"
+            }),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(response["error"]["code"], -32602);
+}
+
+#[test]
 fn tools_list_exposes_trace_and_llm_tools() {
     let result = tools_list_result();
     let names = result["tools"]

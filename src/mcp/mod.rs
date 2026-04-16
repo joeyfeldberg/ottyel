@@ -8,12 +8,12 @@ mod tests;
 
 use std::io::{self, BufRead, Write};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result};
 use serde_json::{Value, json};
 
 use crate::query::QueryService;
 
-use protocol::{JsonRpcRequest, initialize_result};
+use protocol::{JsonRpcRequest, McpError, initialize_result};
 use resources::{resource_templates_list_result, resources_list_result, resources_read_result};
 use tools::{tools_call_result, tools_list_result};
 
@@ -42,7 +42,8 @@ pub fn serve_stdio(query: QueryService) -> Result<()> {
 fn handle_request(query: &QueryService, request: JsonRpcRequest) -> Option<Value> {
     let id = request.id?;
     let result = match request.method.as_str() {
-        "initialize" => initialize_result(&request.params),
+        "initialize" => initialize_result(&request.params)
+            .map_err(|error| McpError::internal(error.to_string())),
         "ping" => Ok(json!({})),
         "resources/list" => Ok(resources_list_result()),
         "resources/templates/list" => Ok(resource_templates_list_result()),
@@ -50,7 +51,9 @@ fn handle_request(query: &QueryService, request: JsonRpcRequest) -> Option<Value
         "tools/list" => Ok(tools_list_result()),
         "tools/call" => tools_call_result(query, &request.params),
         "notifications/initialized" => return None,
-        method => Err(anyhow!("unsupported MCP method: {method}")),
+        method => Err(McpError::method_not_found(format!(
+            "unsupported MCP method: {method}"
+        ))),
     };
 
     Some(match result {
@@ -63,8 +66,8 @@ fn handle_request(query: &QueryService, request: JsonRpcRequest) -> Option<Value
             "jsonrpc": "2.0",
             "id": id,
             "error": {
-                "code": -32603,
-                "message": error.to_string(),
+                "code": error.code,
+                "message": error.message,
             },
         }),
     })
