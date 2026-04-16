@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 
 use ratatui::prelude::Color;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     config::Theme,
@@ -64,12 +65,17 @@ impl Palette {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum Tab {
+    #[serde(rename = "overview")]
     Overview,
+    #[serde(rename = "traces")]
     Traces,
+    #[serde(rename = "logs")]
     Logs,
+    #[serde(rename = "metrics")]
     Metrics,
+    #[serde(rename = "llm")]
     Llm,
 }
 
@@ -91,13 +97,24 @@ impl Tab {
             Self::Llm => "[5] LLM Inspector",
         }
     }
+
+    pub fn index(self) -> usize {
+        Self::ALL
+            .iter()
+            .position(|tab| *tab == self)
+            .unwrap_or_default()
+    }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum LayoutPreset {
+    #[serde(rename = "balanced")]
     Balanced,
+    #[serde(rename = "primary")]
     PrimaryFocus,
+    #[serde(rename = "detail")]
     DetailFocus,
+    #[serde(rename = "custom")]
     Custom,
 }
 

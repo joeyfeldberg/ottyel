@@ -1,4 +1,5 @@
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 
 use crate::{
     domain::{
@@ -128,11 +129,15 @@ impl LogCorrelationFilter {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
 pub enum TimeWindow {
+    #[serde(rename = "15m")]
     FifteenMinutes,
+    #[serde(rename = "1h")]
     OneHour,
+    #[serde(rename = "6h")]
     SixHours,
+    #[serde(rename = "24h")]
     TwentyFourHours,
 }
 

@@ -19,6 +19,7 @@ use tokio::{
 use crate::{
     config::{Cli, Command, DoctorArgs, ServeArgs},
     domain::{DashboardSnapshot, LlmTimelineItem, SpanDetail, TraceSummary},
+    preferences::UserPreferences,
     query::{QueryFilters, QueryService},
     store::Store,
     ui::{RenderCache, Tab, TraceViewMode, UiState},
@@ -141,15 +142,19 @@ async fn terminal_loop(
         args.tick_rate_ms,
     )));
     snapshot_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut state = UiState {
-        theme: args.theme,
-        ..UiState::default()
-    };
+    let mut state = UiState::default();
+    if let Some(preferences) = UserPreferences::load() {
+        preferences.apply_to_state(&mut state);
+    }
+    if let Some(theme) = args.theme {
+        state.theme = theme;
+    }
     let mut snapshot = query.snapshot(&input::filters(&state, &[]))?;
     let mut render_cache = RenderCache::default();
     let mut trace_detail_cache = TraceDetailCache::default();
     let mut llm_timeline_cache = LlmTimelineCache::default();
     let mut llm_timeline_refresh = LlmTimelineRefreshState::default();
+    let mut saved_preferences = UserPreferences::from_state(&state);
     refresh_detail_state(
         query,
         &state,
@@ -259,6 +264,7 @@ async fn terminal_loop(
                         needs_redraw |= changed || state_changed;
                         if changed || state_changed {
                             render_ready = true;
+                            persist_preferences_if_changed(&state, &mut saved_preferences);
                         }
                     }
                     Some(event) => {
@@ -270,6 +276,7 @@ async fn terminal_loop(
                             &mut snapshot,
                             &mut trace_detail_cache,
                             &llm_timeline_cache,
+                            &mut saved_preferences,
                             &mut needs_redraw,
                             &mut render_ready,
                         )? {
@@ -293,6 +300,7 @@ fn handle_terminal_event(
     snapshot: &mut DashboardSnapshot,
     trace_detail_cache: &mut TraceDetailCache,
     llm_timeline_cache: &LlmTimelineCache,
+    saved_preferences: &mut UserPreferences,
     needs_redraw: &mut bool,
     render_ready: &mut bool,
 ) -> Result<bool> {
@@ -315,6 +323,7 @@ fn handle_terminal_event(
             *needs_redraw |= changed || state_changed;
             if changed || state_changed {
                 *render_ready = true;
+                persist_preferences_if_changed(state, saved_preferences);
             }
         }
         Event::Mouse(mouse) => {
@@ -339,11 +348,15 @@ fn handle_terminal_event(
                 if (changed || state_changed) && !is_wheel {
                     *render_ready = true;
                 }
+                if changed || state_changed {
+                    persist_preferences_if_changed(state, saved_preferences);
+                }
             } else if state_changed {
                 *needs_redraw = true;
                 if !is_wheel {
                     *render_ready = true;
                 }
+                persist_preferences_if_changed(state, saved_preferences);
             }
         }
         Event::Resize(_, _) => {
@@ -354,6 +367,13 @@ fn handle_terminal_event(
     }
 
     Ok(false)
+}
+
+fn persist_preferences_if_changed(state: &UiState, saved_preferences: &mut UserPreferences) {
+    let next = UserPreferences::from_state(state);
+    if next != *saved_preferences && next.save().is_ok() {
+        *saved_preferences = next;
+    }
 }
 
 fn apply_input_outcome(

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
+use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Parser)]
 #[command(
@@ -40,8 +41,8 @@ pub struct ServeArgs {
     pub tick_rate_ms: u64,
     #[arg(long, default_value_t = 500)]
     pub page_size: usize,
-    #[arg(long, value_enum, default_value_t = Theme::Ember)]
-    pub theme: Theme,
+    #[arg(long, value_enum)]
+    pub theme: Option<Theme>,
 }
 
 impl Default for ServeArgs {
@@ -54,7 +55,7 @@ impl Default for ServeArgs {
             max_spans: 100_000,
             tick_rate_ms: 750,
             page_size: 500,
-            theme: Theme::Ember,
+            theme: None,
         }
     }
 }
@@ -71,12 +72,17 @@ fn default_db_path() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from(".ottyel/ottyel.db"))
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, ValueEnum, Serialize, Deserialize)]
 pub enum Theme {
+    #[serde(rename = "ember")]
     Ember,
+    #[serde(rename = "tidal")]
     Tidal,
+    #[serde(rename = "grove")]
     Grove,
+    #[serde(rename = "paper")]
     Paper,
+    #[serde(rename = "neon")]
     Neon,
 }
 

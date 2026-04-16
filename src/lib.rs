@@ -3,6 +3,7 @@ pub mod commands;
 pub mod config;
 pub mod domain;
 pub mod ingest;
+pub mod preferences;
 pub mod query;
 pub mod store;
 pub mod ui;
