@@ -134,6 +134,102 @@ fn critical_path_uses_exclusive_time_not_only_latest_finish() {
 }
 
 #[test]
+fn trace_tree_rows_support_multiple_roots() {
+    let rows = trace_tree_rows(
+        &[
+            span_with_parent("trace", "root-b", "", "background.job", 40, 80),
+            span_with_parent("trace", "root-a", "", "http.request", 0, 100),
+            span_with_parent("trace", "child-a", "root-a", "db.query", 10, 20),
+            span_with_parent("trace", "child-b", "root-b", "cache.get", 50, 60),
+        ],
+        &HashSet::new(),
+    );
+
+    let rendered = rows
+        .iter()
+        .map(|row| format!("{}:{}", row.depth, row.span.span_name))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered,
+        vec![
+            "0:http.request",
+            "1:db.query",
+            "0:background.job",
+            "1:cache.get",
+        ]
+    );
+}
+
+#[test]
+fn trace_tree_rows_treat_missing_parent_as_root() {
+    let rows = trace_tree_rows(
+        &[
+            span_with_parent("trace", "orphan", "missing-parent", "orphan.step", 0, 10),
+            span_with_parent("trace", "root", "", "request", 20, 40),
+        ],
+        &HashSet::new(),
+    );
+
+    let rendered = rows
+        .iter()
+        .map(|row| format!("{}:{}", row.depth, row.span.span_name))
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered, vec!["0:orphan.step", "0:request"]);
+}
+
+#[test]
+fn trace_tree_rows_sort_out_of_order_arrival_by_start_time() {
+    let rows = trace_tree_rows(
+        &[
+            span_with_parent("trace", "child-late", "root", "third", 70, 80),
+            span_with_parent("trace", "root", "", "request", 0, 100),
+            span_with_parent("trace", "child-early", "root", "first", 10, 20),
+            span_with_parent("trace", "child-mid", "root", "second", 40, 50),
+        ],
+        &HashSet::new(),
+    );
+
+    let rendered = rows
+        .iter()
+        .map(|row| row.span.span_name.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(rendered, vec!["request", "first", "second", "third"]);
+}
+
+#[test]
+fn trace_tree_rows_preserve_deep_nesting_depths() {
+    let rows = trace_tree_rows(
+        &[
+            span_with_parent("trace", "level-4", "level-3", "level-4", 40, 50),
+            span_with_parent("trace", "level-2", "level-1", "level-2", 20, 60),
+            span_with_parent("trace", "level-0", "", "level-0", 0, 100),
+            span_with_parent("trace", "level-3", "level-2", "level-3", 30, 55),
+            span_with_parent("trace", "level-1", "level-0", "level-1", 10, 70),
+        ],
+        &HashSet::new(),
+    );
+
+    let rendered = rows
+        .iter()
+        .map(|row| format!("{}:{}", row.depth, row.span.span_name))
+        .collect::<Vec<_>>();
+
+    assert_eq!(
+        rendered,
+        vec![
+            "0:level-0",
+            "1:level-1",
+            "2:level-2",
+            "3:level-3",
+            "4:level-4",
+        ]
+    );
+}
+
+#[test]
 fn trace_navigation_helpers_follow_visible_tree_rows() {
     let snapshot = crate::domain::DashboardSnapshot {
         services: Vec::new(),
