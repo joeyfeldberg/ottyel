@@ -4,8 +4,8 @@ use anyhow::{Context, Result, anyhow};
 use serde_json::{Value, json};
 
 use crate::query::{
-    LogCorrelationFilter, LogFilters, LogSeverityFilter, PageRequest, QueryFilters, QueryService,
-    TimeWindow,
+    LlmCursor, LogCorrelationFilter, LogCursor, LogFilters, LogSeverityFilter, MetricCursor,
+    PageRequest, QueryFilters, QueryService, TimeWindow, TraceCursor,
 };
 
 const PROTOCOL_VERSION: &str = "2025-11-25";
@@ -265,6 +265,13 @@ fn common_filter_properties(extra: serde_json::Map<String, Value>) -> Value {
             "limit".to_string(),
             json!({"type": "integer", "minimum": 1, "maximum": 500}),
         ),
+        (
+            "cursor".to_string(),
+            json!({
+                "type": "object",
+                "description": "Opaque cursor returned as nextCursor by the previous call for the same tool and filters."
+            }),
+        ),
     ]);
     properties.extend(extra);
     Value::Object(properties)
@@ -285,7 +292,13 @@ fn tools_call_result(query: &QueryService, params: &Value) -> Result<Value> {
     let payload = match name {
         "search_traces" => {
             let filters = filters_from_args(arguments)?;
-            let page = query.traces_page(&filters, &PageRequest::first(limit(arguments)))?;
+            let page = query.traces_page(
+                &filters,
+                &PageRequest {
+                    limit: limit(arguments),
+                    cursor: parse_cursor::<TraceCursor>(arguments)?,
+                },
+            )?;
             json!({"traces": page.items, "nextCursor": page.next_cursor})
         }
         "get_trace" => {
@@ -294,17 +307,35 @@ fn tools_call_result(query: &QueryService, params: &Value) -> Result<Value> {
         }
         "search_logs" => {
             let filters = filters_from_args(arguments)?;
-            let page = query.logs_page(&filters, &PageRequest::first(limit(arguments)))?;
+            let page = query.logs_page(
+                &filters,
+                &PageRequest {
+                    limit: limit(arguments),
+                    cursor: parse_cursor::<LogCursor>(arguments)?,
+                },
+            )?;
             json!({"logs": page.items, "nextCursor": page.next_cursor})
         }
         "search_metrics" => {
             let filters = filters_from_args(arguments)?;
-            let page = query.metrics_page(&filters, &PageRequest::first(limit(arguments)))?;
+            let page = query.metrics_page(
+                &filters,
+                &PageRequest {
+                    limit: limit(arguments),
+                    cursor: parse_cursor::<MetricCursor>(arguments)?,
+                },
+            )?;
             json!({"metrics": page.items, "nextCursor": page.next_cursor})
         }
         "search_llm" => {
             let filters = filters_from_args(arguments)?;
-            let page = query.llm_page(&filters, &PageRequest::first(limit(arguments)))?;
+            let page = query.llm_page(
+                &filters,
+                &PageRequest {
+                    limit: limit(arguments),
+                    cursor: parse_cursor::<LlmCursor>(arguments)?,
+                },
+            )?;
             json!({
                 "llm": page.items,
                 "nextCursor": page.next_cursor,
@@ -395,6 +426,19 @@ fn limit(args: &Value) -> usize {
         .clamp(1, 500) as usize
 }
 
+fn parse_cursor<C>(args: &Value) -> Result<Option<C>>
+where
+    C: serde::de::DeserializeOwned,
+{
+    match args.get("cursor") {
+        Some(Value::Null) | None => Ok(None),
+        Some(value) => Ok(Some(
+            serde_json::from_value(value.clone())
+                .with_context(|| "cursor shape does not match this MCP tool")?,
+        )),
+    }
+}
+
 fn parse_time_window(value: &str) -> Result<TimeWindow> {
     match value {
         "15m" => Ok(TimeWindow::FifteenMinutes),
@@ -442,6 +486,13 @@ impl Default for QueryFilters {
 mod tests {
     use std::io::Write;
 
+    use opentelemetry_proto::tonic::{
+        collector::{logs::v1::ExportLogsServiceRequest, trace::v1::ExportTraceServiceRequest},
+        common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
+        logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+        resource::v1::Resource,
+        trace::v1::{ResourceSpans, ScopeSpans, Span, Status, span},
+    };
     use tempfile::NamedTempFile;
 
     use super::*;
@@ -504,10 +555,95 @@ mod tests {
         assert_eq!(response["result"]["content"][0]["type"], "text");
     }
 
+    #[test]
+    fn search_traces_accepts_returned_cursor() {
+        let query = query_with_trace_and_logs();
+        let first = call_tool(
+            &query,
+            "search_traces",
+            json!({
+                "limit": 1,
+                "timeWindow": "24h",
+            }),
+        );
+        let cursor = first["nextCursor"].clone();
+        let second = call_tool(
+            &query,
+            "search_traces",
+            json!({
+                "limit": 1,
+                "timeWindow": "24h",
+                "cursor": cursor,
+            }),
+        );
+
+        assert_eq!(first["traces"].as_array().unwrap().len(), 1);
+        assert_eq!(second["traces"].as_array().unwrap().len(), 1);
+        assert_ne!(
+            first["traces"][0]["trace_id"],
+            second["traces"][0]["trace_id"]
+        );
+    }
+
+    #[test]
+    fn search_logs_accepts_returned_cursor() {
+        let query = query_with_trace_and_logs();
+        let first = call_tool(
+            &query,
+            "search_logs",
+            json!({
+                "limit": 1,
+                "timeWindow": "24h",
+            }),
+        );
+        let cursor = first["nextCursor"].clone();
+        let second = call_tool(
+            &query,
+            "search_logs",
+            json!({
+                "limit": 1,
+                "timeWindow": "24h",
+                "cursor": cursor,
+            }),
+        );
+
+        assert_eq!(first["logs"].as_array().unwrap().len(), 1);
+        assert_eq!(second["logs"].as_array().unwrap().len(), 1);
+        assert_ne!(first["logs"][0]["body"], second["logs"][0]["body"]);
+    }
+
     fn empty_query() -> QueryService {
         let file = NamedTempFile::new().unwrap();
         let store = Store::open(file.path(), 24, 1000).unwrap();
         QueryService::new(store, 50)
+    }
+
+    fn query_with_trace_and_logs() -> QueryService {
+        let file = NamedTempFile::new().unwrap();
+        let store = Store::open(file.path(), 24, 1000).unwrap();
+        let now = current_unix_nanos();
+        store.ingest_traces(trace_request(now, 1)).unwrap();
+        store
+            .ingest_traces(trace_request(now + 10_000_000, 2))
+            .unwrap();
+        store.ingest_logs(log_request(now)).unwrap();
+        QueryService::new(store, 50)
+    }
+
+    fn call_tool(query: &QueryService, name: &str, arguments: Value) -> Value {
+        let response = handle_request(
+            query,
+            JsonRpcRequest {
+                id: Some(json!("tool")),
+                method: "tools/call".to_string(),
+                params: json!({
+                    "name": name,
+                    "arguments": arguments,
+                }),
+            },
+        )
+        .unwrap();
+        response["result"]["structuredContent"].clone()
     }
 
     #[test]
@@ -524,5 +660,98 @@ mod tests {
         assert_eq!(response["jsonrpc"], "2.0");
         assert_eq!(response["id"], 1);
         assert!(response["result"]["tools"].is_array());
+    }
+
+    fn trace_request(now: i64, index: u8) -> ExportTraceServiceRequest {
+        ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                resource: Some(Resource {
+                    attributes: vec![string_attr("service.name", "api")],
+                    dropped_attributes_count: 0,
+                    entity_refs: Vec::new(),
+                }),
+                schema_url: String::new(),
+                scope_spans: vec![ScopeSpans {
+                    scope: Some(InstrumentationScope::default()),
+                    schema_url: String::new(),
+                    spans: vec![Span {
+                        trace_id: vec![index; 16],
+                        span_id: vec![index; 8],
+                        parent_span_id: Vec::new(),
+                        trace_state: String::new(),
+                        name: format!("request.{index}"),
+                        kind: span::SpanKind::Server as i32,
+                        start_time_unix_nano: now as u64,
+                        end_time_unix_nano: (now + 1_000_000) as u64,
+                        attributes: Vec::new(),
+                        dropped_attributes_count: 0,
+                        events: Vec::new(),
+                        dropped_events_count: 0,
+                        links: Vec::new(),
+                        dropped_links_count: 0,
+                        status: Some(Status {
+                            message: String::new(),
+                            code: 1,
+                        }),
+                        flags: 0,
+                    }],
+                }],
+            }],
+        }
+    }
+
+    fn log_request(now: i64) -> ExportLogsServiceRequest {
+        ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                resource: Some(Resource {
+                    attributes: vec![string_attr("service.name", "api")],
+                    dropped_attributes_count: 0,
+                    entity_refs: Vec::new(),
+                }),
+                schema_url: String::new(),
+                scope_logs: vec![ScopeLogs {
+                    scope: Some(InstrumentationScope::default()),
+                    schema_url: String::new(),
+                    log_records: vec![
+                        log_record(now + 1_000_000, "first"),
+                        log_record(now + 2_000_000, "second"),
+                    ],
+                }],
+            }],
+        }
+    }
+
+    fn log_record(time_unix_nano: i64, body: &str) -> LogRecord {
+        LogRecord {
+            time_unix_nano: time_unix_nano as u64,
+            observed_time_unix_nano: time_unix_nano as u64,
+            severity_number: 0,
+            severity_text: "INFO".to_string(),
+            body: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(body.to_string())),
+            }),
+            attributes: Vec::new(),
+            dropped_attributes_count: 0,
+            flags: 0,
+            trace_id: vec![1; 16],
+            span_id: vec![1; 8],
+            event_name: String::new(),
+        }
+    }
+
+    fn string_attr(key: &str, value: &str) -> KeyValue {
+        KeyValue {
+            key: key.to_string(),
+            value: Some(AnyValue {
+                value: Some(any_value::Value::StringValue(value.to_string())),
+            }),
+        }
+    }
+
+    fn current_unix_nanos() -> i64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos() as i64
     }
 }
