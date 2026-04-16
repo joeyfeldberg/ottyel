@@ -19,6 +19,7 @@ pub struct Cli {
 pub enum Command {
     Serve(ServeArgs),
     Doctor(DoctorArgs),
+    Mcp(McpArgs),
 }
 
 #[derive(Debug, Clone, Args)]
@@ -64,6 +65,14 @@ impl Default for ServeArgs {
 pub struct DoctorArgs {
     #[arg(long, default_value_os_t = default_db_path())]
     pub db_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Args)]
+pub struct McpArgs {
+    #[arg(long, default_value_os_t = default_db_path())]
+    pub db_path: PathBuf,
+    #[arg(long, default_value_t = 100)]
+    pub page_size: usize,
 }
 
 fn default_db_path() -> PathBuf {

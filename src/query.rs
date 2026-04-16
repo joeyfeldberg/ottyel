@@ -36,25 +36,25 @@ impl<C> PageRequest<C> {
     }
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct TraceCursor {
     pub started_at_unix_nano: i64,
     pub trace_id: String,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct LogCursor {
     pub timestamp_unix_nano: i64,
     pub row_id: i64,
 }
 
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, Serialize, Deserialize)]
 pub struct MetricCursor {
     pub timestamp_unix_nano: i64,
     pub row_id: i64,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmCursor {
     pub latency_ms: f64,
     pub span_id: String,

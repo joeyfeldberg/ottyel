@@ -17,7 +17,7 @@ use tokio::{
 };
 
 use crate::{
-    config::{Cli, Command, DoctorArgs, ServeArgs},
+    config::{Cli, Command, DoctorArgs, McpArgs, ServeArgs},
     domain::{DashboardSnapshot, LlmTimelineItem, SpanDetail, TraceSummary},
     preferences::UserPreferences,
     query::{QueryFilters, QueryService},
@@ -77,6 +77,7 @@ pub async fn run(cli: Cli) -> Result<()> {
     match cli.command.unwrap_or(Command::Serve(ServeArgs::default())) {
         Command::Serve(args) => serve(args).await,
         Command::Doctor(args) => doctor(args),
+        Command::Mcp(args) => mcp(args),
     }
 }
 
@@ -108,6 +109,12 @@ fn doctor(args: DoctorArgs) -> Result<()> {
     println!("metrics: {metrics}");
     println!("llm_spans: {llm}");
     Ok(())
+}
+
+fn mcp(args: McpArgs) -> Result<()> {
+    let store = Store::open(&args.db_path, 24, 1000)?;
+    let query = QueryService::new(store, args.page_size);
+    crate::mcp::serve_stdio(query)
 }
 
 async fn run_terminal(query: &QueryService, args: &ServeArgs) -> Result<()> {
