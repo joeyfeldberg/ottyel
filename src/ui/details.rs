@@ -674,24 +674,27 @@ fn build_metric_detail_lines(
 }
 
 fn build_span_detail_lines(span: &SpanDetail, palette: Palette) -> Vec<Line<'static>> {
+    let mut header_spans = vec![Span::styled(
+        truncate(&span.span_name, 48),
+        Style::default()
+            .fg(palette.foreground)
+            .add_modifier(Modifier::BOLD),
+    )];
+
+    if let Some(status_badge) = status_badge(&span.status_code) {
+        header_spans.push(Span::raw(" "));
+        header_spans.push(Span::styled(
+            status_badge,
+            match span.status_code.as_str() {
+                "STATUS_CODE_ERROR" => Style::default().fg(palette.warning),
+                "STATUS_CODE_OK" => Style::default().fg(palette.success),
+                _ => Style::default().fg(palette.muted),
+            },
+        ));
+    }
+
     let mut lines = vec![
-        Line::from(vec![
-            Span::styled(
-                truncate(&span.span_name, 48),
-                Style::default()
-                    .fg(palette.foreground)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::raw(" "),
-            Span::styled(
-                status_badge(&span.status_code),
-                match span.status_code.as_str() {
-                    "STATUS_CODE_ERROR" => Style::default().fg(palette.warning),
-                    "STATUS_CODE_OK" => Style::default().fg(palette.success),
-                    _ => Style::default().fg(palette.muted),
-                },
-            ),
-        ]),
+        Line::from(header_spans),
         Line::from(format!("service {}", span.service_name)),
         Line::from(format!("span_id {}", span.span_id)),
         Line::from(format!(
@@ -829,10 +832,51 @@ fn attribute_value_text(value: &serde_json::Value) -> String {
     }
 }
 
-fn status_badge(status_code: &str) -> &'static str {
+fn status_badge(status_code: &str) -> Option<&'static str> {
     match status_code {
-        "STATUS_CODE_ERROR" => "error",
-        "STATUS_CODE_OK" => "ok",
-        _ => "unset",
+        "STATUS_CODE_ERROR" => Some("error"),
+        "STATUS_CODE_OK" => Some("ok"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use serde_json::json;
+
+    use crate::{config::Theme, domain::SpanDetail, ui::Palette};
+
+    use super::build_span_detail_lines;
+
+    #[test]
+    fn span_detail_header_hides_unset_status() {
+        let span = SpanDetail {
+            trace_id: "trace".to_string(),
+            span_id: "span".to_string(),
+            parent_span_id: String::new(),
+            service_name: "svc".to_string(),
+            span_name: "Prompt: DASv2 AIClient Completion".to_string(),
+            span_kind: "INTERNAL".to_string(),
+            status_code: "STATUS_CODE_UNSET".to_string(),
+            duration_ms: 12.3,
+            start_time_unix_nano: 1,
+            end_time_unix_nano: 2,
+            attributes: BTreeMap::from([(String::from("foo"), json!("bar"))]),
+            resource_attributes: BTreeMap::new(),
+            events: Vec::new(),
+            links: Vec::new(),
+            llm: None,
+        };
+
+        let lines = build_span_detail_lines(&span, Palette::from_theme(Theme::Ember));
+        let header = lines[0]
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+
+        assert_eq!(header, "Prompt: DASv2 AIClient Completion");
     }
 }
