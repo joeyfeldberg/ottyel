@@ -69,6 +69,18 @@ pub struct QueryFilters {
     pub log_filters: LogFilters,
 }
 
+impl Default for QueryFilters {
+    fn default() -> Self {
+        Self {
+            service: None,
+            errors_only: false,
+            time_window: TimeWindow::TwentyFourHours,
+            search_query: None,
+            log_filters: LogFilters::default(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
 pub struct LogFilters {
     pub severity: LogSeverityFilter,
