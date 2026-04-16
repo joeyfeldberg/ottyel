@@ -199,6 +199,8 @@ pub(crate) fn trace_tree_rows(
         sort_span_indexes(children, spans);
     }
 
+    let critical_path_span_ids = critical_path_span_ids(&roots, spans, &children_by_parent);
+
     let mut rows = Vec::with_capacity(spans.len());
     for root_index in &roots {
         push_tree_rows(
@@ -206,6 +208,7 @@ pub(crate) fn trace_tree_rows(
             spans,
             &children_by_parent,
             collapsed_span_ids,
+            &critical_path_span_ids,
             &mut rows,
             0,
         );
@@ -373,6 +376,7 @@ pub(crate) struct TraceTreeRow {
     pub(crate) depth: usize,
     pub(crate) has_children: bool,
     pub(crate) is_collapsed: bool,
+    pub(crate) is_critical: bool,
     pub(crate) span: SpanDetail,
 }
 
@@ -424,13 +428,26 @@ fn build_trace_tree_lines(
             let prefix = format!("{indent}{}", row.disclosure());
             let duration = format_duration_compact(row.span.duration_ms);
             let display_name = trace_row_display_name(&row.span);
-            let badges = trace_row_badges(&row.span);
+            let mut badges = trace_row_badges(&row.span);
+            if row.is_critical {
+                badges.push(TraceRowBadge {
+                    label: "Hot Path".to_string(),
+                });
+            }
             let name_style = if is_low_signal_wrapper_span(&row.span) {
-                Style::default().fg(palette.muted).patch(selection_style)
+                let mut style = Style::default().fg(palette.muted).patch(selection_style);
+                if row.is_critical {
+                    style = style.add_modifier(ratatui::prelude::Modifier::BOLD);
+                }
+                style
             } else {
-                Style::default()
+                let mut style = Style::default()
                     .fg(palette.foreground)
-                    .patch(selection_style)
+                    .patch(selection_style);
+                if row.is_critical {
+                    style = style.add_modifier(ratatui::prelude::Modifier::BOLD);
+                }
+                style
             };
             let badge_width = badges
                 .iter()
@@ -465,7 +482,13 @@ fn build_trace_tree_lines(
                 ),
                 Span::styled(
                     timeline.active,
-                    Style::default().fg(palette.accent).patch(selection_style),
+                    Style::default()
+                        .fg(if row.is_critical {
+                            palette.warning
+                        } else {
+                            palette.accent
+                        })
+                        .patch(selection_style),
                 ),
                 Span::styled(
                     timeline.after,
@@ -596,6 +619,7 @@ fn push_tree_rows(
     spans: &[SpanDetail],
     children_by_parent: &HashMap<String, Vec<usize>>,
     collapsed_span_ids: &HashSet<String>,
+    critical_path_span_ids: &HashSet<String>,
     rows: &mut Vec<TraceTreeRow>,
     depth: usize,
 ) {
@@ -605,6 +629,7 @@ fn push_tree_rows(
         depth,
         has_children,
         is_collapsed,
+        is_critical: critical_path_span_ids.contains(&spans[span_index].span_id),
         span: spans[span_index].clone(),
     });
 
@@ -619,11 +644,149 @@ fn push_tree_rows(
                 spans,
                 children_by_parent,
                 collapsed_span_ids,
+                critical_path_span_ids,
                 rows,
                 depth + 1,
             );
         }
     }
+}
+
+fn critical_path_span_ids(
+    roots: &[usize],
+    spans: &[SpanDetail],
+    children_by_parent: &HashMap<String, Vec<usize>>,
+) -> HashSet<String> {
+    let mut path = HashSet::new();
+    if spans.is_empty() {
+        return path;
+    }
+    let mut memo = vec![None; spans.len()];
+    let Some(root_index) = select_critical_child(roots, spans, children_by_parent, &mut memo)
+    else {
+        return path;
+    };
+    mark_critical_path(root_index, spans, children_by_parent, &mut memo, &mut path);
+
+    path
+}
+
+fn mark_critical_path(
+    span_index: usize,
+    spans: &[SpanDetail],
+    children_by_parent: &HashMap<String, Vec<usize>>,
+    memo: &mut [Option<i64>],
+    path: &mut HashSet<String>,
+) {
+    path.insert(spans[span_index].span_id.clone());
+    let Some(children) = children_by_parent.get(&spans[span_index].span_id) else {
+        return;
+    };
+    let Some(child_index) = select_critical_child(children, spans, children_by_parent, memo) else {
+        return;
+    };
+    mark_critical_path(child_index, spans, children_by_parent, memo, path);
+}
+
+fn select_critical_child(
+    indexes: &[usize],
+    spans: &[SpanDetail],
+    children_by_parent: &HashMap<String, Vec<usize>>,
+    memo: &mut [Option<i64>],
+) -> Option<usize> {
+    indexes.iter().copied().max_by(|left, right| {
+        critical_path_cost(*left, spans, children_by_parent, memo)
+            .cmp(&critical_path_cost(*right, spans, children_by_parent, memo))
+            .then(
+                spans[*left]
+                    .end_time_unix_nano
+                    .cmp(&spans[*right].end_time_unix_nano),
+            )
+            .then(
+                spans[*left]
+                    .duration_ms
+                    .total_cmp(&spans[*right].duration_ms),
+            )
+            .then(
+                spans[*right]
+                    .start_time_unix_nano
+                    .cmp(&spans[*left].start_time_unix_nano),
+            )
+            .then(spans[*left].span_name.cmp(&spans[*right].span_name))
+    })
+}
+
+fn critical_path_cost(
+    span_index: usize,
+    spans: &[SpanDetail],
+    children_by_parent: &HashMap<String, Vec<usize>>,
+    memo: &mut [Option<i64>],
+) -> i64 {
+    if let Some(cost) = memo[span_index] {
+        return cost;
+    }
+
+    let child_cost = children_by_parent
+        .get(&spans[span_index].span_id)
+        .and_then(|children| {
+            children
+                .iter()
+                .map(|child| critical_path_cost(*child, spans, children_by_parent, memo))
+                .max()
+        })
+        .unwrap_or(0);
+    let cost =
+        exclusive_span_nanos(span_index, spans, children_by_parent).saturating_add(child_cost);
+    memo[span_index] = Some(cost);
+    cost
+}
+
+fn exclusive_span_nanos(
+    span_index: usize,
+    spans: &[SpanDetail],
+    children_by_parent: &HashMap<String, Vec<usize>>,
+) -> i64 {
+    let span = &spans[span_index];
+    let span_start = span.start_time_unix_nano;
+    let span_end = span.end_time_unix_nano.max(span_start);
+    let span_duration = span_end.saturating_sub(span_start);
+    let Some(children) = children_by_parent.get(&span.span_id) else {
+        return span_duration;
+    };
+
+    let mut covered = 0_i64;
+    let mut current_start = None;
+    let mut current_end = 0_i64;
+
+    for child_index in children {
+        let child = &spans[*child_index];
+        let child_start = child.start_time_unix_nano.max(span_start);
+        let child_end = child.end_time_unix_nano.min(span_end);
+        if child_end <= child_start {
+            continue;
+        }
+
+        match current_start {
+            None => {
+                current_start = Some(child_start);
+                current_end = child_end;
+            }
+            Some(start) if child_start > current_end => {
+                covered = covered.saturating_add(current_end.saturating_sub(start));
+                current_start = Some(child_start);
+                current_end = child_end;
+            }
+            Some(_) => {
+                current_end = current_end.max(child_end);
+            }
+        }
+    }
+
+    if let Some(start) = current_start {
+        covered = covered.saturating_add(current_end.saturating_sub(start));
+    }
+
+    span_duration.saturating_sub(covered)
 }
 
 fn sort_span_indexes(indexes: &mut [usize], spans: &[SpanDetail]) {

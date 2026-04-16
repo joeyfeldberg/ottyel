@@ -91,6 +91,49 @@ fn trace_tree_rows_hide_collapsed_subtrees() {
 }
 
 #[test]
+fn trace_tree_rows_mark_latest_finishing_path_as_critical() {
+    let rows = trace_tree_rows(
+        &[
+            span_with_parent("trace", "root", "", "request", 0, 100),
+            span_with_parent("trace", "fast", "root", "fast.step", 10, 30),
+            span_with_parent("trace", "slow", "root", "slow.step", 20, 90),
+            span_with_parent("trace", "slow-leaf", "slow", "slow.leaf", 40, 95),
+            span_with_parent("trace", "other", "root", "other.step", 50, 80),
+        ],
+        &HashSet::new(),
+    );
+
+    let critical = rows
+        .iter()
+        .filter(|row| row.is_critical)
+        .map(|row| row.span.span_id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(critical, vec!["root", "slow", "slow-leaf"]);
+}
+
+#[test]
+fn critical_path_uses_exclusive_time_not_only_latest_finish() {
+    let rows = trace_tree_rows(
+        &[
+            span_with_parent("trace", "root", "", "request", 0, 100),
+            span_with_parent("trace", "heavy", "root", "heavy.branch", 0, 90),
+            span_with_parent("trace", "heavy-leaf", "heavy", "heavy.leaf", 80, 90),
+            span_with_parent("trace", "late", "root", "late.branch", 91, 100),
+        ],
+        &HashSet::new(),
+    );
+
+    let critical = rows
+        .iter()
+        .filter(|row| row.is_critical)
+        .map(|row| row.span.span_id.as_str())
+        .collect::<Vec<_>>();
+
+    assert_eq!(critical, vec!["root", "heavy", "heavy-leaf"]);
+}
+
+#[test]
 fn trace_navigation_helpers_follow_visible_tree_rows() {
     let snapshot = crate::domain::DashboardSnapshot {
         services: Vec::new(),
