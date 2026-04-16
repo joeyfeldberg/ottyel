@@ -3,8 +3,8 @@
 `ottyel` is a local OpenTelemetry workstation for the terminal.
 
 It accepts OTLP over HTTP and gRPC, stores traces, logs, metrics, and LLM
-telemetry in SQLite, and gives you a fast keyboard-first interface (mouse navigation is supported also) for
-investigating systems without shipping data to a hosted backend.
+telemetry in SQLite, and gives you a fast keyboard-first interface with mouse
+support for investigating systems without shipping data to a hosted backend.
 
 It is built for two jobs:
 
@@ -80,6 +80,65 @@ Or with OTLP/gRPC:
 export OTEL_EXPORTER_OTLP_PROTOCOL=grpc
 export OTEL_EXPORTER_OTLP_ENDPOINT=http://127.0.0.1:4317
 ```
+
+## MCP
+
+`ottyel` can expose the local SQLite dataset over MCP for agents and other
+tools. The MCP server is read-only.
+
+```bash
+ottyel mcp
+```
+
+Example client config:
+
+```json
+{
+  "mcpServers": {
+    "ottyel": {
+      "command": "ottyel",
+      "args": ["mcp"]
+    }
+  }
+}
+```
+
+Use a specific database:
+
+```json
+{
+  "mcpServers": {
+    "ottyel": {
+      "command": "ottyel",
+      "args": ["mcp", "--db-path", "/path/to/ottyel.db"]
+    }
+  }
+}
+```
+
+Resources:
+
+- `ottyel://overview`
+- `ottyel://traces/recent`
+- `ottyel://logs/recent`
+- `ottyel://metrics/recent`
+- `ottyel://llm/recent`
+- `ottyel://llm/rollups`
+
+Resource templates:
+
+- `ottyel://trace/{trace_id}`
+- `ottyel://logs/{trace_id}`
+- `ottyel://llm/{trace_id}/{span_id}/timeline`
+
+Tools:
+
+- `search_traces`
+- `get_trace`
+- `search_logs`
+- `search_metrics`
+- `search_llm`
+- `get_llm_timeline`
 
 ## Current Capabilities
 
