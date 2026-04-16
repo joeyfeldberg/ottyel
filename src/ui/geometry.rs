@@ -1,5 +1,13 @@
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
 
+fn split_percent(percent: u16) -> [Constraint; 2] {
+    let clamped = percent.clamp(20, 80);
+    [
+        Constraint::Percentage(clamped),
+        Constraint::Percentage(100_u16.saturating_sub(clamped)),
+    ]
+}
+
 pub(crate) fn root_sections(root: Rect) -> [Rect; 4] {
     let split = Layout::default()
         .direction(Direction::Vertical)
@@ -24,26 +32,26 @@ pub(crate) fn contains(area: Rect, column: u16, row: u16) -> bool {
         && row < area.y.saturating_add(area.height)
 }
 
-pub(crate) fn trace_detail_sections(area: Rect) -> [Rect; 2] {
+pub(crate) fn trace_detail_sections(area: Rect, top_pct: u16) -> [Rect; 2] {
     let split = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(62), Constraint::Percentage(38)])
+        .constraints(split_percent(top_pct))
         .split(area);
     [split[0], split[1]]
 }
 
-pub(crate) fn log_sections(area: Rect) -> [Rect; 2] {
+pub(crate) fn log_sections(area: Rect, left_pct: u16) -> [Rect; 2] {
     let split = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(58), Constraint::Percentage(42)])
+        .constraints(split_percent(left_pct))
         .split(area);
     [split[0], split[1]]
 }
 
-pub(crate) fn metric_sections(area: Rect) -> [Rect; 2] {
+pub(crate) fn metric_sections(area: Rect, left_pct: u16) -> [Rect; 2] {
     let split = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(52), Constraint::Percentage(48)])
+        .constraints(split_percent(left_pct))
         .split(area);
     [split[0], split[1]]
 }
@@ -56,10 +64,10 @@ pub(crate) fn metric_right_sections(area: Rect) -> [Rect; 2] {
     [split[0], split[1]]
 }
 
-pub(crate) fn llm_sections(area: Rect) -> [Rect; 2] {
+pub(crate) fn llm_sections(area: Rect, left_pct: u16) -> [Rect; 2] {
     let split = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+        .constraints(split_percent(left_pct))
         .split(area);
     [split[0], split[1]]
 }
@@ -77,20 +85,20 @@ pub(crate) fn llm_left_sections(area: Rect) -> [Rect; 4] {
     [split[0], split[1], split[2], split[3]]
 }
 
-pub(crate) fn trace_tree_area(body: Rect) -> Rect {
-    trace_detail_sections(body)[0]
+pub(crate) fn trace_tree_area(body: Rect, top_pct: u16) -> Rect {
+    trace_detail_sections(body, top_pct)[0]
 }
 
-pub(crate) fn trace_detail_area(body: Rect) -> Rect {
-    trace_detail_sections(body)[1]
+pub(crate) fn trace_detail_area(body: Rect, top_pct: u16) -> Rect {
+    trace_detail_sections(body, top_pct)[1]
 }
 
-pub(crate) fn log_detail_area(body: Rect) -> Rect {
-    log_sections(body)[1]
+pub(crate) fn log_detail_area(body: Rect, left_pct: u16) -> Rect {
+    log_sections(body, left_pct)[1]
 }
 
-pub(crate) fn llm_detail_area(body: Rect) -> Rect {
-    llm_sections(body)[1]
+pub(crate) fn llm_detail_area(body: Rect, left_pct: u16) -> Rect {
+    llm_sections(body, left_pct)[1]
 }
 
 pub(crate) fn llm_detail_sections(area: Rect) -> [Rect; 2] {

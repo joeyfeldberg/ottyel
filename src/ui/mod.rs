@@ -6,7 +6,7 @@ mod panes;
 mod state;
 mod traces;
 
-pub use state::{Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState};
+pub use state::{LayoutPreset, Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState};
 pub(crate) use traces::{
     first_llm_trace_index, next_error_trace_index, parent_trace_index, previous_error_trace_index,
     root_trace_index, selected_trace_span_detail, selected_trace_tree_span, trace_tree_hit,
@@ -155,8 +155,10 @@ pub fn sync_trace_tree_scroll(root: Rect, snapshot: &DashboardSnapshot, state: &
         return;
     }
 
-    let viewport_height =
-        geometry::trace_tree_viewport_height(geometry::trace_tree_area(geometry::body_area(root)));
+    let viewport_height = geometry::trace_tree_viewport_height(geometry::trace_tree_area(
+        geometry::body_area(root),
+        state.trace_split_pct,
+    ));
     let tree_rows = traces::trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
     let total_lines = traces::trace_tree_total_lines(&tree_rows, snapshot.traces.is_empty());
     if state.trace_tree_follow_selected {
@@ -193,7 +195,7 @@ pub fn sync_detail_scroll(
             geometry::table_viewport_height(body),
         );
     }
-    let [log_feed, _] = geometry::log_sections(body);
+    let [log_feed, _] = geometry::log_sections(body, state.log_split_pct);
     state.log_feed_scroll = geometry::clamp_window_offset(
         state.log_feed_scroll,
         snapshot.logs.len(),
@@ -207,7 +209,7 @@ pub fn sync_detail_scroll(
             geometry::table_viewport_height(log_feed),
         );
     }
-    let [metric_feed, metric_right] = geometry::metric_sections(body);
+    let [metric_feed, metric_right] = geometry::metric_sections(body, state.metric_split_pct);
     state.metric_feed_scroll = geometry::clamp_window_offset(
         state.metric_feed_scroll,
         snapshot.metrics.len(),
@@ -221,7 +223,7 @@ pub fn sync_detail_scroll(
             geometry::table_viewport_height(metric_feed),
         );
     }
-    let [llm_left, _] = geometry::llm_sections(body);
+    let [llm_left, _] = geometry::llm_sections(body, state.llm_split_pct);
     let [_, _, _, llm_feed] = geometry::llm_left_sections(llm_left);
     state.llm_feed_scroll = geometry::clamp_window_offset(
         state.llm_feed_scroll,
@@ -241,7 +243,10 @@ pub fn sync_detail_scroll(
         state.trace_detail_scroll = geometry::clamp_scroll(
             state.trace_detail_scroll,
             details::cached_trace_detail_lines(&cache.trace_detail).len(),
-            geometry::detail_viewport_height(geometry::trace_detail_area(body)),
+            geometry::detail_viewport_height(geometry::trace_detail_area(
+                body,
+                state.trace_split_pct,
+            )),
         );
     } else {
         state.trace_detail_scroll = 0;
@@ -251,7 +256,7 @@ pub fn sync_detail_scroll(
         state.log_detail_scroll = geometry::clamp_scroll(
             state.log_detail_scroll,
             details::cached_log_detail_lines(&cache.log_detail).len(),
-            geometry::detail_viewport_height(geometry::log_detail_area(body)),
+            geometry::detail_viewport_height(geometry::log_detail_area(body, state.log_split_pct)),
         );
     }
     if Tab::ALL[state.active_tab] == Tab::Metrics {
@@ -266,7 +271,8 @@ pub fn sync_detail_scroll(
             state.llm_detail_scroll,
             details::cached_llm_detail_lines(&cache.llm_detail).len(),
             geometry::detail_viewport_height(
-                geometry::llm_detail_sections(geometry::llm_detail_area(body))[0],
+                geometry::llm_detail_sections(geometry::llm_detail_area(body, state.llm_split_pct))
+                    [0],
             ),
         );
     }

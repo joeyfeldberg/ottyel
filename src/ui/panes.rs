@@ -18,7 +18,7 @@ pub(crate) fn render_logs(
     detail_lines: &[Line<'static>],
     palette: Palette,
 ) {
-    let panels = geometry::log_sections(area);
+    let panels = geometry::log_sections(area, state.log_split_pct);
 
     let feed_border = if state.logs_focus == PaneFocus::Primary {
         palette.accent
@@ -101,7 +101,7 @@ pub(crate) fn render_metrics(
     detail_lines: &[Line<'static>],
     palette: Palette,
 ) {
-    let panels = geometry::metric_sections(area);
+    let panels = geometry::metric_sections(area, state.metric_split_pct);
 
     let feed_border = if state.metrics_focus == PaneFocus::Primary {
         palette.accent
@@ -198,7 +198,7 @@ pub(crate) fn render_llm(
     detail_lines: &[Line<'static>],
     palette: Palette,
 ) {
-    let panels = geometry::llm_sections(area);
+    let panels = geometry::llm_sections(area, state.llm_split_pct);
     let left = geometry::llm_left_sections(panels[0]);
     let right = geometry::llm_detail_sections(panels[1]);
 

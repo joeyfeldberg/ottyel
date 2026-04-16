@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    Palette, Tab, TraceFocus, TraceViewMode, UiState,
+    LayoutPreset, Palette, Tab, TraceFocus, TraceViewMode, UiState,
     chrome::{
         command_palette_window, context_help_lines, context_help_title, footer_text,
         global_status_text, help_lines, help_title,
@@ -429,6 +429,11 @@ fn trace_row_badges_skip_plain_llm_badge_for_low_signal_wrappers() {
 fn ui_state_defaults_to_trace_list_focus() {
     let state = UiState::default();
     assert_eq!(state.theme, Theme::Ember);
+    assert_eq!(state.layout_preset, LayoutPreset::Balanced);
+    assert_eq!(state.trace_split_pct, 62);
+    assert_eq!(state.log_split_pct, 58);
+    assert_eq!(state.metric_split_pct, 52);
+    assert_eq!(state.llm_split_pct, 55);
     assert_eq!(state.trace_view_mode, TraceViewMode::List);
     assert_eq!(state.trace_focus, TraceFocus::TraceList);
     assert_eq!(state.selected_trace_span, 0);
@@ -559,6 +564,16 @@ fn help_lines_include_trace_tree_commands() {
         rendered
             .iter()
             .any(|line| line.contains("g                cycle theme"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("w                cycle layout preset"))
+    );
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("= / -            grow or shrink focused split"))
     );
 }
 

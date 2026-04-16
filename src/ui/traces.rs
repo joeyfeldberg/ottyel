@@ -79,7 +79,7 @@ pub(crate) fn render(
         return;
     }
 
-    let [tree_area, detail_area] = geometry::trace_detail_sections(area);
+    let [tree_area, detail_area] = geometry::trace_detail_sections(area, state.trace_split_pct);
     let tree_border = if state.trace_focus == TraceFocus::TraceTree {
         palette.warning
     } else {

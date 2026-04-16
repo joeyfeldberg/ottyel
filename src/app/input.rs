@@ -6,12 +6,15 @@ use crate::{
     config::Theme,
     domain::DashboardSnapshot,
     query::{LogCorrelationFilter, LogFilters, LogSeverityFilter, QueryFilters, TimeWindow},
-    ui::{PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
+    ui::{LayoutPreset, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
 };
 
 const COMMAND_PALETTE_VISIBLE_ROWS: usize = 8;
 const FAST_MOVE_STEP: isize = 5;
 const FASTER_MOVE_STEP: isize = 20;
+const LAYOUT_RESIZE_STEP: i16 = 5;
+const LAYOUT_MIN_PCT: u16 = 30;
+const LAYOUT_MAX_PCT: u16 = 70;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub(super) enum InputOutcome {
@@ -63,9 +66,12 @@ pub(super) fn handle_key(
             state.show_context_help = !state.show_context_help;
         }
         KeyCode::Char('g') => cycle_theme(state),
+        KeyCode::Char('w') => cycle_layout_preset(state),
         KeyCode::Char('c') if modifiers.contains(KeyModifiers::CONTROL) => {
             return InputOutcome::Quit;
         }
+        KeyCode::Char('=') | KeyCode::Char('+') => resize_active_layout(true, state),
+        KeyCode::Char('-') => resize_active_layout(false, state),
         KeyCode::Char('x') if Tab::ALL[state.active_tab] == Tab::Logs => {
             state.log_search_mode = true;
         }
@@ -202,14 +208,16 @@ fn active_detail_pane_height(root: Rect, state: &UiState) -> Option<usize> {
                 && state.trace_focus == TraceFocus::TraceDetail =>
         {
             Some(crate::ui::geometry::detail_viewport_height(
-                crate::ui::geometry::trace_detail_area(body),
+                crate::ui::geometry::trace_detail_area(body, state.trace_split_pct),
             ))
         }
-        Tab::Logs if state.logs_focus == PaneFocus::Detail => Some(
-            crate::ui::geometry::detail_viewport_height(crate::ui::geometry::log_detail_area(body)),
-        ),
+        Tab::Logs if state.logs_focus == PaneFocus::Detail => {
+            Some(crate::ui::geometry::detail_viewport_height(
+                crate::ui::geometry::log_detail_area(body, state.log_split_pct),
+            ))
+        }
         Tab::Metrics if state.metrics_focus == PaneFocus::Detail => {
-            let [_, right] = crate::ui::geometry::metric_sections(body);
+            let [_, right] = crate::ui::geometry::metric_sections(body, state.metric_split_pct);
             Some(crate::ui::geometry::detail_viewport_height(
                 crate::ui::geometry::metric_right_sections(right)[1],
             ))
@@ -218,6 +226,7 @@ fn active_detail_pane_height(root: Rect, state: &UiState) -> Option<usize> {
             Some(crate::ui::geometry::detail_viewport_height(
                 crate::ui::geometry::llm_detail_sections(crate::ui::geometry::llm_detail_area(
                     body,
+                    state.llm_split_pct,
                 ))[0],
             ))
         }
@@ -431,7 +440,8 @@ fn handle_trace_click(
         return InputOutcome::None;
     }
 
-    let [tree_area, detail_area] = crate::ui::geometry::trace_detail_sections(body);
+    let [tree_area, detail_area] =
+        crate::ui::geometry::trace_detail_sections(body, state.trace_split_pct);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.trace_focus = TraceFocus::TraceDetail;
         return InputOutcome::None;
@@ -462,7 +472,7 @@ fn handle_logs_click(
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
 ) -> InputOutcome {
-    let [feed_area, detail_area] = crate::ui::geometry::log_sections(body);
+    let [feed_area, detail_area] = crate::ui::geometry::log_sections(body, state.log_split_pct);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.logs_focus = PaneFocus::Detail;
         return InputOutcome::None;
@@ -489,7 +499,8 @@ fn handle_metrics_click(
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
 ) -> InputOutcome {
-    let [feed_area, right_area] = crate::ui::geometry::metric_sections(body);
+    let [feed_area, right_area] =
+        crate::ui::geometry::metric_sections(body, state.metric_split_pct);
     let detail_area = crate::ui::geometry::metric_right_sections(right_area)[1];
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.metrics_focus = PaneFocus::Detail;
@@ -521,7 +532,7 @@ fn handle_llm_click(
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
 ) -> InputOutcome {
-    let [left_area, detail_area] = crate::ui::geometry::llm_sections(body);
+    let [left_area, detail_area] = crate::ui::geometry::llm_sections(body, state.llm_split_pct);
     let [_, _, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.llm_focus = PaneFocus::Detail;
@@ -565,7 +576,8 @@ fn handle_trace_scroll(
         return InputOutcome::None;
     }
 
-    let [tree_area, detail_area] = crate::ui::geometry::trace_detail_sections(body);
+    let [tree_area, detail_area] =
+        crate::ui::geometry::trace_detail_sections(body, state.trace_split_pct);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.trace_focus = TraceFocus::TraceDetail;
         scroll_detail(delta as i16, state);
@@ -594,7 +606,7 @@ fn handle_logs_scroll(
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
 ) -> InputOutcome {
-    let [feed_area, detail_area] = crate::ui::geometry::log_sections(body);
+    let [feed_area, detail_area] = crate::ui::geometry::log_sections(body, state.log_split_pct);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.logs_focus = PaneFocus::Detail;
         scroll_detail(delta as i16, state);
@@ -622,7 +634,8 @@ fn handle_metrics_scroll(
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
 ) -> InputOutcome {
-    let [feed_area, right_area] = crate::ui::geometry::metric_sections(body);
+    let [feed_area, right_area] =
+        crate::ui::geometry::metric_sections(body, state.metric_split_pct);
     let detail_area = crate::ui::geometry::metric_right_sections(right_area)[1];
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.metrics_focus = PaneFocus::Detail;
@@ -650,7 +663,7 @@ fn handle_llm_scroll(
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
 ) -> InputOutcome {
-    let [left_area, detail_area] = crate::ui::geometry::llm_sections(body);
+    let [left_area, detail_area] = crate::ui::geometry::llm_sections(body, state.llm_split_pct);
     let [_, _, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
     if crate::ui::geometry::contains(detail_area, column, row) {
         state.llm_focus = PaneFocus::Detail;
@@ -792,12 +805,103 @@ fn cycle_time_window(state: &mut UiState) {
     state.time_window = TimeWindow::ALL[(current + 1) % TimeWindow::ALL.len()];
 }
 
+fn cycle_layout_preset(state: &mut UiState) {
+    let current = LayoutPreset::ALL
+        .iter()
+        .position(|preset| *preset == state.layout_preset)
+        .unwrap_or(0);
+    apply_layout_preset(
+        state,
+        LayoutPreset::ALL[(current + 1) % LayoutPreset::ALL.len()],
+    );
+}
+
 fn cycle_theme(state: &mut UiState) {
     let current = Theme::ALL
         .iter()
         .position(|theme| *theme == state.theme)
         .unwrap_or(0);
     state.theme = Theme::ALL[(current + 1) % Theme::ALL.len()];
+}
+
+fn apply_layout_preset(state: &mut UiState, preset: LayoutPreset) {
+    state.layout_preset = preset;
+    match preset {
+        LayoutPreset::Balanced => {
+            state.trace_split_pct = 62;
+            state.log_split_pct = 58;
+            state.metric_split_pct = 52;
+            state.llm_split_pct = 55;
+        }
+        LayoutPreset::PrimaryFocus => {
+            state.trace_split_pct = 70;
+            state.log_split_pct = 65;
+            state.metric_split_pct = 60;
+            state.llm_split_pct = 60;
+        }
+        LayoutPreset::DetailFocus => {
+            state.trace_split_pct = 45;
+            state.log_split_pct = 40;
+            state.metric_split_pct = 40;
+            state.llm_split_pct = 42;
+        }
+        LayoutPreset::Custom => {}
+    }
+}
+
+fn resize_active_layout(grow_focused: bool, state: &mut UiState) {
+    let delta = if grow_focused {
+        LAYOUT_RESIZE_STEP
+    } else {
+        -LAYOUT_RESIZE_STEP
+    };
+
+    match Tab::ALL[state.active_tab] {
+        Tab::Overview => {}
+        Tab::Traces if state.trace_view_mode == TraceViewMode::Detail => {
+            let signed = if state.trace_focus == TraceFocus::TraceDetail {
+                -delta
+            } else {
+                delta
+            };
+            resize_split_pct(&mut state.trace_split_pct, signed);
+            state.layout_preset = LayoutPreset::Custom;
+        }
+        Tab::Traces => {}
+        Tab::Logs => {
+            let signed = if state.logs_focus == PaneFocus::Detail {
+                -delta
+            } else {
+                delta
+            };
+            resize_split_pct(&mut state.log_split_pct, signed);
+            state.layout_preset = LayoutPreset::Custom;
+        }
+        Tab::Metrics => {
+            let signed = if state.metrics_focus == PaneFocus::Detail {
+                -delta
+            } else {
+                delta
+            };
+            resize_split_pct(&mut state.metric_split_pct, signed);
+            state.layout_preset = LayoutPreset::Custom;
+        }
+        Tab::Llm => {
+            let signed = if state.llm_focus == PaneFocus::Detail {
+                -delta
+            } else {
+                delta
+            };
+            resize_split_pct(&mut state.llm_split_pct, signed);
+            state.layout_preset = LayoutPreset::Custom;
+        }
+    }
+}
+
+fn resize_split_pct(value: &mut u16, delta: i16) {
+    *value = value
+        .saturating_add_signed(delta)
+        .clamp(LAYOUT_MIN_PCT, LAYOUT_MAX_PCT);
 }
 
 fn cycle_log_severity_filter(state: &mut UiState) {
@@ -1154,7 +1258,7 @@ mod tests {
     use crate::{
         domain::{DashboardSnapshot, LogSummary, OverviewStats, SpanDetail, TraceSummary},
         query::TimeWindow,
-        ui::{PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
+        ui::{LayoutPreset, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
     };
 
     #[test]
@@ -1334,6 +1438,73 @@ mod tests {
 
         assert_eq!(outcome, InputOutcome::None);
         assert_eq!(state.active_tab, Tab::Metrics as usize);
+    }
+
+    #[test]
+    fn w_cycles_layout_presets() {
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: empty_overview(),
+            traces: Vec::new(),
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+        let mut state = UiState::default();
+
+        let outcome = super::handle_key(
+            KeyCode::Char('w'),
+            KeyModifiers::empty(),
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(outcome, InputOutcome::None);
+        assert_eq!(state.layout_preset, LayoutPreset::PrimaryFocus);
+        assert_eq!(state.trace_split_pct, 70);
+        assert_eq!(state.log_split_pct, 65);
+    }
+
+    #[test]
+    fn resizing_logs_split_marks_layout_custom() {
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: empty_overview(),
+            traces: Vec::new(),
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+        let mut state = UiState {
+            active_tab: Tab::Logs as usize,
+            logs_focus: PaneFocus::Detail,
+            ..UiState::default()
+        };
+
+        let outcome = super::handle_key(
+            KeyCode::Char('='),
+            KeyModifiers::empty(),
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(outcome, InputOutcome::None);
+        assert_eq!(state.layout_preset, LayoutPreset::Custom);
+        assert_eq!(state.log_split_pct, 53);
     }
 
     #[test]

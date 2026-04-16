@@ -207,27 +207,27 @@ pub(crate) fn footer_text(state: &UiState) -> String {
         }
         Tab::Traces => match state.trace_focus {
             TraceFocus::TraceList => {
-                "traces: j/k select trace | enter open | : commands | ? help | e errors".to_string()
+                "traces: j/k select trace | =/- resize | enter open | : commands | ? help | e errors".to_string()
             }
             TraceFocus::TraceTree => {
-                "trace tree: j/k move | l/right detail | L logs | esc list | : commands | ? help | e errors"
+                "trace tree: j/k move | =/- resize | l/right detail | L logs | esc list | : commands | ? help | e errors"
                     .to_string()
             }
             TraceFocus::TraceDetail => {
-                "span detail: j/k scroll | h/left tree | L logs | esc list | : commands | ? help | e errors"
+                "span detail: j/k scroll | =/- resize | h/left tree | L logs | esc list | : commands | ? help | e errors"
                     .to_string()
             }
         },
         Tab::Logs => {
             if state.logs_focus == PaneFocus::Primary {
-                let mut text = "logs: j/k move | l/right detail | f tail | x log search | v severity | c correlation".to_string();
+                let mut text = "logs: j/k move | =/- resize | l/right detail | f tail | x log search | v severity | c correlation".to_string();
                 if state.log_pinned_trace_id.is_some() || state.log_pinned_span_id.is_some() {
                     text.push_str(" | u clear pin");
                 }
                 text.push_str(" | : commands");
                 text
             } else {
-                let mut text = "log detail: j/k scroll | esc/h/left feed".to_string();
+                let mut text = "log detail: j/k scroll | =/- resize | esc/h/left feed".to_string();
                 if state.log_pinned_trace_id.is_some() || state.log_pinned_span_id.is_some() {
                     text.push_str(" | u clear pin");
                 }
@@ -237,16 +237,16 @@ pub(crate) fn footer_text(state: &UiState) -> String {
         }
         Tab::Metrics => {
             if state.metrics_focus == PaneFocus::Primary {
-                "metrics: j/k move | l/right detail | : commands".to_string()
+                "metrics: j/k move | =/- resize | l/right detail | : commands".to_string()
             } else {
-                "metric detail: j/k scroll | esc/h/left feed | : commands".to_string()
+                "metric detail: j/k scroll | =/- resize | esc/h/left feed | : commands".to_string()
             }
         }
         Tab::Llm => {
             if state.llm_focus == PaneFocus::Primary {
-                "llm: j/k move | l/right detail | : commands".to_string()
+                "llm: j/k move | =/- resize | l/right detail | : commands".to_string()
             } else {
-                "model detail: j/k scroll | i/o toggle blocks | esc/h/left feed | : commands"
+                "model detail: j/k scroll | =/- resize | i/o toggle blocks | esc/h/left feed | : commands"
                     .to_string()
             }
         }
@@ -292,6 +292,8 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
         Line::raw("  : / ctrl-p       open command palette"),
         Line::raw("  /                global search"),
         Line::raw("  g                cycle theme"),
+        Line::raw("  w                cycle layout preset"),
+        Line::raw("  = / -            grow or shrink focused split"),
         Line::raw("  s                cycle service filter"),
         Line::raw("  t                cycle time window"),
         Line::raw("  ?                open/close help"),

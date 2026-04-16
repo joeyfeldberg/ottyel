@@ -93,10 +93,36 @@ impl Tab {
     }
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum LayoutPreset {
+    Balanced,
+    PrimaryFocus,
+    DetailFocus,
+    Custom,
+}
+
+impl LayoutPreset {
+    pub const ALL: [Self; 3] = [Self::Balanced, Self::PrimaryFocus, Self::DetailFocus];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Balanced => "balanced",
+            Self::PrimaryFocus => "primary",
+            Self::DetailFocus => "detail",
+            Self::Custom => "custom",
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct UiState {
     pub theme: Theme,
     pub active_tab: usize,
+    pub layout_preset: LayoutPreset,
+    pub trace_split_pct: u16,
+    pub log_split_pct: u16,
+    pub metric_split_pct: u16,
+    pub llm_split_pct: u16,
     pub trace_view_mode: TraceViewMode,
     pub selected_trace: usize,
     pub trace_list_scroll: usize,
@@ -149,6 +175,11 @@ impl Default for UiState {
         Self {
             theme: Theme::Ember,
             active_tab: 0,
+            layout_preset: LayoutPreset::Balanced,
+            trace_split_pct: 62,
+            log_split_pct: 58,
+            metric_split_pct: 52,
+            llm_split_pct: 55,
             trace_view_mode: TraceViewMode::List,
             selected_trace: 0,
             trace_list_scroll: 0,
