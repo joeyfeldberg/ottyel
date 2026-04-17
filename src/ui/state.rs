@@ -165,10 +165,11 @@ pub struct UiState {
     pub metric_feed_scroll: usize,
     pub metric_feed_follow_selected: bool,
     pub metric_detail_scroll: u16,
-    pub llm_focus: PaneFocus,
+    pub llm_focus: LlmFocus,
     pub selected_llm: usize,
     pub llm_feed_scroll: usize,
     pub llm_feed_follow_selected: bool,
+    pub llm_timeline_scroll: u16,
     pub llm_detail_scroll: u16,
     pub llm_expand_prompt: bool,
     pub llm_expand_output: bool,
@@ -222,10 +223,11 @@ impl Default for UiState {
             metric_feed_scroll: 0,
             metric_feed_follow_selected: true,
             metric_detail_scroll: 0,
-            llm_focus: PaneFocus::Primary,
+            llm_focus: LlmFocus::Feed,
             selected_llm: 0,
             llm_feed_scroll: 0,
             llm_feed_follow_selected: true,
+            llm_timeline_scroll: 0,
             llm_detail_scroll: 0,
             llm_expand_prompt: false,
             llm_expand_output: false,
@@ -263,4 +265,11 @@ pub enum TraceViewMode {
 pub enum PaneFocus {
     Primary,
     Detail,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum LlmFocus {
+    Feed,
+    Detail,
+    Timeline,
 }

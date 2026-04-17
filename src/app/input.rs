@@ -6,7 +6,7 @@ use crate::{
     config::Theme,
     domain::DashboardSnapshot,
     query::{LogCorrelationFilter, LogFilters, LogSeverityFilter, QueryFilters, TimeWindow},
-    ui::{LayoutPreset, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
+    ui::{LayoutPreset, LlmFocus, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
 };
 
 const COMMAND_PALETTE_VISIBLE_ROWS: usize = 8;
@@ -76,12 +76,12 @@ pub(super) fn handle_key(
             state.log_search_mode = true;
         }
         KeyCode::Char('i')
-            if Tab::ALL[state.active_tab] == Tab::Llm && state.llm_focus == PaneFocus::Detail =>
+            if Tab::ALL[state.active_tab] == Tab::Llm && state.llm_focus == LlmFocus::Detail =>
         {
             state.llm_expand_prompt = !state.llm_expand_prompt;
         }
         KeyCode::Char('o')
-            if Tab::ALL[state.active_tab] == Tab::Llm && state.llm_focus == PaneFocus::Detail =>
+            if Tab::ALL[state.active_tab] == Tab::Llm && state.llm_focus == LlmFocus::Detail =>
         {
             state.llm_expand_output = !state.llm_expand_output;
         }
@@ -222,13 +222,17 @@ fn active_detail_pane_height(root: Rect, state: &UiState) -> Option<usize> {
                 crate::ui::geometry::metric_right_sections(right)[1],
             ))
         }
-        Tab::Llm if state.llm_focus == PaneFocus::Detail => {
-            Some(crate::ui::geometry::detail_viewport_height(
-                crate::ui::geometry::llm_detail_sections(crate::ui::geometry::llm_detail_area(
-                    body,
-                    state.llm_split_pct,
-                ))[0],
-            ))
+        Tab::Llm => {
+            let sections = crate::ui::geometry::llm_detail_sections(
+                crate::ui::geometry::llm_detail_area(body, state.llm_split_pct),
+            );
+            match state.llm_focus {
+                LlmFocus::Detail => Some(crate::ui::geometry::detail_viewport_height(sections[0])),
+                LlmFocus::Timeline => {
+                    Some(crate::ui::geometry::detail_viewport_height(sections[1]))
+                }
+                LlmFocus::Feed => None,
+            }
         }
         _ => None,
     }
@@ -533,20 +537,26 @@ fn handle_llm_click(
     snapshot: &DashboardSnapshot,
 ) -> InputOutcome {
     let [left_area, detail_area] = crate::ui::geometry::llm_sections(body, state.llm_split_pct);
+    let [model_detail_area, timeline_area] = crate::ui::geometry::llm_detail_sections(detail_area);
     let [_, _, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
-    if crate::ui::geometry::contains(detail_area, column, row) {
-        state.llm_focus = PaneFocus::Detail;
+    if crate::ui::geometry::contains(model_detail_area, column, row) {
+        state.llm_focus = LlmFocus::Detail;
+        return InputOutcome::None;
+    }
+    if crate::ui::geometry::contains(timeline_area, column, row) {
+        state.llm_focus = LlmFocus::Timeline;
         return InputOutcome::None;
     }
     if !crate::ui::geometry::contains(left_area, column, row) {
         return InputOutcome::None;
     }
 
-    state.llm_focus = PaneFocus::Primary;
+    state.llm_focus = LlmFocus::Feed;
     if let Some(index) = table_row_at(feed_area, row, snapshot.llm.len(), state.llm_feed_scroll) {
         state.selected_llm = index;
         state.llm_feed_follow_selected = true;
         state.llm_detail_scroll = 0;
+        state.llm_timeline_scroll = 0;
         state.llm_expand_prompt = false;
         state.llm_expand_output = false;
         return InputOutcome::RefreshDetails;
@@ -664,14 +674,20 @@ fn handle_llm_scroll(
     snapshot: &DashboardSnapshot,
 ) -> InputOutcome {
     let [left_area, detail_area] = crate::ui::geometry::llm_sections(body, state.llm_split_pct);
+    let [model_detail_area, timeline_area] = crate::ui::geometry::llm_detail_sections(detail_area);
     let [_, _, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
-    if crate::ui::geometry::contains(detail_area, column, row) {
-        state.llm_focus = PaneFocus::Detail;
+    if crate::ui::geometry::contains(model_detail_area, column, row) {
+        state.llm_focus = LlmFocus::Detail;
+        scroll_detail(delta as i16, state);
+        return InputOutcome::None;
+    }
+    if crate::ui::geometry::contains(timeline_area, column, row) {
+        state.llm_focus = LlmFocus::Timeline;
         scroll_detail(delta as i16, state);
         return InputOutcome::None;
     }
     if crate::ui::geometry::contains(feed_area, column, row) {
-        state.llm_focus = PaneFocus::Primary;
+        state.llm_focus = LlmFocus::Feed;
         state.llm_feed_follow_selected = false;
         state.llm_feed_scroll = crate::ui::geometry::scroll_window_offset(
             state.llm_feed_scroll,
@@ -770,18 +786,19 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapsho
             PaneFocus::Detail => scroll_detail(delta as i16, state),
         },
         Tab::Llm => match state.llm_focus {
-            PaneFocus::Primary => {
+            LlmFocus::Feed => {
                 let previous = state.selected_llm;
                 move_index(&mut state.selected_llm, snapshot.llm.len(), delta);
                 if state.selected_llm != previous {
                     state.llm_feed_follow_selected = true;
                     state.llm_detail_scroll = 0;
+                    state.llm_timeline_scroll = 0;
                     state.llm_expand_prompt = false;
                     state.llm_expand_output = false;
                     return InputOutcome::RefreshDetails;
                 }
             }
-            PaneFocus::Detail => scroll_detail(delta as i16, state),
+            LlmFocus::Detail | LlmFocus::Timeline => scroll_detail(delta as i16, state),
         },
     }
 
@@ -887,10 +904,10 @@ fn resize_active_layout(grow_focused: bool, state: &mut UiState) {
             state.layout_preset = LayoutPreset::Custom;
         }
         Tab::Llm => {
-            let signed = if state.llm_focus == PaneFocus::Detail {
-                -delta
-            } else {
+            let signed = if state.llm_focus == LlmFocus::Feed {
                 delta
+            } else {
+                -delta
             };
             resize_split_pct(&mut state.llm_split_pct, signed);
             state.layout_preset = LayoutPreset::Custom;
@@ -970,6 +987,7 @@ fn scroll_detail(delta: i16, state: &mut UiState) {
         Tab::Traces => &mut state.trace_detail_scroll,
         Tab::Logs => &mut state.log_detail_scroll,
         Tab::Metrics => &mut state.metric_detail_scroll,
+        Tab::Llm if state.llm_focus == LlmFocus::Timeline => &mut state.llm_timeline_scroll,
         Tab::Llm => &mut state.llm_detail_scroll,
     };
 
@@ -1004,7 +1022,12 @@ fn move_focus_left(state: &mut UiState) {
         },
         Tab::Logs => state.logs_focus = PaneFocus::Primary,
         Tab::Metrics => state.metrics_focus = PaneFocus::Primary,
-        Tab::Llm => state.llm_focus = PaneFocus::Primary,
+        Tab::Llm => {
+            state.llm_focus = match state.llm_focus {
+                LlmFocus::Timeline => LlmFocus::Detail,
+                LlmFocus::Detail | LlmFocus::Feed => LlmFocus::Feed,
+            }
+        }
     }
 }
 
@@ -1022,7 +1045,12 @@ fn move_focus_right(state: &mut UiState) {
         }
         Tab::Logs => state.logs_focus = PaneFocus::Detail,
         Tab::Metrics => state.metrics_focus = PaneFocus::Detail,
-        Tab::Llm => state.llm_focus = PaneFocus::Detail,
+        Tab::Llm => {
+            state.llm_focus = match state.llm_focus {
+                LlmFocus::Feed => LlmFocus::Detail,
+                LlmFocus::Detail | LlmFocus::Timeline => LlmFocus::Timeline,
+            }
+        }
     }
 }
 
@@ -1049,7 +1077,7 @@ fn go_back(state: &mut UiState) {
         },
         Tab::Logs => state.logs_focus = PaneFocus::Primary,
         Tab::Metrics => state.metrics_focus = PaneFocus::Primary,
-        Tab::Llm => state.llm_focus = PaneFocus::Primary,
+        Tab::Llm => state.llm_focus = LlmFocus::Feed,
     }
 }
 
@@ -1258,7 +1286,7 @@ mod tests {
     use crate::{
         domain::{DashboardSnapshot, LogSummary, OverviewStats, SpanDetail, TraceSummary},
         query::TimeWindow,
-        ui::{LayoutPreset, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
+        ui::{LayoutPreset, LlmFocus, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
     };
 
     #[test]
@@ -1721,7 +1749,7 @@ mod tests {
     fn space_scrolls_active_detail_by_a_page() {
         let mut state = UiState {
             active_tab: Tab::Llm as usize,
-            llm_focus: PaneFocus::Detail,
+            llm_focus: LlmFocus::Detail,
             ..UiState::default()
         };
         let snapshot = DashboardSnapshot {
@@ -1784,7 +1812,7 @@ mod tests {
     fn scrolling_llm_detail_uses_mouse_wheel() {
         let mut state = UiState {
             active_tab: Tab::Llm as usize,
-            llm_focus: PaneFocus::Detail,
+            llm_focus: LlmFocus::Detail,
             ..UiState::default()
         };
         let snapshot = DashboardSnapshot {
@@ -1843,8 +1871,80 @@ mod tests {
             &snapshot,
         );
 
-        assert_eq!(state.llm_focus, PaneFocus::Detail);
+        assert_eq!(state.llm_focus, LlmFocus::Detail);
         assert_eq!(state.llm_detail_scroll, 1);
+    }
+
+    #[test]
+    fn scrolling_llm_timeline_uses_its_own_scroll() {
+        let mut state = UiState {
+            active_tab: Tab::Llm as usize,
+            llm_focus: LlmFocus::Detail,
+            ..UiState::default()
+        };
+        let snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: OverviewStats {
+                llm_count: 1,
+                ..empty_overview()
+            },
+            traces: Vec::new(),
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: vec![crate::domain::LlmSummary {
+                trace_id: "trace-1".to_string(),
+                span_id: "span-1".to_string(),
+                service_name: "api".to_string(),
+                provider: "openai".to_string(),
+                model: "gpt-5.4".to_string(),
+                operation: "chat".to_string(),
+                span_kind: None,
+                session_id: None,
+                conversation_id: None,
+                prompt_preview: None,
+                output_preview: None,
+                tool_name: None,
+                tool_args: None,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                cost: None,
+                latency_ms: None,
+                status: "STATUS_CODE_UNSET".to_string(),
+                raw_json: serde_json::json!({}),
+            }],
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: (0..20)
+                .map(|index| crate::domain::LlmTimelineItem {
+                    kind: crate::domain::LlmTimelineKind::Step,
+                    label: format!("step {index}"),
+                    detail: None,
+                    offset_ms: index as f64,
+                    duration_ms: Some(1.0),
+                    status: None,
+                })
+                .collect(),
+        };
+
+        handle_mouse(
+            MouseEvent {
+                kind: MouseEventKind::ScrollDown,
+                column: 90,
+                row: 35,
+                modifiers: KeyModifiers::empty(),
+            },
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(state.llm_focus, LlmFocus::Timeline);
+        assert_eq!(state.llm_detail_scroll, 0);
+        assert_eq!(state.llm_timeline_scroll, 1);
     }
 
     #[test]

@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::domain::{DashboardSnapshot, LlmTopCallKind, truncate};
 
-use super::{Palette, PaneFocus, UiState, chrome, details, geometry};
+use super::{LlmFocus, Palette, PaneFocus, UiState, chrome, details, geometry};
 
 pub(crate) fn render_logs(
     frame: &mut Frame<'_>,
@@ -202,12 +202,12 @@ pub(crate) fn render_llm(
     let left = geometry::llm_left_sections(panels[0]);
     let right = geometry::llm_detail_sections(panels[1]);
 
-    let feed_border = if state.llm_focus == PaneFocus::Primary {
+    let feed_border = if state.llm_focus == LlmFocus::Feed {
         palette.warning
     } else {
         palette.muted
     };
-    let detail_border = if state.llm_focus == PaneFocus::Detail {
+    let detail_border = if state.llm_focus == LlmFocus::Detail {
         palette.accent
     } else {
         palette.muted
@@ -282,7 +282,7 @@ pub(crate) fn render_llm(
                 Block::default()
                     .title(chrome::detail_title(
                         "Model Detail",
-                        state.llm_focus == PaneFocus::Detail,
+                        state.llm_focus == LlmFocus::Detail,
                     ))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(detail_border)),
@@ -293,10 +293,14 @@ pub(crate) fn render_llm(
     frame.render_widget(Clear, right[1]);
     frame.render_widget(
         Paragraph::new(details::llm_timeline_panel_lines(snapshot, state, palette))
+            .scroll((state.llm_timeline_scroll, 0))
             .wrap(Wrap { trim: false })
             .block(
                 Block::default()
-                    .title("Timeline")
+                    .title(chrome::detail_title(
+                        "Timeline",
+                        state.llm_focus == LlmFocus::Timeline,
+                    ))
                     .borders(Borders::ALL)
                     .border_style(Style::default().fg(palette.warning)),
             ),

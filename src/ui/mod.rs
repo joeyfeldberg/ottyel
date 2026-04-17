@@ -6,7 +6,9 @@ mod panes;
 mod state;
 mod traces;
 
-pub use state::{LayoutPreset, Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState};
+pub use state::{
+    LayoutPreset, LlmFocus, Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState,
+};
 pub(crate) use traces::{
     first_llm_trace_index, next_error_trace_index, parent_trace_index, previous_error_trace_index,
     root_trace_index, selected_trace_span_detail, selected_trace_tree_span, trace_tree_hit,
@@ -267,13 +269,18 @@ pub fn sync_detail_scroll(
         );
     }
     if Tab::ALL[state.active_tab] == Tab::Llm {
+        let llm_detail_sections =
+            geometry::llm_detail_sections(geometry::llm_detail_area(body, state.llm_split_pct));
         state.llm_detail_scroll = geometry::clamp_scroll(
             state.llm_detail_scroll,
             details::cached_llm_detail_lines(&cache.llm_detail).len(),
-            geometry::detail_viewport_height(
-                geometry::llm_detail_sections(geometry::llm_detail_area(body, state.llm_split_pct))
-                    [0],
-            ),
+            geometry::detail_viewport_height(llm_detail_sections[0]),
+        );
+        state.llm_timeline_scroll = geometry::clamp_scroll(
+            state.llm_timeline_scroll,
+            details::llm_timeline_panel_lines(snapshot, state, Palette::from_theme(state.theme))
+                .len(),
+            geometry::detail_viewport_height(llm_detail_sections[1]),
         );
     }
 }

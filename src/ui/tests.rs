@@ -12,7 +12,7 @@ use crate::{
 };
 
 use super::{
-    LayoutPreset, Palette, Tab, TraceFocus, TraceViewMode, UiState,
+    LayoutPreset, LlmFocus, Palette, Tab, TraceFocus, TraceViewMode, UiState,
     chrome::{
         command_palette_window, context_help_lines, context_help_title, footer_text,
         global_status_text, help_lines, help_title,
@@ -521,7 +521,7 @@ fn global_status_owns_service_and_time_key_hints() {
 fn context_help_lines_follow_active_focus() {
     let state = UiState {
         active_tab: Tab::Llm as usize,
-        llm_focus: super::PaneFocus::Detail,
+        llm_focus: LlmFocus::Detail,
         ..UiState::default()
     };
 

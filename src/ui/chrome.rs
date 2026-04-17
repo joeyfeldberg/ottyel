@@ -12,7 +12,7 @@ use crate::{
     query::{LogCorrelationFilter, LogSeverityFilter},
 };
 
-use super::{Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState, geometry};
+use super::{LlmFocus, Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState, geometry};
 
 pub(crate) const COMMAND_PALETTE_VISIBLE_ROWS: usize = 8;
 
@@ -242,14 +242,19 @@ pub(crate) fn footer_text(state: &UiState) -> String {
                 "metric detail: j/k scroll | =/- resize | esc/h/left feed | : commands".to_string()
             }
         }
-        Tab::Llm => {
-            if state.llm_focus == PaneFocus::Primary {
+        Tab::Llm => match state.llm_focus {
+            LlmFocus::Feed => {
                 "llm: j/k move | =/- resize | l/right detail | : commands".to_string()
-            } else {
-                "model detail: j/k scroll | =/- resize | i/o toggle blocks | esc/h/left feed | : commands"
+            }
+            LlmFocus::Detail => {
+                "model detail: j/k scroll | =/- resize | l/right timeline | i/o toggle blocks | esc feed | : commands"
                     .to_string()
             }
-        }
+            LlmFocus::Timeline => {
+                "timeline: j/k scroll | =/- resize | h/left model detail | esc feed | : commands"
+                    .to_string()
+            }
+        },
     }
 }
 
@@ -275,13 +280,11 @@ pub(crate) fn help_title(state: &UiState) -> String {
                 "Help: Metric Detail".to_string()
             }
         }
-        Tab::Llm => {
-            if state.llm_focus == PaneFocus::Primary {
-                "Help: LLM Inspector".to_string()
-            } else {
-                "Help: Model Detail".to_string()
-            }
-        }
+        Tab::Llm => match state.llm_focus {
+            LlmFocus::Feed => "Help: LLM Inspector".to_string(),
+            LlmFocus::Detail => "Help: Model Detail".to_string(),
+            LlmFocus::Timeline => "Help: Timeline".to_string(),
+        },
     }
 }
 
@@ -375,22 +378,31 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
                 lines.push(Line::raw("  esc / h / left   back to metrics feed"));
             }
         }
-        Tab::Llm => {
-            if state.llm_focus == PaneFocus::Primary {
+        Tab::Llm => match state.llm_focus {
+            LlmFocus::Feed => {
                 lines.push(Line::raw("llm inspector"));
                 lines.push(Line::raw("  j / k            move normalized llm spans"));
                 lines.push(Line::raw("  l / right        focus model detail"));
                 lines.push(Line::raw(
                     "  right pane       shows model/provider/token detail",
                 ));
-            } else {
+            }
+            LlmFocus::Detail => {
                 lines.push(Line::raw("model detail"));
                 lines.push(Line::raw("  j / k            scroll detail"));
+                lines.push(Line::raw("  l / right        focus timeline"));
                 lines.push(Line::raw("  i                expand or collapse prompt"));
                 lines.push(Line::raw("  o                expand or collapse output"));
-                lines.push(Line::raw("  esc / h / left   back to llm inspector"));
+                lines.push(Line::raw("  esc              back to llm inspector"));
+                lines.push(Line::raw("  h / left         back to llm inspector"));
             }
-        }
+            LlmFocus::Timeline => {
+                lines.push(Line::raw("timeline"));
+                lines.push(Line::raw("  j / k            scroll timeline"));
+                lines.push(Line::raw("  h / left         focus model detail"));
+                lines.push(Line::raw("  esc              back to llm inspector"));
+            }
+        },
     }
 
     if state.search_mode {
@@ -440,13 +452,11 @@ pub(crate) fn context_help_title(state: &UiState) -> String {
                 "Hints: Metric Detail".to_string()
             }
         }
-        Tab::Llm => {
-            if state.llm_focus == PaneFocus::Primary {
-                "Hints: LLM Inspector".to_string()
-            } else {
-                "Hints: Model Detail".to_string()
-            }
-        }
+        Tab::Llm => match state.llm_focus {
+            LlmFocus::Feed => "Hints: LLM Inspector".to_string(),
+            LlmFocus::Detail => "Hints: Model Detail".to_string(),
+            LlmFocus::Timeline => "Hints: Timeline".to_string(),
+        },
     }
 }
 
@@ -505,19 +515,27 @@ pub(crate) fn context_help_lines(state: &UiState) -> Vec<Line<'static>> {
                 lines.push(Line::raw("  h/esc   feed"));
             }
         }
-        Tab::Llm => {
-            if state.llm_focus == PaneFocus::Primary {
+        Tab::Llm => match state.llm_focus {
+            LlmFocus::Feed => {
                 lines.push(Line::raw("Compare LLM activity:"));
                 lines.push(Line::raw("  j/k     select call"));
                 lines.push(Line::raw("  l       detail"));
                 lines.push(Line::raw("  s/t     service/window"));
-            } else {
+            }
+            LlmFocus::Detail => {
                 lines.push(Line::raw("Inspect prompt/output:"));
                 lines.push(Line::raw("  j/k     scroll"));
+                lines.push(Line::raw("  l       timeline"));
                 lines.push(Line::raw("  i/o     expand blocks"));
                 lines.push(Line::raw("  h/esc   feed"));
             }
-        }
+            LlmFocus::Timeline => {
+                lines.push(Line::raw("Inspect timeline:"));
+                lines.push(Line::raw("  j/k     scroll"));
+                lines.push(Line::raw("  h       detail"));
+                lines.push(Line::raw("  esc     feed"));
+            }
+        },
     }
     lines.push(Line::raw(""));
     lines.push(Line::raw("H closes hints  ? full help"));
