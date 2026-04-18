@@ -113,6 +113,7 @@ pub struct MetricSummary {
 pub struct LlmSummary {
     pub trace_id: String,
     pub span_id: String,
+    pub started_at_unix_nano: i64,
     pub service_name: String,
     pub provider: String,
     pub model: String,

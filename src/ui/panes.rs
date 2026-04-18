@@ -226,6 +226,9 @@ pub(crate) fn render_llm(
                 Style::default().fg(palette.foreground)
             };
             Row::new(vec![
+                Cell::from(super::traces::format_machine_local_time(
+                    item.started_at_unix_nano,
+                )),
                 Cell::from(truncate(&item.service_name, 12)),
                 Cell::from(truncate(&item.provider, 10)),
                 Cell::from(truncate(&item.model, 16)),
@@ -239,6 +242,7 @@ pub(crate) fn render_llm(
     let table = Table::new(
         rows,
         [
+            Constraint::Length(19),
             Constraint::Length(12),
             Constraint::Length(10),
             Constraint::Length(16),
@@ -249,6 +253,7 @@ pub(crate) fn render_llm(
     )
     .header(
         Row::new(vec![
+            "time",
             "service",
             "provider",
             "model",

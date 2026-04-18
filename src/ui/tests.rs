@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 
+use chrono::{Duration, Local};
 use serde_json::json;
 
 use crate::{
@@ -23,10 +24,10 @@ use super::{
     },
     geometry::trace_tree_scroll_offset,
     traces::{
-        first_llm_trace_index, format_duration_compact, format_trace_timestamp,
-        next_error_trace_index, parent_trace_index, previous_error_trace_index, root_trace_index,
-        selected_trace_row, trace_row_badges, trace_row_display_name, trace_tree_rows,
-        trace_window, waterfall_bar,
+        first_llm_trace_index, format_duration_compact, format_machine_local_time,
+        format_trace_timestamp, next_error_trace_index, parent_trace_index,
+        previous_error_trace_index, root_trace_index, selected_trace_row, trace_row_badges,
+        trace_row_display_name, trace_tree_rows, trace_window, waterfall_bar,
     },
 };
 
@@ -305,8 +306,24 @@ fn duration_format_compacts_long_values() {
 }
 
 #[test]
-fn trace_timestamp_formats_as_hms() {
-    assert_eq!(format_trace_timestamp(65_956_000_000_000), "18:19:16");
+fn trace_timestamp_uses_time_only_for_today() {
+    let now = Local::now();
+    let rendered = format_trace_timestamp(now.timestamp_nanos_opt().unwrap_or_default());
+    assert_eq!(rendered.len(), 8);
+    assert_eq!(&rendered[2..3], ":");
+    assert_eq!(&rendered[5..6], ":");
+}
+
+#[test]
+fn machine_local_time_includes_calendar_date_for_older_events() {
+    let older = Local::now() - Duration::days(1);
+    let rendered = format_machine_local_time(older.timestamp_nanos_opt().unwrap_or_default());
+    assert_eq!(rendered.len(), 19);
+    assert_eq!(&rendered[4..5], "-");
+    assert_eq!(&rendered[7..8], "-");
+    assert_eq!(&rendered[10..11], " ");
+    assert_eq!(&rendered[13..14], ":");
+    assert_eq!(&rendered[16..17], ":");
 }
 
 #[test]
@@ -675,6 +692,7 @@ fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
         llm: vec![LlmSummary {
             trace_id: "trace-1".to_string(),
             span_id: "span-1".to_string(),
+            started_at_unix_nano: 65_956_000_000_000,
             service_name: "api".to_string(),
             provider: "openai".to_string(),
             model: "gpt-5.4".to_string(),
@@ -775,6 +793,7 @@ fn llm_timeline_panel_lines_show_timeline_steps() {
         llm: vec![LlmSummary {
             trace_id: "trace-1".to_string(),
             span_id: "span-1".to_string(),
+            started_at_unix_nano: 65_956_000_000_000,
             service_name: "api".to_string(),
             provider: "openai".to_string(),
             model: "gpt-5.4".to_string(),
@@ -862,6 +881,7 @@ fn llm_detail_lines_truncate_prompt_and_output_by_default() {
         llm: vec![LlmSummary {
             trace_id: "trace-1".to_string(),
             span_id: "span-1".to_string(),
+            started_at_unix_nano: 65_956_000_000_000,
             service_name: "api".to_string(),
             provider: "openai".to_string(),
             model: "gpt-5.4".to_string(),
@@ -940,6 +960,7 @@ fn llm_detail_lines_expand_prompt_and_output_when_toggled() {
         llm: vec![LlmSummary {
             trace_id: "trace-1".to_string(),
             span_id: "span-1".to_string(),
+            started_at_unix_nano: 65_956_000_000_000,
             service_name: "api".to_string(),
             provider: "openai".to_string(),
             model: "gpt-5.4".to_string(),

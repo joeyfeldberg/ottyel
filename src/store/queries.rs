@@ -457,14 +457,12 @@ impl Store {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let mut sql = String::from(
             r#"
-            SELECT llm_spans.trace_id, llm_spans.span_id, llm_spans.service_name, provider, model, operation,
+            SELECT llm_spans.trace_id, llm_spans.span_id, spans.start_time_unix_nano, llm_spans.service_name, provider, model, operation,
                    input_tokens, output_tokens, total_tokens, cost, latency_ms, status, raw_json
             FROM llm_spans
+            INNER JOIN spans ON spans.span_id = llm_spans.span_id
             "#,
         );
-        if threshold_unix_nano.is_some() {
-            sql.push_str(" INNER JOIN spans ON spans.span_id = llm_spans.span_id");
-        }
         let mut where_clauses = Vec::new();
         if let Some(service) = service_filter {
             where_clauses.push(format!(
@@ -483,8 +481,8 @@ impl Store {
         }
         if let Some(cursor) = &page.cursor {
             where_clauses.push(format!(
-                "(COALESCE(llm_spans.latency_ms, -1) < {latency} OR (COALESCE(llm_spans.latency_ms, -1) = {latency} AND llm_spans.span_id < '{span_id}'))",
-                latency = cursor.latency_ms,
+                "(spans.start_time_unix_nano < {started_at} OR (spans.start_time_unix_nano = {started_at} AND llm_spans.span_id < '{span_id}'))",
+                started_at = cursor.started_at_unix_nano,
                 span_id = escape_sql(&cursor.span_id),
             ));
         }
@@ -492,9 +490,7 @@ impl Store {
             sql.push_str(" WHERE ");
             sql.push_str(&where_clauses.join(" AND "));
         }
-        sql.push_str(
-            " ORDER BY COALESCE(llm_spans.latency_ms, -1) DESC, llm_spans.span_id DESC LIMIT ",
-        );
+        sql.push_str(" ORDER BY spans.start_time_unix_nano DESC, llm_spans.span_id DESC LIMIT ");
         sql.push_str(&page.limit.saturating_add(1).to_string());
 
         let mut stmt = conn.prepare(&sql)?;
@@ -502,10 +498,11 @@ impl Store {
             Ok(LlmSummary {
                 trace_id: row.get(0)?,
                 span_id: row.get(1)?,
-                service_name: row.get(2)?,
-                provider: row.get(3)?,
-                model: row.get(4)?,
-                operation: row.get(5)?,
+                started_at_unix_nano: row.get(2)?,
+                service_name: row.get(3)?,
+                provider: row.get(4)?,
+                model: row.get(5)?,
+                operation: row.get(6)?,
                 span_kind: None,
                 session_id: None,
                 conversation_id: None,
@@ -513,13 +510,13 @@ impl Store {
                 output_preview: None,
                 tool_name: None,
                 tool_args: None,
-                input_tokens: row.get(6)?,
-                output_tokens: row.get(7)?,
-                total_tokens: row.get(8)?,
-                cost: row.get(9)?,
-                latency_ms: row.get(10)?,
-                status: row.get(11)?,
-                raw_json: serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(12)?)
+                input_tokens: row.get(7)?,
+                output_tokens: row.get(8)?,
+                total_tokens: row.get(9)?,
+                cost: row.get(10)?,
+                latency_ms: row.get(11)?,
+                status: row.get(12)?,
+                raw_json: serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(13)?)
                     .unwrap_or_default(),
             })
         })?;
@@ -528,7 +525,7 @@ impl Store {
             hydrate_llm_summary(row);
         }
         Ok(finish_page(rows, page.limit, |item| LlmCursor {
-            latency_ms: item.latency_ms.unwrap_or(-1.0),
+            started_at_unix_nano: item.started_at_unix_nano,
             span_id: item.span_id.clone(),
         }))
     }

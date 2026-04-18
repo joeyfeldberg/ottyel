@@ -1765,6 +1765,7 @@ mod tests {
             llm: vec![crate::domain::LlmSummary {
                 trace_id: "trace-1".to_string(),
                 span_id: "span-1".to_string(),
+                started_at_unix_nano: 1,
                 service_name: "api".to_string(),
                 provider: "openai".to_string(),
                 model: "gpt-5.4".to_string(),
@@ -1828,6 +1829,7 @@ mod tests {
             llm: vec![crate::domain::LlmSummary {
                 trace_id: "trace-1".to_string(),
                 span_id: "span-1".to_string(),
+                started_at_unix_nano: 1,
                 service_name: "api".to_string(),
                 provider: "openai".to_string(),
                 model: "gpt-5.4".to_string(),
@@ -1895,6 +1897,7 @@ mod tests {
             llm: vec![crate::domain::LlmSummary {
                 trace_id: "trace-1".to_string(),
                 span_id: "span-1".to_string(),
+                started_at_unix_nano: 1,
                 service_name: "api".to_string(),
                 provider: "openai".to_string(),
                 model: "gpt-5.4".to_string(),

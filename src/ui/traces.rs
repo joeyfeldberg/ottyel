@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
+use chrono::{DateTime, Local, Utc};
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
@@ -47,7 +48,7 @@ pub(crate) fn render(
     let table = Table::new(
         rows,
         [
-            Constraint::Length(8),
+            Constraint::Length(19),
             Constraint::Length(12),
             Constraint::Min(20),
             Constraint::Length(6),
@@ -159,12 +160,23 @@ pub(crate) fn render(
 }
 
 pub(crate) fn format_trace_timestamp(started_at_unix_nano: i64) -> String {
-    let total_seconds = started_at_unix_nano.div_euclid(1_000_000_000);
-    let seconds_of_day = total_seconds.rem_euclid(86_400);
-    let hours = seconds_of_day / 3_600;
-    let minutes = (seconds_of_day % 3_600) / 60;
-    let seconds = seconds_of_day % 60;
-    format!("{hours:02}:{minutes:02}:{seconds:02}")
+    format_machine_local_time(started_at_unix_nano)
+}
+
+pub(crate) fn format_machine_local_time(unix_nano: i64) -> String {
+    let seconds = unix_nano.div_euclid(1_000_000_000);
+    let nanos = unix_nano.rem_euclid(1_000_000_000) as u32;
+    match DateTime::<Utc>::from_timestamp(seconds, nanos) {
+        Some(utc) => {
+            let local = utc.with_timezone(&Local);
+            if local.date_naive() == Local::now().date_naive() {
+                local.format("%H:%M:%S").to_string()
+            } else {
+                local.format("%Y-%m-%d %H:%M:%S").to_string()
+            }
+        }
+        None => "invalid-time".to_string(),
+    }
 }
 
 pub(crate) fn trace_tree_rows(

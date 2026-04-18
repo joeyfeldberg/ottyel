@@ -56,7 +56,7 @@ pub struct MetricCursor {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LlmCursor {
-    pub latency_ms: f64,
+    pub started_at_unix_nano: i64,
     pub span_id: String,
 }
 
