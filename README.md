@@ -12,6 +12,13 @@ It is built for two jobs:
 - inspect LLM-heavy workflows with prompt/output views, model rollups, sessions,
   timelines, and token or cost summaries
 
+## Quick Start
+1. Clone the repo
+1. cargo install --locked --path .
+1. ottyel
+
+That’s it. It will run both the TUI and the server to ingest telemetry.
+
 ## Why
 
 Most local observability setups are either too thin to be useful or too tied to
@@ -53,7 +60,7 @@ The binary is installed into Cargo's bin directory, typically
 Start the app:
 
 ```bash
-ottyel serve
+ottyel
 ```
 
 Default listeners:
