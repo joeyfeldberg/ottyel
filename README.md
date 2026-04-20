@@ -14,8 +14,8 @@ It is built for two jobs:
 
 ## Quick Start
 1. Clone the repo
-1. cargo install --locked --path .
-1. ottyel
+1. build with `cargo install --locked --path .`
+1. run `ottyel`
 
 That’s it. It will run both the TUI and the server to ingest telemetry.
 
