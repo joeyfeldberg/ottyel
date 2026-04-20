@@ -491,11 +491,41 @@ fn section_header(label: &str, color: ratatui::prelude::Color) -> Line<'static> 
 }
 
 fn multiline_block(text: &str) -> Vec<String> {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(text) {
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(text) {
+        decode_embedded_json_strings(&mut value);
         return format_json_value(&value);
     }
 
     text.lines().map(ToString::to_string).collect()
+}
+
+fn decode_embedded_json_strings(value: &mut serde_json::Value) {
+    match value {
+        serde_json::Value::Array(items) => {
+            for item in items {
+                decode_embedded_json_strings(item);
+            }
+        }
+        serde_json::Value::Object(object) => {
+            for child in object.values_mut() {
+                decode_embedded_json_strings(child);
+            }
+        }
+        serde_json::Value::String(text) => {
+            let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(text) else {
+                return;
+            };
+            if !matches!(
+                parsed,
+                serde_json::Value::Array(_) | serde_json::Value::Object(_)
+            ) {
+                return;
+            }
+            decode_embedded_json_strings(&mut parsed);
+            *value = parsed;
+        }
+        _ => {}
+    }
 }
 
 fn llm_timeline_lines(items: &[LlmTimelineItem], palette: Palette) -> Vec<Line<'static>> {

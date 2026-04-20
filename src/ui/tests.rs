@@ -775,6 +775,72 @@ fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
 }
 
 #[test]
+fn llm_detail_lines_decode_embedded_json_prompt_strings() {
+    let snapshot = crate::domain::DashboardSnapshot {
+        services: Vec::new(),
+        overview: crate::domain::OverviewStats {
+            service_count: 0,
+            trace_count: 0,
+            error_span_count: 0,
+            log_count: 0,
+            metric_count: 0,
+            llm_count: 1,
+        },
+        traces: Vec::new(),
+        selected_trace: Vec::new(),
+        logs: Vec::new(),
+        metrics: Vec::new(),
+        llm: vec![LlmSummary {
+            trace_id: "trace-1".to_string(),
+            span_id: "span-1".to_string(),
+            started_at_unix_nano: 65_956_000_000_000,
+            service_name: "api".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            operation: "chat".to_string(),
+            span_kind: None,
+            session_id: None,
+            conversation_id: None,
+            prompt_preview: Some(
+                r#"[{"parts":[{"content":"{\"query\":\"red Nike size 12 men's shoes\"}","type":"text"}]}]"#
+                    .to_string(),
+            ),
+            output_preview: None,
+            tool_name: None,
+            tool_args: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cost: None,
+            latency_ms: None,
+            status: "STATUS_CODE_OK".to_string(),
+            raw_json: json!({}),
+        }],
+        llm_rollups: Vec::new(),
+        llm_sessions: Vec::new(),
+        llm_model_comparisons: Vec::new(),
+        llm_top_calls: Vec::new(),
+        selected_llm_timeline: Vec::new(),
+    };
+
+    let rendered = llm_detail_lines(
+        &snapshot,
+        &UiState::default(),
+        Palette::from_theme(Theme::Ember),
+    )
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>();
+
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains(r#""query": "red Nike size 12 men's shoes""#))
+    );
+    assert!(!rendered.iter().any(|line| line.contains(r#"\"query\""#)));
+}
+
+#[test]
 fn llm_timeline_panel_lines_show_timeline_steps() {
     let snapshot = crate::domain::DashboardSnapshot {
         services: Vec::new(),
