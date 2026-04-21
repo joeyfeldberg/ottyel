@@ -11,6 +11,7 @@ use crate::domain::{
 use super::{Palette, UiState, traces};
 
 const LLM_PREVIEW_LINE_LIMIT: usize = 8;
+const LLM_PREVIEW_WRAP_WIDTH_ESTIMATE: usize = 100;
 
 #[derive(Debug, Default)]
 pub(crate) struct TraceDetailLinesCache {
@@ -472,14 +473,6 @@ fn build_llm_detail_lines(
         }
     }
 
-    lines.push(Line::raw(""));
-    lines.push(section_header("normalized", palette.muted));
-    lines.extend(
-        format_json_value(&item.raw_json)
-            .into_iter()
-            .map(Line::from),
-    );
-
     lines
 }
 
@@ -612,9 +605,10 @@ fn truncated_block(
     muted: ratatui::prelude::Color,
 ) -> Vec<Line<'static>> {
     let lines = multiline_block(text);
-    if expanded || lines.len() <= line_limit {
+    let rows = estimated_wrapped_rows(&lines, LLM_PREVIEW_WRAP_WIDTH_ESTIMATE);
+    if expanded || rows.len() <= line_limit {
         let mut rendered = lines.into_iter().map(Line::from).collect::<Vec<_>>();
-        if expanded && rendered.len() > line_limit {
+        if expanded && rows.len() > line_limit {
             rendered.push(Line::from(Span::styled(
                 format!("press {toggle_key} to collapse"),
                 Style::default().fg(muted),
@@ -623,17 +617,32 @@ fn truncated_block(
         return rendered;
     }
 
-    let hidden_count = lines.len() - line_limit;
-    let mut rendered = lines
-        .into_iter()
-        .take(line_limit)
-        .map(Line::from)
-        .collect::<Vec<_>>();
-    rendered.push(Line::from(Span::styled(
+    let hidden_count = rows.len() - line_limit;
+    let mut rendered = vec![Line::from(Span::styled(
         format!("... {hidden_count} more lines (press {toggle_key} to expand)"),
         Style::default().fg(muted),
-    )));
+    ))];
+    rendered.extend(rows.into_iter().take(line_limit).map(Line::from));
     rendered
+}
+
+fn estimated_wrapped_rows(lines: &[String], wrap_width: usize) -> Vec<String> {
+    if wrap_width == 0 {
+        return lines.to_vec();
+    }
+
+    let mut rows = Vec::new();
+    for line in lines {
+        if line.is_empty() {
+            rows.push(String::new());
+            continue;
+        }
+        let chars = line.chars().collect::<Vec<_>>();
+        for chunk in chars.chunks(wrap_width) {
+            rows.push(chunk.iter().collect());
+        }
+    }
+    rows
 }
 
 fn format_json_value(value: &serde_json::Value) -> Vec<String> {
@@ -646,6 +655,20 @@ fn optional_number(value: Option<f64>, precision: usize) -> String {
     value
         .map(|number| format!("{number:.precision$}"))
         .unwrap_or_else(|| "-".to_string())
+}
+
+pub(crate) fn wrapped_line_count(lines: &[Line<'static>], viewport_width: usize) -> usize {
+    if viewport_width == 0 {
+        return lines.len();
+    }
+
+    lines
+        .iter()
+        .map(|line| {
+            let width = line.to_string().chars().count();
+            width.div_ceil(viewport_width).max(1)
+        })
+        .sum()
 }
 
 fn build_metric_detail_lines(

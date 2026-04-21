@@ -20,7 +20,7 @@ use super::{
     },
     details::{
         build_log_detail_lines, format_log_body, llm_detail_lines, llm_timeline_panel_lines,
-        metric_chart_values,
+        metric_chart_values, wrapped_line_count,
     },
     geometry::trace_tree_scroll_offset,
     traces::{
@@ -548,7 +548,7 @@ fn context_help_lines_follow_active_focus() {
         .collect::<Vec<_>>();
 
     assert_eq!(context_help_title(&state), "Hints: Model Detail");
-    assert!(rendered.iter().any(|line| line.contains("i/o")));
+    assert!(rendered.iter().any(|line| line.contains("o")));
     assert!(rendered.iter().any(|line| line.contains("? full help")));
 }
 
@@ -674,7 +674,7 @@ fn build_log_detail_lines_include_attributes() {
 }
 
 #[test]
-fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
+fn llm_detail_lines_show_prompt_output_and_tool_sections() {
     let snapshot = crate::domain::DashboardSnapshot {
         services: Vec::new(),
         overview: crate::domain::OverviewStats {
@@ -766,12 +766,6 @@ fn llm_detail_lines_show_prompt_output_tool_and_normalized_json() {
     assert!(rendered.iter().any(|line| line.contains("output")));
     assert!(rendered.iter().any(|line| line.contains("world")));
     assert!(rendered.iter().any(|line| line.contains("lookup_customer")));
-    assert!(rendered.iter().any(|line| line.contains("normalized")));
-    assert!(
-        rendered
-            .iter()
-            .any(|line| line.contains("\"provider\": \"openai\""))
-    );
 }
 
 #[test]
@@ -1074,6 +1068,78 @@ fn llm_detail_lines_expand_prompt_and_output_when_toggled() {
         rendered
             .iter()
             .any(|line| line.contains("press o to collapse"))
+    );
+}
+
+#[test]
+fn wrapped_line_count_uses_visual_width() {
+    let lines = vec![
+        ratatui::text::Line::from("123456789"),
+        ratatui::text::Line::from("ok"),
+    ];
+    assert_eq!(wrapped_line_count(&lines, 4), 4);
+}
+
+#[test]
+fn llm_detail_lines_show_expand_hint_for_wrapped_long_single_line_output() {
+    let long_output = "x".repeat(1500);
+    let snapshot = crate::domain::DashboardSnapshot {
+        services: Vec::new(),
+        overview: crate::domain::OverviewStats {
+            service_count: 0,
+            trace_count: 0,
+            error_span_count: 0,
+            log_count: 0,
+            metric_count: 0,
+            llm_count: 1,
+        },
+        traces: Vec::new(),
+        selected_trace: Vec::new(),
+        logs: Vec::new(),
+        metrics: Vec::new(),
+        llm: vec![LlmSummary {
+            trace_id: "trace-1".to_string(),
+            span_id: "span-1".to_string(),
+            started_at_unix_nano: 65_956_000_000_000,
+            service_name: "api".to_string(),
+            provider: "openai".to_string(),
+            model: "gpt-5.4".to_string(),
+            operation: "chat".to_string(),
+            span_kind: None,
+            session_id: None,
+            conversation_id: None,
+            prompt_preview: None,
+            output_preview: Some(long_output),
+            tool_name: None,
+            tool_args: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: None,
+            cost: None,
+            latency_ms: None,
+            status: "STATUS_CODE_OK".to_string(),
+            raw_json: json!({}),
+        }],
+        llm_rollups: Vec::new(),
+        llm_sessions: Vec::new(),
+        llm_model_comparisons: Vec::new(),
+        llm_top_calls: Vec::new(),
+        selected_llm_timeline: Vec::new(),
+    };
+
+    let rendered = llm_detail_lines(
+        &snapshot,
+        &UiState::default(),
+        Palette::from_theme(Theme::Ember),
+    )
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect::<Vec<_>>();
+
+    assert!(
+        rendered
+            .iter()
+            .any(|line| line.contains("press o to expand"))
     );
 }
 

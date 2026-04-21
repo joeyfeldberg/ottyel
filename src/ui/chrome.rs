@@ -391,7 +391,7 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
                 lines.push(Line::raw("model detail"));
                 lines.push(Line::raw("  j / k            scroll detail"));
                 lines.push(Line::raw("  l / right        focus timeline"));
-                lines.push(Line::raw("  i                expand or collapse prompt"));
+                lines.push(Line::raw("  i                collapse or expand prompt"));
                 lines.push(Line::raw("  o                expand or collapse output"));
                 lines.push(Line::raw("  esc              back to llm inspector"));
                 lines.push(Line::raw("  h / left         back to llm inspector"));
@@ -526,7 +526,7 @@ pub(crate) fn context_help_lines(state: &UiState) -> Vec<Line<'static>> {
                 lines.push(Line::raw("Inspect prompt/output:"));
                 lines.push(Line::raw("  j/k     scroll"));
                 lines.push(Line::raw("  l       timeline"));
-                lines.push(Line::raw("  i/o     expand blocks"));
+                lines.push(Line::raw("  i/o     toggle blocks"));
                 lines.push(Line::raw("  h/esc   feed"));
             }
             LlmFocus::Timeline => {

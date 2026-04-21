@@ -271,9 +271,13 @@ pub fn sync_detail_scroll(
     if Tab::ALL[state.active_tab] == Tab::Llm {
         let llm_detail_sections =
             geometry::llm_detail_sections(geometry::llm_detail_area(body, state.llm_split_pct));
+        let llm_detail_lines = details::cached_llm_detail_lines(&cache.llm_detail);
         state.llm_detail_scroll = geometry::clamp_scroll(
             state.llm_detail_scroll,
-            details::cached_llm_detail_lines(&cache.llm_detail).len(),
+            details::wrapped_line_count(
+                llm_detail_lines,
+                geometry::detail_viewport_width(llm_detail_sections[0]),
+            ),
             geometry::detail_viewport_height(llm_detail_sections[0]),
         );
         state.llm_timeline_scroll = geometry::clamp_scroll(

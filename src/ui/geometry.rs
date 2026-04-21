@@ -117,6 +117,10 @@ pub(crate) fn detail_viewport_height(area: Rect) -> usize {
     area.height.saturating_sub(2) as usize
 }
 
+pub(crate) fn detail_viewport_width(area: Rect) -> usize {
+    area.width.saturating_sub(2) as usize
+}
+
 pub(crate) fn table_viewport_height(area: Rect) -> usize {
     area.height.saturating_sub(3) as usize
 }
