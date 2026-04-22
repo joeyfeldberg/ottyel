@@ -2,7 +2,7 @@ use ratatui::{
     Frame,
     layout::{Alignment, Constraint, Rect},
     prelude::{Modifier, Style},
-    text::{Line, Span},
+    text::Line,
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, Wrap},
 };
 
@@ -331,34 +331,58 @@ pub(crate) fn render_llm(
     }
 }
 
-fn llm_model_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Paragraph<'static> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "model",
+fn llm_model_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Table<'static> {
+    let mut rows: Vec<Row<'static>> = snapshot
+        .llm_model_comparisons
+        .iter()
+        .take(4)
+        .map(|item| {
+            let model_label = llm_model_label(&item.provider, &item.model);
+            Row::new(vec![
+                Cell::from(truncate(&model_label, 28)),
+                Cell::from(format!("{:>5}", item.call_count)),
+                Cell::from(format!("{:>3}", item.error_count)),
+                Cell::from(format!("{:>7}", compact_u64(item.total_tokens))),
+                Cell::from(format!("{:>6}", optional_ms(item.avg_latency_ms))),
+                Cell::from(format!("{:>8}", optional_cost(item.cost))),
+            ])
+            .style(Style::default().fg(palette.foreground))
+        })
+        .collect();
+
+    if rows.is_empty() {
+        rows.push(
+            Row::new(vec![
+                Cell::from("No model comparison data yet."),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+            ])
+            .style(Style::default().fg(palette.foreground)),
+        );
+    }
+
+    Table::new(
+        rows,
+        [
+            Constraint::Min(24),
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Length(7),
+            Constraint::Length(6),
+            Constraint::Length(8),
+        ],
+    )
+    .header(
+        Row::new(vec!["model", "calls", "err", "tokens", "avg", "cost"]).style(
             Style::default()
                 .fg(palette.muted)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(" calls err tokens avg cost"),
-    ])];
-
-    for item in snapshot.llm_model_comparisons.iter().take(4) {
-        lines.push(Line::from(format!(
-            "{} c={} e={} tok={} avg={} cost={}",
-            truncate(&format!("{}/{}", item.provider, item.model), 20),
-            item.call_count,
-            item.error_count,
-            compact_u64(item.total_tokens),
-            optional_ms(item.avg_latency_ms),
-            optional_cost(item.cost)
-        )));
-    }
-
-    if lines.len() == 1 {
-        lines.push(Line::raw("No model comparison data yet."));
-    }
-
-    Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+    )
+    .block(
         Block::default()
             .title("LLM Models")
             .borders(Borders::ALL)
@@ -366,17 +390,8 @@ fn llm_model_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Paragraph<
     )
 }
 
-fn llm_top_call_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Paragraph<'static> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "rank",
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" model tokens cost latency"),
-    ])];
-
+fn llm_top_call_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Table<'static> {
+    let mut rows: Vec<Row<'static>> = Vec::new();
     for kind in [LlmTopCallKind::Tokens, LlmTopCallKind::Cost] {
         for item in snapshot
             .llm_top_calls
@@ -384,22 +399,51 @@ fn llm_top_call_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Paragra
             .filter(|item| item.kind == kind)
             .take(2)
         {
-            lines.push(Line::from(format!(
-                "{} {} tok={} cost={} lat={}",
-                kind.label(),
-                truncate(&item.model, 18),
-                compact_u64(item.total_tokens),
-                optional_cost(item.cost),
-                optional_ms(item.latency_ms)
-            )));
+            let model_label = llm_model_label(&item.provider, &item.model);
+            rows.push(
+                Row::new(vec![
+                    Cell::from(kind.label()),
+                    Cell::from(truncate(&model_label, 28)),
+                    Cell::from(format!("{:>7}", compact_u64(item.total_tokens))),
+                    Cell::from(format!("{:>8}", optional_cost(item.cost))),
+                    Cell::from(format!("{:>6}", optional_ms(item.latency_ms))),
+                ])
+                .style(Style::default().fg(palette.foreground)),
+            );
         }
     }
 
-    if lines.len() == 1 {
-        lines.push(Line::raw("No top call data yet."));
+    if rows.is_empty() {
+        rows.push(
+            Row::new(vec![
+                Cell::from("No top call data yet."),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+            ])
+            .style(Style::default().fg(palette.foreground)),
+        );
     }
 
-    Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+    Table::new(
+        rows,
+        [
+            Constraint::Length(6),
+            Constraint::Min(24),
+            Constraint::Length(7),
+            Constraint::Length(8),
+            Constraint::Length(6),
+        ],
+    )
+    .header(
+        Row::new(vec!["rank", "model", "tokens", "cost", "lat"]).style(
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(
         Block::default()
             .title("Top LLM Calls")
             .borders(Borders::ALL)
@@ -407,61 +451,59 @@ fn llm_top_call_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Paragra
     )
 }
 
-fn llm_session_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Paragraph<'static> {
-    let mut lines = vec![Line::from(vec![
-        Span::styled(
-            "id",
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "calls",
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "err",
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "tokens",
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(" "),
-        Span::styled(
-            "span",
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-    ])];
+fn llm_session_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Table<'static> {
+    let mut rows: Vec<Row<'static>> = snapshot
+        .llm_sessions
+        .iter()
+        .take(4)
+        .map(|session| {
+            let id_label = format!(
+                "{}:{}",
+                session.correlation_kind,
+                truncate(&session.correlation_id, 16)
+            );
+            Row::new(vec![
+                Cell::from(id_label),
+                Cell::from(format!("{:>5}", session.call_count)),
+                Cell::from(format!("{:>3}", session.error_count)),
+                Cell::from(format!("{:>7}", compact_u64(session.total_tokens))),
+                Cell::from(format!("{:>6}", optional_ms(Some(session.duration_ms)))),
+            ])
+            .style(Style::default().fg(palette.foreground))
+        })
+        .collect();
 
-    for session in snapshot.llm_sessions.iter().take(4) {
-        lines.push(Line::from(format!(
-            "{}:{} c={} e={} tok={} dur={}",
-            session.correlation_kind,
-            truncate(&session.correlation_id, 18),
-            session.call_count,
-            session.error_count,
-            compact_u64(session.total_tokens),
-            optional_ms(Some(session.duration_ms))
-        )));
+    if rows.is_empty() {
+        rows.push(
+            Row::new(vec![
+                Cell::from("No session/conversation ids found."),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+                Cell::from(""),
+            ])
+            .style(Style::default().fg(palette.foreground)),
+        );
     }
 
-    if lines.len() == 1 {
-        lines.push(Line::raw("No session/conversation ids found."));
-    }
-
-    Paragraph::new(lines).wrap(Wrap { trim: true }).block(
+    Table::new(
+        rows,
+        [
+            Constraint::Min(24),
+            Constraint::Length(5),
+            Constraint::Length(3),
+            Constraint::Length(7),
+            Constraint::Length(6),
+        ],
+    )
+    .header(
+        Row::new(vec!["id", "calls", "err", "tokens", "span"]).style(
+            Style::default()
+                .fg(palette.muted)
+                .add_modifier(Modifier::BOLD),
+        ),
+    )
+    .block(
         Block::default()
             .title("LLM Sessions")
             .borders(Borders::ALL)
@@ -489,4 +531,22 @@ fn optional_cost(value: Option<f64>) -> String {
     value
         .map(|value| format!("${value:.4}"))
         .unwrap_or_else(|| "-".to_string())
+}
+
+fn llm_model_label(provider: &str, model: &str) -> String {
+    let trimmed = model.trim();
+    if trimmed.is_empty() {
+        return provider.to_string();
+    }
+
+    let provider_prefix = format!("{provider}/");
+    if trimmed.starts_with(&provider_prefix) {
+        return trimmed.to_string();
+    }
+
+    if trimmed.contains('/') {
+        return trimmed.to_string();
+    }
+
+    format!("{provider}/{trimmed}")
 }
