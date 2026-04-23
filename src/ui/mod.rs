@@ -226,7 +226,7 @@ pub fn sync_detail_scroll(
         );
     }
     let [llm_left, _] = geometry::llm_sections(body, state.llm_split_pct);
-    let [_, _, _, llm_feed] = geometry::llm_left_sections(llm_left);
+    let [_, _, llm_feed] = geometry::llm_left_sections(llm_left);
     state.llm_feed_scroll = geometry::clamp_window_offset(
         state.llm_feed_scroll,
         snapshot.llm.len(),

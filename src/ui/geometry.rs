@@ -72,17 +72,16 @@ pub(crate) fn llm_sections(area: Rect, left_pct: u16) -> [Rect; 2] {
     [split[0], split[1]]
 }
 
-pub(crate) fn llm_left_sections(area: Rect) -> [Rect; 4] {
+pub(crate) fn llm_left_sections(area: Rect) -> [Rect; 3] {
     let split = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(8),
             Constraint::Length(8),
             Constraint::Length(7),
             Constraint::Min(10),
         ])
         .split(area);
-    [split[0], split[1], split[2], split[3]]
+    [split[0], split[1], split[2]]
 }
 
 pub(crate) fn trace_tree_area(body: Rect, top_pct: u16) -> Rect {

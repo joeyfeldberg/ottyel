@@ -6,7 +6,7 @@ use ratatui::{
     widgets::{Block, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, Wrap},
 };
 
-use crate::domain::{DashboardSnapshot, LlmTopCallKind, truncate};
+use crate::domain::{DashboardSnapshot, truncate};
 
 use super::{LlmFocus, Palette, PaneFocus, UiState, chrome, details, geometry};
 
@@ -218,7 +218,7 @@ pub(crate) fn render_llm(
         .iter()
         .enumerate()
         .skip(state.llm_feed_scroll)
-        .take(geometry::table_viewport_height(left[3]))
+        .take(geometry::table_viewport_height(left[2]))
         .map(|(idx, item)| {
             let style = if idx == state.selected_llm {
                 Style::default().fg(palette.background).bg(palette.warning)
@@ -274,9 +274,8 @@ pub(crate) fn render_llm(
             .border_style(Style::default().fg(feed_border)),
     );
     frame.render_widget(llm_model_panel(snapshot, palette), left[0]);
-    frame.render_widget(llm_top_call_panel(snapshot, palette), left[1]);
-    frame.render_widget(llm_session_panel(snapshot, palette), left[2]);
-    frame.render_widget(table, left[3]);
+    frame.render_widget(llm_session_panel(snapshot, palette), left[1]);
+    frame.render_widget(table, left[2]);
 
     frame.render_widget(Clear, right[0]);
     frame.render_widget(
@@ -387,67 +386,6 @@ fn llm_model_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Table<'sta
             .title("LLM Models")
             .borders(Borders::ALL)
             .border_style(Style::default().fg(palette.accent)),
-    )
-}
-
-fn llm_top_call_panel(snapshot: &DashboardSnapshot, palette: Palette) -> Table<'static> {
-    let mut rows: Vec<Row<'static>> = Vec::new();
-    for kind in [LlmTopCallKind::Tokens, LlmTopCallKind::Cost] {
-        for item in snapshot
-            .llm_top_calls
-            .iter()
-            .filter(|item| item.kind == kind)
-            .take(2)
-        {
-            let model_label = llm_model_label(&item.provider, &item.model);
-            rows.push(
-                Row::new(vec![
-                    Cell::from(kind.label()),
-                    Cell::from(truncate(&model_label, 28)),
-                    Cell::from(format!("{:>7}", compact_u64(item.total_tokens))),
-                    Cell::from(format!("{:>8}", optional_cost(item.cost))),
-                    Cell::from(format!("{:>6}", optional_ms(item.latency_ms))),
-                ])
-                .style(Style::default().fg(palette.foreground)),
-            );
-        }
-    }
-
-    if rows.is_empty() {
-        rows.push(
-            Row::new(vec![
-                Cell::from("No top call data yet."),
-                Cell::from(""),
-                Cell::from(""),
-                Cell::from(""),
-                Cell::from(""),
-            ])
-            .style(Style::default().fg(palette.foreground)),
-        );
-    }
-
-    Table::new(
-        rows,
-        [
-            Constraint::Length(6),
-            Constraint::Min(24),
-            Constraint::Length(7),
-            Constraint::Length(8),
-            Constraint::Length(6),
-        ],
-    )
-    .header(
-        Row::new(vec!["rank", "model", "tokens", "cost", "lat"]).style(
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(Modifier::BOLD),
-        ),
-    )
-    .block(
-        Block::default()
-            .title("Top LLM Calls")
-            .borders(Borders::ALL)
-            .border_style(Style::default().fg(palette.warning)),
     )
 }
 

@@ -538,7 +538,7 @@ fn handle_llm_click(
 ) -> InputOutcome {
     let [left_area, detail_area] = crate::ui::geometry::llm_sections(body, state.llm_split_pct);
     let [model_detail_area, timeline_area] = crate::ui::geometry::llm_detail_sections(detail_area);
-    let [_, _, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
+    let [_, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
     if crate::ui::geometry::contains(model_detail_area, column, row) {
         state.llm_focus = LlmFocus::Detail;
         return InputOutcome::None;
@@ -675,7 +675,7 @@ fn handle_llm_scroll(
 ) -> InputOutcome {
     let [left_area, detail_area] = crate::ui::geometry::llm_sections(body, state.llm_split_pct);
     let [model_detail_area, timeline_area] = crate::ui::geometry::llm_detail_sections(detail_area);
-    let [_, _, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
+    let [_, _, feed_area] = crate::ui::geometry::llm_left_sections(left_area);
     if crate::ui::geometry::contains(model_detail_area, column, row) {
         state.llm_focus = LlmFocus::Detail;
         scroll_detail(delta as i16, state);
