@@ -457,7 +457,7 @@ impl Store {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let mut sql = String::from(
             r#"
-            SELECT llm_spans.trace_id, llm_spans.span_id, spans.start_time_unix_nano, llm_spans.service_name, provider, model, operation,
+            SELECT llm_spans.trace_id, llm_spans.span_id, spans.start_time_unix_nano, llm_spans.service_name, spans.span_name, provider, model, operation,
                    input_tokens, output_tokens, total_tokens, cost, latency_ms, status, raw_json
             FROM llm_spans
             INNER JOIN spans ON spans.span_id = llm_spans.span_id
@@ -476,7 +476,7 @@ impl Store {
         if let Some(query) = search_query.filter(|query| !query.is_empty()) {
             let pattern = like_pattern(query);
             where_clauses.push(format!(
-                "(llm_spans.trace_id LIKE '{pattern}' ESCAPE '\\' OR llm_spans.span_id LIKE '{pattern}' ESCAPE '\\' OR llm_spans.service_name LIKE '{pattern}' ESCAPE '\\' OR provider LIKE '{pattern}' ESCAPE '\\' OR model LIKE '{pattern}' ESCAPE '\\' OR operation LIKE '{pattern}' ESCAPE '\\' OR raw_json LIKE '{pattern}' ESCAPE '\\')"
+                "(llm_spans.trace_id LIKE '{pattern}' ESCAPE '\\' OR llm_spans.span_id LIKE '{pattern}' ESCAPE '\\' OR llm_spans.service_name LIKE '{pattern}' ESCAPE '\\' OR spans.span_name LIKE '{pattern}' ESCAPE '\\' OR provider LIKE '{pattern}' ESCAPE '\\' OR model LIKE '{pattern}' ESCAPE '\\' OR operation LIKE '{pattern}' ESCAPE '\\' OR raw_json LIKE '{pattern}' ESCAPE '\\')"
             ));
         }
         if let Some(cursor) = &page.cursor {
@@ -500,9 +500,10 @@ impl Store {
                 span_id: row.get(1)?,
                 started_at_unix_nano: row.get(2)?,
                 service_name: row.get(3)?,
-                provider: row.get(4)?,
-                model: row.get(5)?,
-                operation: row.get(6)?,
+                span_name: row.get(4)?,
+                provider: row.get(5)?,
+                model: row.get(6)?,
+                operation: row.get(7)?,
                 span_kind: None,
                 session_id: None,
                 conversation_id: None,
@@ -510,13 +511,13 @@ impl Store {
                 output_preview: None,
                 tool_name: None,
                 tool_args: None,
-                input_tokens: row.get(7)?,
-                output_tokens: row.get(8)?,
-                total_tokens: row.get(9)?,
-                cost: row.get(10)?,
-                latency_ms: row.get(11)?,
-                status: row.get(12)?,
-                raw_json: serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(13)?)
+                input_tokens: row.get(8)?,
+                output_tokens: row.get(9)?,
+                total_tokens: row.get(10)?,
+                cost: row.get(11)?,
+                latency_ms: row.get(12)?,
+                status: row.get(13)?,
+                raw_json: serde_json::from_str::<serde_json::Value>(&row.get::<_, String>(14)?)
                     .unwrap_or_default(),
             })
         })?;

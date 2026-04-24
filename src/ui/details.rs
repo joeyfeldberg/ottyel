@@ -390,6 +390,7 @@ fn build_llm_detail_lines(
                 .fg(palette.foreground)
                 .add_modifier(Modifier::BOLD),
         )),
+        Line::from(format!("prompt {}", llm_prompt_name(&item.span_name))),
         Line::from(format!("service {}", item.service_name)),
         Line::from(format!("trace {}", item.trace_id)),
         Line::from(format!("span {}", item.span_id)),
@@ -474,6 +475,16 @@ fn build_llm_detail_lines(
     }
 
     lines
+}
+
+fn llm_prompt_name(span_name: &str) -> String {
+    let trimmed = span_name.trim();
+    if let Some(prompt) = trimmed.strip_prefix("Prompt: ").map(str::trim) {
+        if !prompt.is_empty() {
+            return prompt.to_string();
+        }
+    }
+    trimmed.to_string()
 }
 
 fn section_header(label: &str, color: ratatui::prelude::Color) -> Line<'static> {

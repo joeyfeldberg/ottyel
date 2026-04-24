@@ -115,6 +115,7 @@ pub struct LlmSummary {
     pub span_id: String,
     pub started_at_unix_nano: i64,
     pub service_name: String,
+    pub span_name: String,
     pub provider: String,
     pub model: String,
     pub operation: String,
@@ -866,6 +867,74 @@ mod tests {
                 .is_some_and(|value| value.contains("customer_id"))
         );
         assert_eq!(llm.latency_ms, Some(1609.3));
+    }
+
+    #[test]
+    fn llm_attributes_mixed_openinference_and_gen_ai_prefer_primary_keys() {
+        let attrs = AttributeMap::from([
+            ("llm.provider".to_string(), json!("openai")),
+            ("gen_ai.provider.name".to_string(), json!("anthropic")),
+            ("llm.model_name".to_string(), json!("gpt-4.1-mini")),
+            (
+                "gen_ai.request.model".to_string(),
+                json!("claude-3-5-sonnet"),
+            ),
+            ("conversation.id".to_string(), json!("conv-openinference")),
+            ("gen_ai.conversation.id".to_string(), json!("conv-genai")),
+            ("llm.token_count.prompt".to_string(), json!(100)),
+            ("llm.token_count.completion".to_string(), json!(20)),
+            ("gen_ai.usage.input_tokens".to_string(), json!(999)),
+            ("gen_ai.usage.output_tokens".to_string(), json!(999)),
+            ("input.value".to_string(), json!("primary prompt")),
+            (
+                "gen_ai.prompt.0.content".to_string(),
+                json!("fallback prompt"),
+            ),
+            ("output.value".to_string(), json!("primary output")),
+            (
+                "gen_ai.completion.0.content".to_string(),
+                json!("fallback output"),
+            ),
+        ]);
+
+        let llm = extract_llm_attributes(&attrs, Some("STATUS_CODE_OK"), Some(12.5)).unwrap();
+
+        assert_eq!(llm.provider.as_deref(), Some("openai"));
+        assert_eq!(llm.model.as_deref(), Some("gpt-4.1-mini"));
+        assert_eq!(llm.conversation_id.as_deref(), Some("conv-openinference"));
+        assert_eq!(llm.input_tokens, Some(100));
+        assert_eq!(llm.output_tokens, Some(20));
+        assert_eq!(llm.total_tokens, Some(120));
+        assert_eq!(llm.prompt_preview.as_deref(), Some("primary prompt"));
+        assert_eq!(llm.output_preview.as_deref(), Some("primary output"));
+    }
+
+    #[test]
+    fn llm_attributes_mixed_openinference_and_gen_ai_use_gen_ai_fallbacks() {
+        let attrs = AttributeMap::from([
+            ("gen_ai.provider.name".to_string(), json!("openai")),
+            ("gen_ai.request.model".to_string(), json!("gpt-4o-mini")),
+            ("gen_ai.operation.name".to_string(), json!("chat")),
+            ("gen_ai.thread.id".to_string(), json!("thread-42")),
+            ("gen_ai.usage.total_tokens".to_string(), json!(77)),
+            (
+                "gen_ai.prompt.0.content".to_string(),
+                json!("fallback prompt"),
+            ),
+            (
+                "gen_ai.completion.0.content".to_string(),
+                json!("fallback output"),
+            ),
+        ]);
+
+        let llm = extract_llm_attributes(&attrs, Some("STATUS_CODE_UNSET"), Some(8.0)).unwrap();
+
+        assert_eq!(llm.provider.as_deref(), Some("openai"));
+        assert_eq!(llm.model.as_deref(), Some("gpt-4o-mini"));
+        assert_eq!(llm.conversation_id.as_deref(), Some("thread-42"));
+        assert_eq!(llm.total_tokens, Some(77));
+        assert_eq!(llm.prompt_preview.as_deref(), Some("fallback prompt"));
+        assert_eq!(llm.output_preview.as_deref(), Some("fallback output"));
     }
 
     #[test]

@@ -437,6 +437,57 @@ fn llm_sessions_group_when_conversation_attrs_exist() {
 }
 
 #[test]
+fn llm_rollups_and_sessions_handle_mixed_openinference_and_gen_ai_payloads() {
+    let tempdir = tempdir().unwrap();
+    let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+    let now = now_nanos();
+
+    store.ingest_traces(trace_request(now)).unwrap();
+    store
+        .ingest_traces(gen_ai_trace_request(
+            now + 10_000_000,
+            [9, 8, 7, 6, 5, 4, 3, 2, 10, 11, 12, 13, 14, 15, 16, 17],
+            [9, 8, 7, 6, 5, 4, 3, 2],
+            "gpt-4.1-mini",
+            "conv-genai",
+            30,
+            0.006,
+        ))
+        .unwrap();
+
+    let rollups = store.llm_rollups(None, None, None).unwrap();
+    let provider = rollups
+        .iter()
+        .find(|item| item.dimension == LlmRollupDimension::Provider && item.label == "openai")
+        .unwrap();
+    assert_eq!(provider.call_count, 2);
+    assert_eq!(provider.total_tokens, 42);
+    assert_eq!(provider.cost, Some(0.008));
+
+    let gen_ai_model = rollups
+        .iter()
+        .find(|item| item.dimension == LlmRollupDimension::Model && item.label == "gpt-4.1-mini")
+        .unwrap();
+    assert_eq!(gen_ai_model.call_count, 1);
+    assert_eq!(gen_ai_model.total_tokens, 30);
+
+    let sessions = store.llm_sessions(None, None, None).unwrap();
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.correlation_kind == "conversation"
+                && session.correlation_id == "conv-test")
+    );
+    assert!(
+        sessions
+            .iter()
+            .any(|session| session.correlation_kind == "conversation"
+                && session.correlation_id == "conv-genai"
+                && session.total_tokens == 30)
+    );
+}
+
+#[test]
 fn llm_timeline_loads_only_selected_subtree() {
     let tempdir = tempdir().unwrap();
     let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
@@ -708,6 +759,62 @@ fn trace_request_variant(
                         dropped_attributes_count: 0,
                         flags: 0,
                     }],
+                    dropped_links_count: 0,
+                    status: Some(Status {
+                        message: String::new(),
+                        code: 1,
+                    }),
+                    flags: 0,
+                }],
+            }],
+        }],
+    }
+}
+
+fn gen_ai_trace_request(
+    now: i64,
+    trace_id: [u8; 16],
+    span_id: [u8; 8],
+    model: &str,
+    conversation_id: &str,
+    total_tokens: i64,
+    cost: f64,
+) -> ExportTraceServiceRequest {
+    let now = now as u64;
+    ExportTraceServiceRequest {
+        resource_spans: vec![ResourceSpans {
+            resource: Some(Resource {
+                attributes: vec![string_attr("service.name", "api")],
+                dropped_attributes_count: 0,
+                entity_refs: Vec::new(),
+            }),
+            schema_url: String::new(),
+            scope_spans: vec![ScopeSpans {
+                scope: Some(InstrumentationScope::default()),
+                schema_url: String::new(),
+                spans: vec![Span {
+                    trace_id: trace_id.to_vec(),
+                    span_id: span_id.to_vec(),
+                    parent_span_id: vec![],
+                    trace_state: String::new(),
+                    name: "chat.completion.gen_ai".to_string(),
+                    kind: span::SpanKind::Server as i32,
+                    start_time_unix_nano: now,
+                    end_time_unix_nano: now + 3_000_000,
+                    attributes: vec![
+                        string_attr("gen_ai.provider.name", "openai"),
+                        string_attr("gen_ai.request.model", model),
+                        string_attr("gen_ai.operation.name", "chat"),
+                        string_attr("gen_ai.conversation.id", conversation_id),
+                        string_attr("gen_ai.prompt.0.content", "hello"),
+                        string_attr("gen_ai.completion.0.content", "world"),
+                        int_attr("gen_ai.usage.total_tokens", total_tokens),
+                        double_attr("gen_ai.usage.cost", cost),
+                    ],
+                    dropped_attributes_count: 0,
+                    events: Vec::new(),
+                    dropped_events_count: 0,
+                    links: Vec::new(),
                     dropped_links_count: 0,
                     status: Some(Status {
                         message: String::new(),

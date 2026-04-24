@@ -212,6 +212,14 @@ pub(crate) fn render_llm(
     } else {
         palette.muted
     };
+    let time_col_width =
+        if snapshot.llm.iter().any(|item| {
+            super::traces::format_machine_local_time(item.started_at_unix_nano).len() > 8
+        }) {
+            19
+        } else {
+            8
+        };
 
     let rows: Vec<Row<'_>> = snapshot
         .llm
@@ -229,10 +237,10 @@ pub(crate) fn render_llm(
                 Cell::from(super::traces::format_machine_local_time(
                     item.started_at_unix_nano,
                 )),
-                Cell::from(truncate(&item.service_name, 12)),
+                Cell::from(truncate(&llm_prompt_name(&item.span_name), 20)),
                 Cell::from(truncate(&item.provider, 10)),
-                Cell::from(truncate(&item.model, 16)),
-                Cell::from(truncate(&item.operation, 18)),
+                Cell::from(truncate(&item.model, 14)),
+                Cell::from(truncate(&item.operation, 14)),
                 Cell::from(item.total_tokens.unwrap_or_default().to_string()),
                 Cell::from(format!("{:.1}", item.latency_ms.unwrap_or_default())),
             ])
@@ -242,19 +250,19 @@ pub(crate) fn render_llm(
     let table = Table::new(
         rows,
         [
-            Constraint::Length(19),
-            Constraint::Length(12),
+            Constraint::Length(time_col_width),
+            Constraint::Length(20),
             Constraint::Length(10),
-            Constraint::Length(16),
-            Constraint::Length(18),
-            Constraint::Length(10),
+            Constraint::Length(14),
+            Constraint::Length(14),
+            Constraint::Length(8),
             Constraint::Length(8),
         ],
     )
     .header(
         Row::new(vec![
             "time",
-            "service",
+            "prompt",
             "provider",
             "model",
             "operation",
@@ -487,4 +495,14 @@ fn llm_model_label(provider: &str, model: &str) -> String {
     }
 
     format!("{provider}/{trimmed}")
+}
+
+fn llm_prompt_name(span_name: &str) -> String {
+    let trimmed = span_name.trim();
+    if let Some(prompt) = trimmed.strip_prefix("Prompt: ").map(str::trim) {
+        if !prompt.is_empty() {
+            return prompt.to_string();
+        }
+    }
+    trimmed.to_string()
 }

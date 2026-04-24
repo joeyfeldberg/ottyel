@@ -694,6 +694,7 @@ fn llm_detail_lines_show_prompt_output_and_tool_sections() {
             span_id: "span-1".to_string(),
             started_at_unix_nano: 65_956_000_000_000,
             service_name: "api".to_string(),
+            span_name: "Prompt: unit test".to_string(),
             provider: "openai".to_string(),
             model: "gpt-5.4".to_string(),
             operation: "chat".to_string(),
@@ -761,6 +762,12 @@ fn llm_detail_lines_show_prompt_output_and_tool_sections() {
     assert!(
         rendered
             .iter()
+            .any(|line| line.contains("prompt unit test"))
+    );
+    assert!(rendered.iter().any(|line| line.contains("service api")));
+    assert!(
+        rendered
+            .iter()
             .any(|line| line.contains("\"prompt\": \"hello\""))
     );
     assert!(rendered.iter().any(|line| line.contains("output")));
@@ -789,6 +796,7 @@ fn llm_detail_lines_decode_embedded_json_prompt_strings() {
             span_id: "span-1".to_string(),
             started_at_unix_nano: 65_956_000_000_000,
             service_name: "api".to_string(),
+            span_name: "Prompt: unit test".to_string(),
             provider: "openai".to_string(),
             model: "gpt-5.4".to_string(),
             operation: "chat".to_string(),
@@ -855,6 +863,7 @@ fn llm_timeline_panel_lines_show_timeline_steps() {
             span_id: "span-1".to_string(),
             started_at_unix_nano: 65_956_000_000_000,
             service_name: "api".to_string(),
+            span_name: "Prompt: unit test".to_string(),
             provider: "openai".to_string(),
             model: "gpt-5.4".to_string(),
             operation: "chat".to_string(),
@@ -943,6 +952,7 @@ fn llm_detail_lines_truncate_prompt_and_output_by_default() {
             span_id: "span-1".to_string(),
             started_at_unix_nano: 65_956_000_000_000,
             service_name: "api".to_string(),
+            span_name: "Prompt: unit test".to_string(),
             provider: "openai".to_string(),
             model: "gpt-5.4".to_string(),
             operation: "chat".to_string(),
@@ -1022,6 +1032,7 @@ fn llm_detail_lines_expand_prompt_and_output_when_toggled() {
             span_id: "span-1".to_string(),
             started_at_unix_nano: 65_956_000_000_000,
             service_name: "api".to_string(),
+            span_name: "Prompt: unit test".to_string(),
             provider: "openai".to_string(),
             model: "gpt-5.4".to_string(),
             operation: "chat".to_string(),
@@ -1102,6 +1113,7 @@ fn llm_detail_lines_show_expand_hint_for_wrapped_long_single_line_output() {
             span_id: "span-1".to_string(),
             started_at_unix_nano: 65_956_000_000_000,
             service_name: "api".to_string(),
+            span_name: "Prompt: unit test".to_string(),
             provider: "openai".to_string(),
             model: "gpt-5.4".to_string(),
             operation: "chat".to_string(),
