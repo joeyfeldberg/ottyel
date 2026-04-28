@@ -1,6 +1,6 @@
 mod input;
 
-use std::{io, time::Duration};
+use std::{cmp::Ordering, io, time::Duration};
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -22,7 +22,7 @@ use crate::{
     preferences::UserPreferences,
     query::{QueryFilters, QueryService},
     store::Store,
-    ui::{RenderCache, Tab, TraceViewMode, UiState},
+    ui::{LlmSortMode, RenderCache, Tab, TraceViewMode, UiState},
 };
 use input::InputOutcome;
 
@@ -164,7 +164,7 @@ async fn terminal_loop(
     let mut saved_preferences = UserPreferences::from_state(&state);
     refresh_detail_state(
         query,
-        &state,
+        &mut state,
         &mut snapshot,
         &mut trace_detail_cache,
         &llm_timeline_cache,
@@ -221,10 +221,24 @@ async fn terminal_loop(
                     refresh_in_flight = false;
                     let current_filters = input::filters(&state, &snapshot.services);
                     if current_filters == result.filters {
+                        let selected_llm_span_id = snapshot
+                            .llm
+                            .get(state.selected_llm)
+                            .map(|item| item.span_id.clone());
                         snapshot = result.snapshot?;
+                        if let Some(span_id) = selected_llm_span_id {
+                            if let Some(index) =
+                                snapshot.llm.iter().position(|item| item.span_id == span_id)
+                            {
+                                state.selected_llm = index;
+                            } else {
+                                state.selected_llm =
+                                    state.selected_llm.min(snapshot.llm.len().saturating_sub(1));
+                            }
+                        }
                         refresh_detail_state(
                             query,
-                            &state,
+                            &mut state,
                             &mut snapshot,
                             &mut trace_detail_cache,
                             &llm_timeline_cache,
@@ -262,7 +276,7 @@ async fn terminal_loop(
                         let changed = apply_input_outcome(
                             outcome,
                             query,
-                            &state,
+                            &mut state,
                             &mut snapshot,
                             &mut trace_detail_cache,
                             &llm_timeline_cache,
@@ -386,7 +400,7 @@ fn persist_preferences_if_changed(state: &UiState, saved_preferences: &mut UserP
 fn apply_input_outcome(
     outcome: InputOutcome,
     query: &QueryService,
-    state: &UiState,
+    state: &mut UiState,
     snapshot: &mut DashboardSnapshot,
     trace_detail_cache: &mut TraceDetailCache,
     llm_timeline_cache: &LlmTimelineCache,
@@ -404,7 +418,19 @@ fn apply_input_outcome(
             Ok(true)
         }
         InputOutcome::RefreshSnapshot => {
+            let selected_llm_span_id = snapshot
+                .llm
+                .get(state.selected_llm)
+                .map(|item| item.span_id.clone());
             *snapshot = query.snapshot(&input::filters(state, &snapshot.services))?;
+            if let Some(span_id) = selected_llm_span_id {
+                if let Some(index) = snapshot.llm.iter().position(|item| item.span_id == span_id) {
+                    state.selected_llm = index;
+                } else {
+                    state.selected_llm =
+                        state.selected_llm.min(snapshot.llm.len().saturating_sub(1));
+                }
+            }
             refresh_detail_state(
                 query,
                 state,
@@ -419,11 +445,13 @@ fn apply_input_outcome(
 }
 fn refresh_detail_state(
     query: &QueryService,
-    state: &UiState,
+    state: &mut UiState,
     snapshot: &mut DashboardSnapshot,
     trace_detail_cache: &mut TraceDetailCache,
     llm_timeline_cache: &LlmTimelineCache,
 ) -> Result<()> {
+    sort_llm_rows(state, snapshot);
+
     if Tab::ALL[state.active_tab] == Tab::Traces && state.trace_view_mode == TraceViewMode::Detail {
         let filters = input::filters(state, &snapshot.services);
         if let Some(trace) = snapshot.traces.get(state.selected_trace) {
@@ -444,6 +472,65 @@ fn refresh_detail_state(
     }
     sync_llm_timeline_from_cache(state, snapshot, llm_timeline_cache);
     Ok(())
+}
+
+fn sort_llm_rows(state: &mut UiState, snapshot: &mut DashboardSnapshot) {
+    if snapshot.llm.is_empty() {
+        state.selected_llm = 0;
+        state.llm_feed_scroll = 0;
+        return;
+    }
+
+    let selected_span_id = snapshot
+        .llm
+        .get(state.selected_llm)
+        .map(|item| item.span_id.clone());
+
+    snapshot
+        .llm
+        .sort_by(|left, right| compare_llm_summary(left, right, state.llm_sort_mode));
+
+    if let Some(selected_span_id) = selected_span_id {
+        if let Some(index) = snapshot
+            .llm
+            .iter()
+            .position(|item| item.span_id == selected_span_id)
+        {
+            state.selected_llm = index;
+        } else {
+            state.selected_llm = state.selected_llm.min(snapshot.llm.len().saturating_sub(1));
+        }
+    } else {
+        state.selected_llm = state.selected_llm.min(snapshot.llm.len().saturating_sub(1));
+    }
+}
+
+fn compare_llm_summary(
+    left: &crate::domain::LlmSummary,
+    right: &crate::domain::LlmSummary,
+    mode: LlmSortMode,
+) -> Ordering {
+    let primary = match mode {
+        LlmSortMode::Time => right.started_at_unix_nano.cmp(&left.started_at_unix_nano),
+        LlmSortMode::Tokens => right
+            .total_tokens
+            .unwrap_or_default()
+            .cmp(&left.total_tokens.unwrap_or_default()),
+        LlmSortMode::Cost => right
+            .cost
+            .unwrap_or(-1.0)
+            .partial_cmp(&left.cost.unwrap_or(-1.0))
+            .unwrap_or(Ordering::Equal),
+        LlmSortMode::Latency => right
+            .latency_ms
+            .unwrap_or(-1.0)
+            .partial_cmp(&left.latency_ms.unwrap_or(-1.0))
+            .unwrap_or(Ordering::Equal),
+    };
+
+    primary
+        .then_with(|| right.started_at_unix_nano.cmp(&left.started_at_unix_nano))
+        .then_with(|| right.span_id.cmp(&left.span_id))
 }
 
 fn sync_llm_timeline_from_cache(
@@ -592,10 +679,13 @@ fn spawn_llm_timeline_refresh(
 
 #[cfg(test)]
 mod tests {
-    use super::{MIN_SNAPSHOT_REFRESH_MS, TraceDetailCacheKey, snapshot_refresh_interval_ms};
+    use super::{
+        MIN_SNAPSHOT_REFRESH_MS, TraceDetailCacheKey, snapshot_refresh_interval_ms, sort_llm_rows,
+    };
     use crate::{
-        domain::TraceSummary,
+        domain::{DashboardSnapshot, LlmSummary, OverviewStats, TraceSummary},
         query::{LogFilters, QueryFilters, TimeWindow},
+        ui::{LlmSortMode, UiState},
     };
 
     fn trace_summary(span_count: i64) -> TraceSummary {
@@ -652,5 +742,115 @@ mod tests {
     fn snapshot_refresh_interval_is_slower_than_render_tick() {
         assert_eq!(snapshot_refresh_interval_ms(750), MIN_SNAPSHOT_REFRESH_MS);
         assert_eq!(snapshot_refresh_interval_ms(1_000), 4_000);
+    }
+
+    #[test]
+    fn llm_sort_rows_orders_by_tokens_desc() {
+        let mut state = UiState {
+            llm_sort_mode: LlmSortMode::Tokens,
+            ..UiState::default()
+        };
+        let mut snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: empty_overview(),
+            traces: Vec::new(),
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: vec![
+                llm_summary("span-a", 10, 1.0, 10),
+                llm_summary("span-b", 200, 0.5, 12),
+                llm_summary("span-c", 50, 2.0, 11),
+            ],
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+
+        sort_llm_rows(&mut state, &mut snapshot);
+
+        let ordered = snapshot
+            .llm
+            .iter()
+            .map(|item| item.span_id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ordered, vec!["span-b", "span-c", "span-a"]);
+    }
+
+    #[test]
+    fn llm_sort_rows_preserves_selected_span_across_reorder() {
+        let mut state = UiState {
+            llm_sort_mode: LlmSortMode::Latency,
+            selected_llm: 2,
+            ..UiState::default()
+        };
+        let mut snapshot = DashboardSnapshot {
+            services: Vec::new(),
+            overview: empty_overview(),
+            traces: Vec::new(),
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: vec![
+                llm_summary("span-a", 10, 100.0, 10),
+                llm_summary("span-b", 20, 900.0, 11),
+                llm_summary("span-c", 30, 300.0, 12),
+            ],
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+
+        let selected_before = snapshot.llm[state.selected_llm].span_id.clone();
+        sort_llm_rows(&mut state, &mut snapshot);
+
+        assert_eq!(snapshot.llm[state.selected_llm].span_id, selected_before);
+    }
+
+    fn llm_summary(
+        span_id: &str,
+        tokens: u64,
+        latency_ms: f64,
+        started_at_unix_nano: i64,
+    ) -> LlmSummary {
+        LlmSummary {
+            trace_id: "trace-1".to_string(),
+            span_id: span_id.to_string(),
+            started_at_unix_nano,
+            service_name: "api".to_string(),
+            span_name: format!("Prompt: {span_id}"),
+            provider: "openai".to_string(),
+            model: "gpt-4.1-mini".to_string(),
+            operation: "chat".to_string(),
+            span_kind: None,
+            session_id: None,
+            conversation_id: None,
+            prompt_preview: None,
+            output_preview: None,
+            tool_name: None,
+            tool_args: None,
+            input_tokens: None,
+            output_tokens: None,
+            total_tokens: Some(tokens),
+            cost: None,
+            latency_ms: Some(latency_ms),
+            status: "STATUS_CODE_OK".to_string(),
+            raw_json: serde_json::json!({}),
+        }
+    }
+
+    fn empty_overview() -> OverviewStats {
+        OverviewStats {
+            service_count: 0,
+            trace_count: 0,
+            error_span_count: 0,
+            log_count: 0,
+            metric_count: 0,
+            llm_count: 0,
+        }
     }
 }

@@ -277,7 +277,10 @@ pub(crate) fn render_llm(
     )
     .block(
         Block::default()
-            .title("LLM Inspector")
+            .title(format!(
+                "LLM Inspector [sort: {}]",
+                state.llm_sort_mode.label()
+            ))
             .borders(Borders::ALL)
             .border_style(Style::default().fg(feed_border)),
     );

@@ -382,6 +382,9 @@ pub(crate) fn help_lines(state: &UiState) -> Vec<Line<'static>> {
             LlmFocus::Feed => {
                 lines.push(Line::raw("llm inspector"));
                 lines.push(Line::raw("  j / k            move normalized llm spans"));
+                lines.push(Line::raw(
+                    "  S                cycle sort: time/tokens/cost/latency",
+                ));
                 lines.push(Line::raw("  l / right        focus model detail"));
                 lines.push(Line::raw(
                     "  right pane       shows model/provider/token detail",
@@ -519,6 +522,7 @@ pub(crate) fn context_help_lines(state: &UiState) -> Vec<Line<'static>> {
             LlmFocus::Feed => {
                 lines.push(Line::raw("Compare LLM activity:"));
                 lines.push(Line::raw("  j/k     select call"));
+                lines.push(Line::raw("  S       sort mode"));
                 lines.push(Line::raw("  l       detail"));
                 lines.push(Line::raw("  s/t     service/window"));
             }

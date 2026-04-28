@@ -85,6 +85,12 @@ pub(super) fn handle_key(
         {
             state.llm_expand_output = !state.llm_expand_output;
         }
+        KeyCode::Char('S')
+            if Tab::ALL[state.active_tab] == Tab::Llm && state.llm_focus == LlmFocus::Feed =>
+        {
+            cycle_llm_sort(state);
+            return InputOutcome::RefreshDetails;
+        }
         KeyCode::Char('q') => return InputOutcome::Quit,
         KeyCode::Char('f') => {
             state.log_tail = !state.log_tail;
@@ -841,6 +847,10 @@ fn cycle_theme(state: &mut UiState) {
     state.theme = Theme::ALL[(current + 1) % Theme::ALL.len()];
 }
 
+fn cycle_llm_sort(state: &mut UiState) {
+    state.llm_sort_mode = state.llm_sort_mode.next();
+}
+
 fn apply_layout_preset(state: &mut UiState, preset: LayoutPreset) {
     state.layout_preset = preset;
     match preset {
@@ -1286,8 +1296,52 @@ mod tests {
     use crate::{
         domain::{DashboardSnapshot, LogSummary, OverviewStats, SpanDetail, TraceSummary},
         query::TimeWindow,
-        ui::{LayoutPreset, LlmFocus, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState},
+        ui::{
+            LayoutPreset, LlmFocus, LlmSortMode, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState,
+        },
     };
+
+    #[test]
+    fn shift_s_cycles_llm_sort_mode_in_feed() {
+        let mut state = UiState {
+            active_tab: Tab::Llm as usize,
+            llm_focus: LlmFocus::Feed,
+            ..UiState::default()
+        };
+        let snapshot = DashboardSnapshot {
+            services: vec!["api".to_string()],
+            overview: empty_overview(),
+            traces: Vec::new(),
+            selected_trace: Vec::new(),
+            logs: Vec::new(),
+            metrics: Vec::new(),
+            llm: Vec::new(),
+            llm_rollups: Vec::new(),
+            llm_sessions: Vec::new(),
+            llm_model_comparisons: Vec::new(),
+            llm_top_calls: Vec::new(),
+            selected_llm_timeline: Vec::new(),
+        };
+
+        let first = super::handle_key(
+            KeyCode::Char('S'),
+            KeyModifiers::SHIFT,
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+        let second = super::handle_key(
+            KeyCode::Char('S'),
+            KeyModifiers::SHIFT,
+            Rect::new(0, 0, 120, 40),
+            &mut state,
+            &snapshot,
+        );
+
+        assert_eq!(first, InputOutcome::RefreshDetails);
+        assert_eq!(state.llm_sort_mode, LlmSortMode::Cost);
+        assert_eq!(second, InputOutcome::RefreshDetails);
+    }
 
     #[test]
     fn clicking_selected_trace_opens_trace_detail() {

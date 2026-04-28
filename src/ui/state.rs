@@ -173,6 +173,7 @@ pub struct UiState {
     pub llm_detail_scroll: u16,
     pub llm_expand_prompt: bool,
     pub llm_expand_output: bool,
+    pub llm_sort_mode: LlmSortMode,
     pub service_filter_index: Option<usize>,
     pub errors_only: bool,
     pub trace_focus: TraceFocus,
@@ -231,6 +232,7 @@ impl Default for UiState {
             llm_detail_scroll: 0,
             llm_expand_prompt: false,
             llm_expand_output: false,
+            llm_sort_mode: LlmSortMode::Time,
             service_filter_index: None,
             errors_only: false,
             trace_focus: TraceFocus::TraceList,
@@ -272,4 +274,32 @@ pub enum LlmFocus {
     Feed,
     Detail,
     Timeline,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum LlmSortMode {
+    Time,
+    Tokens,
+    Cost,
+    Latency,
+}
+
+impl LlmSortMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Time => "time",
+            Self::Tokens => "tokens",
+            Self::Cost => "cost",
+            Self::Latency => "latency",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Time => Self::Tokens,
+            Self::Tokens => Self::Cost,
+            Self::Cost => Self::Latency,
+            Self::Latency => Self::Time,
+        }
+    }
 }
