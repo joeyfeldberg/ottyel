@@ -1,4 +1,5 @@
 mod input;
+mod trace_paging;
 
 use std::{cmp::Ordering, io, time::Duration};
 
@@ -25,6 +26,7 @@ use crate::{
     ui::{LlmSortMode, RenderCache, Tab, TraceViewMode, UiState},
 };
 use input::InputOutcome;
+use trace_paging::{TraceListPager, TracePageRefreshResult};
 
 const RENDER_FRAME_MS: u64 = 16;
 const MIN_SNAPSHOT_REFRESH_MS: u64 = 3_000;
@@ -159,6 +161,7 @@ async fn terminal_loop(
     let mut snapshot = query.snapshot(&input::filters(&state, &[]))?;
     let mut render_cache = RenderCache::default();
     let mut trace_detail_cache = TraceDetailCache::default();
+    let mut trace_paging = TraceListPager::default();
     let mut llm_timeline_cache = LlmTimelineCache::default();
     let mut llm_timeline_refresh = LlmTimelineRefreshState::default();
     let mut saved_preferences = UserPreferences::from_state(&state);
@@ -170,11 +173,19 @@ async fn terminal_loop(
         &llm_timeline_cache,
     )?;
     let (refresh_tx, mut refresh_rx) = mpsc::unbounded_channel();
+    let (trace_page_tx, mut trace_page_rx) = mpsc::unbounded_channel();
     let (llm_refresh_tx, mut llm_refresh_rx) = mpsc::unbounded_channel();
     let mut refresh_in_flight = false;
     let mut next_refresh_request_id = 0_u64;
     let mut needs_redraw = true;
     let mut render_ready = true;
+    trace_paging::sync_first_page(
+        query,
+        &mut state,
+        &mut snapshot,
+        &mut trace_paging,
+        &trace_page_tx,
+    )?;
     loop {
         if needs_redraw && render_ready {
             input::sync_selection(&mut state, &snapshot);
@@ -203,6 +214,7 @@ async fn terminal_loop(
             needs_redraw = false;
             render_ready = false;
         }
+        trace_paging::ensure_prefetch(query, &state, &snapshot, &mut trace_paging, &trace_page_tx);
 
         tokio::select! {
             _ = render_tick.tick() => render_ready = true,
@@ -220,22 +232,21 @@ async fn terminal_loop(
                 if result.request_id == next_refresh_request_id {
                     refresh_in_flight = false;
                     let current_filters = input::filters(&state, &snapshot.services);
-                    if current_filters == result.filters {
-                        let selected_llm_span_id = snapshot
-                            .llm
-                            .get(state.selected_llm)
-                            .map(|item| item.span_id.clone());
+                    let result_filters = result.filters.clone();
+                    if current_filters == result_filters {
+                        let trace_anchor = trace_paging::TraceListAnchor::capture(&snapshot, &state);
+                        let selected_llm_span_id = selected_llm_span_id(&snapshot, &state);
                         snapshot = result.snapshot?;
-                        if let Some(span_id) = selected_llm_span_id {
-                            if let Some(index) =
-                                snapshot.llm.iter().position(|item| item.span_id == span_id)
-                            {
-                                state.selected_llm = index;
-                            } else {
-                                state.selected_llm =
-                                    state.selected_llm.min(snapshot.llm.len().saturating_sub(1));
-                            }
-                        }
+                        restore_selected_llm_span(&snapshot, &mut state, selected_llm_span_id);
+                        trace_paging::sync_first_page_for_filters(
+                            query,
+                            &mut state,
+                            &mut snapshot,
+                            &mut trace_paging,
+                            &trace_page_tx,
+                            result_filters,
+                            trace_anchor,
+                        )?;
                         refresh_detail_state(
                             query,
                             &mut state,
@@ -245,6 +256,16 @@ async fn terminal_loop(
                         )?;
                         needs_redraw = true;
                     }
+                }
+            }
+            Some(result) = trace_page_rx.recv() => {
+                if trace_paging::apply_page_result(
+                    result,
+                    &mut state,
+                    &mut snapshot,
+                    &mut trace_paging,
+                ) {
+                    needs_redraw = true;
                 }
             }
             Some(result) = llm_refresh_rx.recv() => {
@@ -280,6 +301,8 @@ async fn terminal_loop(
                             &mut snapshot,
                             &mut trace_detail_cache,
                             &llm_timeline_cache,
+                            &mut trace_paging,
+                            &trace_page_tx,
                         )?;
                         let state_changed = before != state;
                         needs_redraw |= changed || state_changed;
@@ -297,6 +320,8 @@ async fn terminal_loop(
                             &mut snapshot,
                             &mut trace_detail_cache,
                             &llm_timeline_cache,
+                            &mut trace_paging,
+                            &trace_page_tx,
                             &mut saved_preferences,
                             &mut needs_redraw,
                             &mut render_ready,
@@ -321,6 +346,8 @@ fn handle_terminal_event(
     snapshot: &mut DashboardSnapshot,
     trace_detail_cache: &mut TraceDetailCache,
     llm_timeline_cache: &LlmTimelineCache,
+    trace_paging: &mut TraceListPager,
+    trace_page_tx: &mpsc::UnboundedSender<TracePageRefreshResult>,
     saved_preferences: &mut UserPreferences,
     needs_redraw: &mut bool,
     render_ready: &mut bool,
@@ -339,6 +366,8 @@ fn handle_terminal_event(
                 snapshot,
                 trace_detail_cache,
                 llm_timeline_cache,
+                trace_paging,
+                trace_page_tx,
             )?;
             let state_changed = before != *state;
             *needs_redraw |= changed || state_changed;
@@ -364,6 +393,8 @@ fn handle_terminal_event(
                     snapshot,
                     trace_detail_cache,
                     llm_timeline_cache,
+                    trace_paging,
+                    trace_page_tx,
                 )?;
                 *needs_redraw |= changed || state_changed;
                 if (changed || state_changed) && !is_wheel {
@@ -404,6 +435,8 @@ fn apply_input_outcome(
     snapshot: &mut DashboardSnapshot,
     trace_detail_cache: &mut TraceDetailCache,
     llm_timeline_cache: &LlmTimelineCache,
+    trace_paging: &mut TraceListPager,
+    trace_page_tx: &mpsc::UnboundedSender<TracePageRefreshResult>,
 ) -> Result<bool> {
     match outcome {
         InputOutcome::None => Ok(false),
@@ -418,19 +451,20 @@ fn apply_input_outcome(
             Ok(true)
         }
         InputOutcome::RefreshSnapshot => {
-            let selected_llm_span_id = snapshot
-                .llm
-                .get(state.selected_llm)
-                .map(|item| item.span_id.clone());
-            *snapshot = query.snapshot(&input::filters(state, &snapshot.services))?;
-            if let Some(span_id) = selected_llm_span_id {
-                if let Some(index) = snapshot.llm.iter().position(|item| item.span_id == span_id) {
-                    state.selected_llm = index;
-                } else {
-                    state.selected_llm =
-                        state.selected_llm.min(snapshot.llm.len().saturating_sub(1));
-                }
-            }
+            let filters = input::filters(state, &snapshot.services);
+            let trace_anchor = trace_paging::TraceListAnchor::capture(snapshot, state);
+            let selected_llm_span_id = selected_llm_span_id(snapshot, state);
+            *snapshot = query.snapshot(&filters)?;
+            restore_selected_llm_span(snapshot, state, selected_llm_span_id);
+            trace_paging::sync_first_page_for_filters(
+                query,
+                state,
+                snapshot,
+                trace_paging,
+                trace_page_tx,
+                filters,
+                trace_anchor,
+            )?;
             refresh_detail_state(
                 query,
                 state,
@@ -443,6 +477,28 @@ fn apply_input_outcome(
         InputOutcome::Quit => Ok(false),
     }
 }
+
+fn selected_llm_span_id(snapshot: &DashboardSnapshot, state: &UiState) -> Option<String> {
+    snapshot
+        .llm
+        .get(state.selected_llm)
+        .map(|item| item.span_id.clone())
+}
+
+fn restore_selected_llm_span(
+    snapshot: &DashboardSnapshot,
+    state: &mut UiState,
+    selected_span_id: Option<String>,
+) {
+    if let Some(span_id) = selected_span_id
+        && let Some(index) = snapshot.llm.iter().position(|item| item.span_id == span_id)
+    {
+        state.selected_llm = index;
+    } else {
+        state.selected_llm = state.selected_llm.min(snapshot.llm.len().saturating_sub(1));
+    }
+}
+
 fn refresh_detail_state(
     query: &QueryService,
     state: &mut UiState,

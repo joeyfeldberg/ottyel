@@ -292,6 +292,10 @@ impl QueryService {
         )
     }
 
+    pub fn page_size(&self) -> usize {
+        self.page_size
+    }
+
     pub fn logs_page(
         &self,
         filters: &QueryFilters,
