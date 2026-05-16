@@ -23,6 +23,8 @@ pub(crate) struct TraceDetailLinesCache {
 struct TraceDetailLinesKey {
     trace_id: String,
     span_id: String,
+    root_span_id: Option<String>,
+    root_span_name: Option<String>,
     end_time_unix_nano: i64,
     attribute_count: usize,
     resource_attribute_count: usize,
@@ -125,10 +127,13 @@ pub(crate) fn sync_trace_detail_lines_cache(
         )];
         return;
     };
+    let root_span = root_span_detail(&snapshot.selected_trace);
 
     let next_key = TraceDetailLinesKey {
         trace_id: span.trace_id.clone(),
         span_id: span.span_id.clone(),
+        root_span_id: root_span.map(|span| span.span_id.clone()),
+        root_span_name: root_span.map(|span| span.span_name.clone()),
         end_time_unix_nano: span.end_time_unix_nano,
         attribute_count: span.attributes.len(),
         resource_attribute_count: span.resource_attributes.len(),
@@ -137,7 +142,7 @@ pub(crate) fn sync_trace_detail_lines_cache(
     };
 
     if cache.key.as_ref() != Some(&next_key) {
-        cache.lines = build_span_detail_lines(&span, palette);
+        cache.lines = build_span_detail_lines(&span, root_span, palette);
         cache.key = Some(next_key);
     }
 }
@@ -737,7 +742,18 @@ fn build_metric_detail_lines(
     lines
 }
 
-fn build_span_detail_lines(span: &SpanDetail, palette: Palette) -> Vec<Line<'static>> {
+fn root_span_detail(spans: &[SpanDetail]) -> Option<&SpanDetail> {
+    spans
+        .iter()
+        .find(|span| span.parent_span_id.is_empty())
+        .or_else(|| spans.first())
+}
+
+fn build_span_detail_lines(
+    span: &SpanDetail,
+    root_span: Option<&SpanDetail>,
+    palette: Palette,
+) -> Vec<Line<'static>> {
     let mut header_spans = vec![Span::styled(
         truncate(&span.span_name, 48),
         Style::default()
@@ -759,16 +775,30 @@ fn build_span_detail_lines(span: &SpanDetail, palette: Palette) -> Vec<Line<'sta
 
     let mut lines = vec![
         Line::from(header_spans),
-        Line::from(format!("service {}", span.service_name)),
+        section_header("ids", palette.muted),
+        Line::from(format!("trace_id {}", span.trace_id)),
         Line::from(format!("span_id {}", span.span_id)),
         Line::from(format!(
-            "parent {}",
+            "parent_span_id {}",
             if span.parent_span_id.is_empty() {
                 "<root>"
             } else {
                 span.parent_span_id.as_str()
             }
         )),
+        Line::from(format!("service {}", span.service_name)),
+        Line::from(format!(
+            "root_span {}",
+            root_span
+                .map(|span| span.span_name.as_str())
+                .unwrap_or("<unknown>")
+        )),
+    ];
+    if let Some(root_span) = root_span {
+        lines.push(Line::from(format!("root_span_id {}", root_span.span_id)));
+    }
+
+    lines.extend([
         Line::from(format!(
             "kind {}  duration {:.1}ms",
             span.span_kind, span.duration_ms
@@ -778,7 +808,7 @@ fn build_span_detail_lines(span: &SpanDetail, palette: Palette) -> Vec<Line<'sta
             span.events.len(),
             span.links.len()
         )),
-    ];
+    ]);
 
     if let Some(llm) = &span.llm {
         lines.push(Line::raw(""));
@@ -934,7 +964,7 @@ mod tests {
             llm: None,
         };
 
-        let lines = build_span_detail_lines(&span, Palette::from_theme(Theme::Ember));
+        let lines = build_span_detail_lines(&span, Some(&span), Palette::from_theme(Theme::Ember));
         let header = lines[0]
             .spans
             .iter()
@@ -942,5 +972,62 @@ mod tests {
             .collect::<String>();
 
         assert_eq!(header, "Prompt: DASv2 AIClient Completion");
+    }
+
+    #[test]
+    fn span_detail_includes_full_untruncated_ids() {
+        let root = SpanDetail {
+            trace_id: "019e2d0a6fb7e5337b121ed7562519cb".to_string(),
+            span_id: "0000000000000001".to_string(),
+            parent_span_id: String::new(),
+            service_name: "dialog-agent-service".to_string(),
+            span_name: "DAS Client".to_string(),
+            span_kind: "INTERNAL".to_string(),
+            status_code: "STATUS_CODE_OK".to_string(),
+            duration_ms: 12.3,
+            start_time_unix_nano: 1,
+            end_time_unix_nano: 2,
+            attributes: BTreeMap::new(),
+            resource_attributes: BTreeMap::new(),
+            events: Vec::new(),
+            links: Vec::new(),
+            llm: None,
+        };
+        let child = SpanDetail {
+            trace_id: root.trace_id.clone(),
+            span_id: "3b52c4d4c1612aff".to_string(),
+            parent_span_id: root.span_id.clone(),
+            service_name: root.service_name.clone(),
+            span_name: "GraphQL Operation".to_string(),
+            span_kind: "CLIENT".to_string(),
+            status_code: "STATUS_CODE_UNSET".to_string(),
+            duration_ms: 5.0,
+            start_time_unix_nano: 2,
+            end_time_unix_nano: 3,
+            attributes: BTreeMap::new(),
+            resource_attributes: BTreeMap::new(),
+            events: Vec::new(),
+            links: Vec::new(),
+            llm: None,
+        };
+
+        let rendered =
+            build_span_detail_lines(&child, Some(&root), Palette::from_theme(Theme::Ember))
+                .into_iter()
+                .map(|line| {
+                    line.spans
+                        .into_iter()
+                        .map(|span| span.content.into_owned())
+                        .collect::<String>()
+                })
+                .collect::<Vec<_>>();
+
+        assert!(rendered.contains(&"ids".to_string()));
+        assert!(rendered.contains(&format!("trace_id {}", child.trace_id)));
+        assert!(rendered.contains(&format!("span_id {}", child.span_id)));
+        assert!(rendered.contains(&format!("parent_span_id {}", child.parent_span_id)));
+        assert!(rendered.contains(&format!("service {}", child.service_name)));
+        assert!(rendered.contains(&format!("root_span {}", root.span_name)));
+        assert!(rendered.contains(&format!("root_span_id {}", root.span_id)));
     }
 }
