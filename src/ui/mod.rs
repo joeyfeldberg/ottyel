@@ -291,4 +291,6 @@ pub fn sync_detail_scroll(
 }
 
 #[cfg(test)]
+mod snapshot_tests;
+#[cfg(test)]
 mod tests;

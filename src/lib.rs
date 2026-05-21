@@ -9,6 +9,9 @@ pub mod query;
 pub mod store;
 pub mod ui;
 
+#[cfg(test)]
+pub(crate) mod testing;
+
 use anyhow::Result;
 use clap::Parser;
 
