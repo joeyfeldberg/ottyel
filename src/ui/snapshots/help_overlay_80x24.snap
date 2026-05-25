@@ -1,24 +1,24 @@
-"┌Ottyel────────────────────────────────────────────────────────────────────────┐"
-"│ [1] Overview   [2] Trace Explorer   [3] Logs   [4] Metrics   [5] LLM Inspecto│"
-"└──────────────────────────────────────────────────────────────────────────────┘"
-" theme=ember | [t]ime=24h | [s]ervice=all | panes traces=6 logs=4 metrics=5 llm="
-"┌Trace Tree [focus]────────────────────────────────────────────────────────────┐"
-"│019e2d0a6fb┌Help: Trace Tree──────────────────────────────────────┐           │"
-"│service=che│global                                                │           │"
-"│           │  tab / shift-tab  switch panes                       │           │"
-"│▾ Checkout │  : / ctrl-p       open command palette               │━━    1.29s│"
-"│      Authe│  /                global search                      │··  150.0ms│"
-"│      Reser│  g                cycle theme                        │··  430.0ms│"
-"│      Recom│  w                cycle layout preset                │━·  500.0ms│"
-"│      Charg│  = / -            grow or shrink focused split       │━━   89.0ms│"
-"│           │  s                cycle service filter               │           │"
-"│           │  t                cycle time window                  │           │"
-"└───────────│  ?                open/close help                    │───────────┘"
-"┌Span Detail│  H                toggle contextual hints            │───────────┐"
-"│Checkout re│  mouse            click to focus/select, wheel to    │           │"
-"│ids        └──────────────────────────────────────────────────────┘           │"
-"│trace_id 019e2d0a6fb7e5337b121ed7562519cb                                     │"
-"│span_id root                                                                  │"
-"│parent_span_id <root>                                                         │"
-"└──────────────────────────────────────────────────────────────────────────────┘"
-" help: esc/?/enter close                                                        "
+┌Ottyel────────────────────────────────────────────────────────────────────────┐
+│ [1] Overview   [2] Trace Explorer   [3] Logs   [4] Metrics   [5] LLM Inspecto│
+└──────────────────────────────────────────────────────────────────────────────┘
+ theme=ember | [t]ime=24h | [s]ervice=all | panes traces=6 logs=4 metrics=5 llm=
+┌Trace Tree [focus]────────────────────────────────────────────────────────────┐
+│019e2d0a6fb┌Help: Trace Tree──────────────────────────────────────┐           │
+│service=che│global                                                │           │
+│           │  tab / shift-tab  switch panes                       │           │
+│▾ Checkout │  : / ctrl-p       open command palette               │━━    1.29s│
+│      Authe│  /                global search                      │··  150.0ms│
+│      Reser│  g                cycle theme                        │··  430.0ms│
+│      Recom│  w                cycle layout preset                │━·  500.0ms│
+│      Charg│  = / -            grow or shrink focused split       │━━   89.0ms│
+│           │  s                cycle service filter               │           │
+│           │  t                cycle time window                  │           │
+└───────────│  ?                open/close help                    │───────────┘
+┌Span Detail│  H                toggle contextual hints            │───────────┐
+│Checkout re│  mouse            click to focus/select, wheel to    │           │
+│ids        └──────────────────────────────────────────────────────┘           │
+│trace_id 019e2d0a6fb7e5337b121ed7562519cb                                     │
+│span_id root                                                                  │
+│parent_span_id <root>                                                         │
+└──────────────────────────────────────────────────────────────────────────────┘
+ help: esc/?/enter close                                                        

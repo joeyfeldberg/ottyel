@@ -44,8 +44,8 @@ pub(crate) fn render_logs(
                 Style::default().fg(palette.foreground)
             };
             Row::new(vec![
-                Cell::from(truncate(&log.service_name, 14)),
-                Cell::from(truncate(&log.severity, 8)),
+                Cell::from(truncate(&log.service_name, 12)),
+                Cell::from(truncate(&log.severity, 5)),
                 Cell::from(truncate(&log.body, 70)),
                 Cell::from(truncate(&log.trace_id, 16)),
             ])
@@ -55,14 +55,14 @@ pub(crate) fn render_logs(
     let table = Table::new(
         rows,
         [
-            Constraint::Length(14),
-            Constraint::Length(8),
-            Constraint::Min(40),
+            Constraint::Length(12),
+            Constraint::Length(5),
+            Constraint::Min(24),
             Constraint::Length(16),
         ],
     )
     .header(
-        Row::new(vec!["service", "lvl", "message", "trace"]).style(
+        Row::new(vec!["service", "level", "message", "trace"]).style(
             Style::default()
                 .fg(palette.muted)
                 .add_modifier(Modifier::BOLD),
@@ -127,10 +127,10 @@ pub(crate) fn render_metrics(
                 Style::default().fg(palette.foreground)
             };
             Row::new(vec![
-                Cell::from(truncate(&metric.service_name, 14)),
+                Cell::from(truncate(&metric.service_name, 12)),
                 Cell::from(truncate(&metric.metric_name, 28)),
-                Cell::from(metric.instrument_kind.clone()),
-                Cell::from(metric.summary.clone()),
+                Cell::from(truncate(&metric.instrument_kind, 7)),
+                Cell::from(truncate(&metric.summary, 24)),
             ])
             .style(style)
         })
@@ -138,10 +138,10 @@ pub(crate) fn render_metrics(
     let table = Table::new(
         rows,
         [
-            Constraint::Length(14),
-            Constraint::Length(28),
-            Constraint::Length(14),
-            Constraint::Min(16),
+            Constraint::Length(12),
+            Constraint::Min(18),
+            Constraint::Length(7),
+            Constraint::Length(10),
         ],
     )
     .header(
@@ -251,23 +251,17 @@ pub(crate) fn render_llm(
         rows,
         [
             Constraint::Length(time_col_width),
-            Constraint::Length(20),
-            Constraint::Length(10),
-            Constraint::Length(14),
-            Constraint::Length(14),
+            Constraint::Min(14),
             Constraint::Length(8),
+            Constraint::Length(11),
             Constraint::Length(8),
+            Constraint::Length(7),
+            Constraint::Length(7),
         ],
     )
     .header(
         Row::new(vec![
-            "time",
-            "prompt",
-            "provider",
-            "model",
-            "operation",
-            "tokens",
-            "ms",
+            "time", "prompt", "provider", "model", "op", "tokens", "ms",
         ])
         .style(
             Style::default()

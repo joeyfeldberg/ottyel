@@ -1,4 +1,4 @@
-use ratatui::{Terminal, backend::TestBackend, layout::Rect};
+use ratatui::{Terminal, backend::TestBackend, buffer::Buffer, layout::Rect};
 use std::{env, fs, path::Path};
 
 use crate::{config::Theme, testing};
@@ -150,5 +150,16 @@ fn rendered_screen(width: u16, height: u16, mut state: UiState) -> String {
         .draw(|frame| render(frame, &snapshot, &state, &cache))
         .expect("test terminal should render");
 
-    terminal.backend().to_string()
+    buffer_text(terminal.backend().buffer())
+}
+
+fn buffer_text(buffer: &Buffer) -> String {
+    let mut text = buffer
+        .content
+        .chunks(buffer.area.width as usize)
+        .map(|cells| cells.iter().map(|cell| cell.symbol()).collect::<String>())
+        .collect::<Vec<_>>()
+        .join("\n");
+    text.push('\n');
+    text
 }

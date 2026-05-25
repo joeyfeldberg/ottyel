@@ -1,40 +1,40 @@
-"┌Ottyel────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐"
-"│ [1] Overview   [2] Trace Explorer   [3] Logs   [4] Metrics   [5] LLM Inspector                                       │"
-"└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
-" theme=ember | [t]ime=24h | [s]ervice=all | panes traces=6 logs=4 metrics=5 llm=3                                       "
-"┌Trace Tree────────────────────────────────────────────────────────────────────────────────────────────────────────────┐"
-"│019e2d0a6fb7e5337… Checkout request                                                                                   │"
-"│service=checkout-api duration=1294.6ms errors=1                                                                       │"
-"│                                                                                                                      │"
-"│▾ Checkout request [Hot Path]                                                              ━━━━━━━━━━━━━━━━━━    1.29s│"
-"│      Authenticate customer                                                                ━━━···············  150.0ms│"
-"│      Reserve inventory                                                                    ··━━━━━━━·········  430.0ms│"
-"│      Recommend Add-ons [LLM gpt-4.1-mini] [Hot Path]                                      ·········━━━━━━━━·  500.0ms│"
-"│      Charge payment [ERR]                                                                 ················━━   89.0ms│"
-"│                                                                                                                      │"
-"│                                                                                                                      │"
-"│                                                                                                                      │"
-"│                                                                                                                      │"
-"│                                                                                                                      │"
-"│                                                                                                                      │"
-"│                                                                                                                      │"
-"│                                                                                                                      │"
-"│                                                                                                                      │"
-"│                                                                                                                      │"
-"│                                                                                                                      │"
-"│                                                                                                                      │"
-"└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
-"┌Span Detail [focus]───────────────────────────────────────────────────────────────────────────────────────────────────┐"
-"│Charge payment error                                                                                                  │"
-"│ids                                                                                                                   │"
-"│trace_id 019e2d0a6fb7e5337b121ed7562519cb                                                                             │"
-"│span_id payment                                                                                                       │"
-"│parent_span_id root                                                                                                   │"
-"│service checkout-api                                                                                                  │"
-"│root_span Checkout request                                                                                            │"
-"│root_span_id root                                                                                                     │"
-"│kind CLIENT  duration 89.0ms                                                                                          │"
-"│events 1  links 1                                                                                                     │"
-"│                                                                                                                      │"
-"└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘"
-" span detail: j/k scroll | =/- resize | h/left tree | L logs | esc list | : commands | ? help | e errors                "
+┌Ottyel────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│ [1] Overview   [2] Trace Explorer   [3] Logs   [4] Metrics   [5] LLM Inspector                                       │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ theme=ember | [t]ime=24h | [s]ervice=all | panes traces=6 logs=4 metrics=5 llm=3                                       
+┌Trace Tree────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
+│019e2d0a6fb7e5337… Checkout request                                                                                   │
+│service=checkout-api duration=1294.6ms errors=1                                                                       │
+│                                                                                                                      │
+│▾ Checkout request [Hot Path]                                                              ━━━━━━━━━━━━━━━━━━    1.29s│
+│      Authenticate customer                                                                ━━━···············  150.0ms│
+│      Reserve inventory                                                                    ··━━━━━━━·········  430.0ms│
+│      Recommend Add-ons [LLM gpt-4.1-mini] [Hot Path]                                      ·········━━━━━━━━·  500.0ms│
+│      Charge payment [ERR]                                                                 ················━━   89.0ms│
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+┌Span Detail [focus]───────────────────────────────────────────────────────────────────────────────────────────────────┐
+│Charge payment error                                                                                                  │
+│ids                                                                                                                   │
+│trace_id 019e2d0a6fb7e5337b121ed7562519cb                                                                             │
+│span_id payment                                                                                                       │
+│parent_span_id root                                                                                                   │
+│service checkout-api                                                                                                  │
+│root_span Checkout request                                                                                            │
+│root_span_id root                                                                                                     │
+│kind CLIENT  duration 89.0ms                                                                                          │
+│events 1  links 1                                                                                                     │
+│                                                                                                                      │
+└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
+ span detail: j/k scroll | =/- resize | h/left tree | L logs | esc list | : commands | ? help | e errors                
