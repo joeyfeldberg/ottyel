@@ -16,7 +16,7 @@ use opentelemetry_proto::tonic::{
 use tempfile::tempdir;
 
 use crate::{
-    domain::{LlmRollupDimension, LlmTimelineKind, LlmTopCallKind},
+    domain::{LlmRollupDimension, LlmTimelineKind, LlmTopCallKind, TraceSummary},
     query::{LogCorrelationFilter, LogFilters, LogSeverityFilter, PageRequest},
 };
 
@@ -120,6 +120,89 @@ fn store_ingests_all_three_signals() {
             .unwrap()
             .is_empty()
     );
+}
+
+#[test]
+fn error_only_trace_filter_preserves_the_complete_trace_summary() {
+    let tempdir = tempdir().unwrap();
+    let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+    let now = now_nanos();
+
+    store
+        .ingest_traces(trace_filter_request(now, 0xaa, 0x11, 0x22))
+        .unwrap();
+
+    let traces = store.recent_traces(None, true, 10, None, None).unwrap();
+
+    assert_eq!(traces, vec![expected_filter_trace_summary(now, 0xaa)]);
+}
+
+#[test]
+fn service_and_text_trace_filters_preserve_the_complete_trace_summary() {
+    let tempdir = tempdir().unwrap();
+    let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+    let now = now_nanos();
+
+    store
+        .ingest_traces(trace_filter_request(now, 0xaa, 0x11, 0x22))
+        .unwrap();
+    let expected = vec![expected_filter_trace_summary(now, 0xaa)];
+
+    assert_eq!(
+        store
+            .recent_traces(Some("payments"), false, 10, None, None)
+            .unwrap(),
+        expected
+    );
+    assert_eq!(
+        store
+            .recent_traces(None, false, 10, None, Some("declined-marker"))
+            .unwrap(),
+        expected
+    );
+}
+
+#[test]
+fn time_window_trace_filter_preserves_complete_summaries_across_pages() {
+    let tempdir = tempdir().unwrap();
+    let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+    let now = now_nanos();
+    let newer_start = now + 100_000;
+
+    store
+        .ingest_traces(trace_filter_request(now, 0xaa, 0x11, 0x22))
+        .unwrap();
+    store
+        .ingest_traces(trace_filter_request(newer_start, 0xbb, 0x33, 0x44))
+        .unwrap();
+
+    let threshold = now + 6_000_000;
+    let first_page = store
+        .recent_traces_page(None, false, &PageRequest::first(1), Some(threshold), None)
+        .unwrap();
+    let second_page = store
+        .recent_traces_page(
+            None,
+            false,
+            &PageRequest {
+                limit: 1,
+                cursor: first_page.next_cursor.clone(),
+            },
+            Some(threshold),
+            None,
+        )
+        .unwrap();
+
+    assert_eq!(
+        first_page.items,
+        vec![expected_filter_trace_summary(newer_start, 0xbb)]
+    );
+    assert!(first_page.next_cursor.is_some());
+    assert_eq!(
+        second_page.items,
+        vec![expected_filter_trace_summary(now, 0xaa)]
+    );
+    assert!(second_page.next_cursor.is_none());
 }
 
 #[test]
@@ -556,6 +639,100 @@ fn trace_request(now: i64) -> ExportTraceServiceRequest {
         "hello",
         "world",
     )
+}
+
+fn trace_filter_request(
+    now: i64,
+    trace_byte: u8,
+    root_span_byte: u8,
+    child_span_byte: u8,
+) -> ExportTraceServiceRequest {
+    let trace_id = vec![trace_byte; 16];
+    let root_span_id = vec![root_span_byte; 8];
+    let now = now as u64;
+
+    ExportTraceServiceRequest {
+        resource_spans: vec![
+            ResourceSpans {
+                resource: Some(Resource {
+                    attributes: vec![string_attr("service.name", "frontend")],
+                    dropped_attributes_count: 0,
+                    entity_refs: Vec::new(),
+                }),
+                schema_url: String::new(),
+                scope_spans: vec![ScopeSpans {
+                    scope: Some(InstrumentationScope::default()),
+                    schema_url: String::new(),
+                    spans: vec![Span {
+                        trace_id: trace_id.clone(),
+                        span_id: root_span_id.clone(),
+                        parent_span_id: Vec::new(),
+                        trace_state: String::new(),
+                        name: "checkout.request".to_string(),
+                        kind: span::SpanKind::Server as i32,
+                        start_time_unix_nano: now,
+                        end_time_unix_nano: now + 5_000_000,
+                        attributes: vec![string_attr("http.route", "/checkout")],
+                        dropped_attributes_count: 0,
+                        events: Vec::new(),
+                        dropped_events_count: 0,
+                        links: Vec::new(),
+                        dropped_links_count: 0,
+                        status: Some(Status {
+                            message: String::new(),
+                            code: 1,
+                        }),
+                        flags: 0,
+                    }],
+                }],
+            },
+            ResourceSpans {
+                resource: Some(Resource {
+                    attributes: vec![string_attr("service.name", "payments")],
+                    dropped_attributes_count: 0,
+                    entity_refs: Vec::new(),
+                }),
+                schema_url: String::new(),
+                scope_spans: vec![ScopeSpans {
+                    scope: Some(InstrumentationScope::default()),
+                    schema_url: String::new(),
+                    spans: vec![Span {
+                        trace_id,
+                        span_id: vec![child_span_byte; 8],
+                        parent_span_id: root_span_id,
+                        trace_state: String::new(),
+                        name: "charge-card".to_string(),
+                        kind: span::SpanKind::Client as i32,
+                        start_time_unix_nano: now + 2_000_000,
+                        end_time_unix_nano: now + 8_000_000,
+                        attributes: vec![string_attr("payment.result", "declined-marker")],
+                        dropped_attributes_count: 0,
+                        events: Vec::new(),
+                        dropped_events_count: 0,
+                        links: Vec::new(),
+                        dropped_links_count: 0,
+                        status: Some(Status {
+                            message: "card declined".to_string(),
+                            code: 2,
+                        }),
+                        flags: 0,
+                    }],
+                }],
+            },
+        ],
+    }
+}
+
+fn expected_filter_trace_summary(now: i64, trace_byte: u8) -> TraceSummary {
+    TraceSummary {
+        trace_id: format!("{trace_byte:02x}").repeat(16),
+        service_name: "frontend".to_string(),
+        root_name: "checkout.request".to_string(),
+        span_count: 2,
+        error_count: 1,
+        duration_ms: 8.0,
+        started_at_unix_nano: now,
+    }
 }
 
 fn llm_timeline_trace_request(now: u64) -> ExportTraceServiceRequest {

@@ -37,47 +37,54 @@ impl Store {
         let conn = self.conn.lock().expect("sqlite mutex poisoned");
         let mut sql = r#"
             SELECT
-                trace_id,
-                MIN(service_name) AS service_name,
-                COALESCE(MAX(CASE WHEN parent_span_id = '' THEN span_name END), MIN(span_name)) AS root_name,
+                summary.trace_id,
+                MIN(summary.service_name) AS service_name,
+                COALESCE(MAX(CASE WHEN summary.parent_span_id = '' THEN summary.span_name END), MIN(summary.span_name)) AS root_name,
                 COUNT(*) AS span_count,
-                SUM(CASE WHEN status_code NOT IN ('STATUS_CODE_UNSET', 'STATUS_CODE_OK') THEN 1 ELSE 0 END) AS error_count,
-                MAX(end_time_unix_nano) - MIN(start_time_unix_nano) AS duration_nano,
-                MIN(start_time_unix_nano) AS started_at
-            FROM spans
+                SUM(CASE WHEN summary.status_code NOT IN ('STATUS_CODE_UNSET', 'STATUS_CODE_OK') THEN 1 ELSE 0 END) AS error_count,
+                MAX(summary.end_time_unix_nano) - MIN(summary.start_time_unix_nano) AS duration_nano,
+                MIN(summary.start_time_unix_nano) AS started_at
+            FROM spans AS summary
         "#
         .to_string();
 
-        let mut where_clauses = Vec::new();
+        let mut candidate_clauses = Vec::new();
         if let Some(service) = service_filter {
-            where_clauses.push(format!("service_name = '{}'", escape_sql(service)));
+            candidate_clauses.push(format!(
+                "candidate.service_name = '{}'",
+                escape_sql(service)
+            ));
         }
         if errors_only {
-            where_clauses
-                .push("status_code NOT IN ('STATUS_CODE_UNSET', 'STATUS_CODE_OK')".to_string());
+            candidate_clauses.push(
+                "candidate.status_code NOT IN ('STATUS_CODE_UNSET', 'STATUS_CODE_OK')".to_string(),
+            );
         }
         if let Some(threshold) = threshold_unix_nano {
-            where_clauses.push(format!("end_time_unix_nano >= {threshold}"));
+            candidate_clauses.push(format!("candidate.end_time_unix_nano >= {threshold}"));
         }
         if let Some(query) = search_query.filter(|query| !query.is_empty()) {
             let pattern = like_pattern(query);
-            where_clauses.push(format!(
-                "(trace_id LIKE '{pattern}' ESCAPE '\\' OR service_name LIKE '{pattern}' ESCAPE '\\' OR span_name LIKE '{pattern}' ESCAPE '\\' OR attributes_json LIKE '{pattern}' ESCAPE '\\' OR resource_attributes_json LIKE '{pattern}' ESCAPE '\\')"
+            candidate_clauses.push(format!(
+                "(candidate.trace_id LIKE '{pattern}' ESCAPE '\\' OR candidate.service_name LIKE '{pattern}' ESCAPE '\\' OR candidate.span_name LIKE '{pattern}' ESCAPE '\\' OR candidate.attributes_json LIKE '{pattern}' ESCAPE '\\' OR candidate.resource_attributes_json LIKE '{pattern}' ESCAPE '\\')"
             ));
         }
-        if !where_clauses.is_empty() {
-            sql.push_str(" WHERE ");
-            sql.push_str(&where_clauses.join(" AND "));
+        if !candidate_clauses.is_empty() {
+            sql.push_str(
+                " WHERE summary.trace_id IN (SELECT candidate.trace_id FROM spans AS candidate WHERE ",
+            );
+            sql.push_str(&candidate_clauses.join(" AND "));
+            sql.push(')');
         }
-        sql.push_str(" GROUP BY trace_id");
+        sql.push_str(" GROUP BY summary.trace_id");
         if let Some(cursor) = &page.cursor {
             sql.push_str(&format!(
-                " HAVING (MIN(start_time_unix_nano) < {started}) OR (MIN(start_time_unix_nano) = {started} AND trace_id < '{trace_id}')",
+                " HAVING (MIN(summary.start_time_unix_nano) < {started}) OR (MIN(summary.start_time_unix_nano) = {started} AND summary.trace_id < '{trace_id}')",
                 started = cursor.started_at_unix_nano,
                 trace_id = escape_sql(&cursor.trace_id),
             ));
         }
-        sql.push_str(" ORDER BY started_at DESC, trace_id DESC LIMIT ");
+        sql.push_str(" ORDER BY started_at DESC, summary.trace_id DESC LIMIT ");
         sql.push_str(&page.limit.saturating_add(1).to_string());
 
         let mut stmt = conn.prepare(&sql)?;
