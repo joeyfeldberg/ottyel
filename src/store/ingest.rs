@@ -15,8 +15,8 @@ use crate::domain::{
 use super::{
     Store,
     helpers::{
-        any_value_text, format_metric_summary, hex_bytes, log_time_unix_nano, now_unix_nanos,
-        number_value, resource_to_map, span_kind_name, status_code_name,
+        any_value_text, format_metric_summary, hex_bytes, log_severity, log_time_unix_nano,
+        now_unix_nanos, number_value, resource_to_map, span_kind_name, status_code_name,
     },
 };
 
@@ -175,7 +175,7 @@ impl Store {
                         params![
                             service_name,
                             log_time_unix_nano(&log),
-                            log.severity_text,
+                            log_severity(&log),
                             any_value_text(log.body.as_ref()),
                             hex_bytes(&log.trace_id),
                             hex_bytes(&log.span_id),

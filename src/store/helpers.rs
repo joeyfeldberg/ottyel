@@ -2,7 +2,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use opentelemetry_proto::tonic::{
     common::v1::{AnyValue, any_value},
-    logs::v1::LogRecord,
+    logs::v1::{LogRecord, SeverityNumber},
     metrics::v1::number_data_point::Value as NumberValue,
     resource::v1::Resource,
     trace::v1::status::StatusCode,
@@ -44,9 +44,49 @@ pub(super) fn status_code_name(
 }
 
 pub(super) fn log_time_unix_nano(log: &LogRecord) -> i64 {
-    let observed = log.observed_time_unix_nano as i64;
     let timestamp = log.time_unix_nano as i64;
-    timestamp.max(observed)
+    if timestamp == 0 {
+        log.observed_time_unix_nano as i64
+    } else {
+        timestamp
+    }
+}
+
+pub(super) fn log_severity(log: &LogRecord) -> String {
+    if !log.severity_text.is_empty() {
+        return log.severity_text.clone();
+    }
+
+    let severity =
+        SeverityNumber::try_from(log.severity_number).unwrap_or(SeverityNumber::Unspecified);
+    match severity {
+        SeverityNumber::Unspecified => "UNSPECIFIED",
+        SeverityNumber::Trace => "TRACE",
+        SeverityNumber::Trace2 => "TRACE2",
+        SeverityNumber::Trace3 => "TRACE3",
+        SeverityNumber::Trace4 => "TRACE4",
+        SeverityNumber::Debug => "DEBUG",
+        SeverityNumber::Debug2 => "DEBUG2",
+        SeverityNumber::Debug3 => "DEBUG3",
+        SeverityNumber::Debug4 => "DEBUG4",
+        SeverityNumber::Info => "INFO",
+        SeverityNumber::Info2 => "INFO2",
+        SeverityNumber::Info3 => "INFO3",
+        SeverityNumber::Info4 => "INFO4",
+        SeverityNumber::Warn => "WARN",
+        SeverityNumber::Warn2 => "WARN2",
+        SeverityNumber::Warn3 => "WARN3",
+        SeverityNumber::Warn4 => "WARN4",
+        SeverityNumber::Error => "ERROR",
+        SeverityNumber::Error2 => "ERROR2",
+        SeverityNumber::Error3 => "ERROR3",
+        SeverityNumber::Error4 => "ERROR4",
+        SeverityNumber::Fatal => "FATAL",
+        SeverityNumber::Fatal2 => "FATAL2",
+        SeverityNumber::Fatal3 => "FATAL3",
+        SeverityNumber::Fatal4 => "FATAL4",
+    }
+    .to_string()
 }
 
 pub(super) fn number_value(value: Option<&NumberValue>) -> Option<f64> {

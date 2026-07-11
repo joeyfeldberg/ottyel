@@ -22,6 +22,8 @@ use crate::{
 
 use super::Store;
 
+mod log_semantics;
+
 #[test]
 fn store_ingests_all_three_signals() {
     let tempdir = tempdir().unwrap();

@@ -122,7 +122,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P1 | AI operations are misclassified as LLM calls | `src/domain.rs` | OpenInference agent, tool, retrieval, evaluator, and prompt spans inflate model-call counts and show as `unknown/unknown` |
 | P1 | Current GenAI events and attributes are only partly understood | `src/domain.rs`, `src/store/ingest.rs` | Event-based inference details and evaluations are ignored; current structured messages, tool results, cache/reasoning tokens, agents, and TTFT are missing |
 | P1 | The all-tab snapshot does work that is not rendered | `src/query.rs`, `src/app/mod.rs` | Every refresh reads every signal; rollups and top calls are queried after their UI panels were removed; the first trace page is queried twice |
-| P1 | Log time and severity semantics are wrong or incomplete | `src/store/helpers.rs`, `src/store/ingest.rs` | `max(timestamp, observed_timestamp)` reorders late logs; empty severity text ignores the normalized severity number; event name is dropped |
+| P1 (partially resolved 2026-07-11) | Log time and severity semantics were wrong and remain incomplete | `src/store/helpers.rs`, `src/store/ingest.rs`, `src/store/tests/log_semantics.rs` | Event-time fallback and empty-text numeric severity labels are corrected; the v1 schema still drops observed time, numeric severity, event name, and other fields |
 | P1 | Retention can leave corrupt-looking investigations | `src/store/ingest.rs` | Span-count trimming deletes individual spans, leaves orphan span events, and can retain partial traces |
 | P1 | Startup and runtime failures are not visible in the TUI | `src/app/mod.rs` | A failed listener bind is not reported until exit; a refresh error exits the terminal loop instead of showing stale data plus an error |
 | P1 | MCP claims read-only behavior but opens a writable store | `src/app/mod.rs`, `src/store/mod.rs` | `ottyel mcp` can create a database and execute schema initialization and WAL pragmas |
@@ -178,11 +178,15 @@ The store drops span trace state, flags, status message, dropped counts, scope i
 and schema URLs. It also does not validate zero or incorrectly sized trace/span IDs.
 Duration is computed by converting epoch nanoseconds to `f64` before subtraction.
 
-For logs, the implementation keeps only one derived timestamp and currently chooses the
-later of event time and observed time. OTel specifies event time when present and
-observed time as the fallback. Severity number, flags, scope, schema URL, dropped counts,
-and event name are discarded. A non-empty OTel log event name is how current structured
-events, including GenAI events, are identified.
+For logs, the v1 schema keeps only one derived timestamp. Since 2026-07-11, ingest uses
+event time when present and observed time as the fallback, matching the OTel Logs Data
+Model. When source severity text is empty, ingest now derives every defined OTLP numeric
+short label, and focused tests cover the existing filter categories. The schema still
+discards observed time, numeric severity, flags, scope, schema URL, dropped counts, and
+event name. Preserving non-empty source severity text also means numeric filtering cannot
+be correct for arbitrary source labels until both severity fields are stored. A non-empty
+OTel log event name is how current structured events, including GenAI events, are
+identified.
 
 ### 4. Metric Fidelity
 
@@ -459,9 +463,10 @@ Goal: make correctness and performance changes measurable before changing the st
 - [ ] Record `EXPLAIN QUERY PLAN` assertions for critical list/detail queries.
 - [x] Add complete-trace summary regressions for error-only, service, text, time-window,
   and cursor-paged trace filters, then correct candidate-trace query semantics.
-- [ ] Add correctness tests demonstrating the metric-series, log-time,
-  AI-classification, retention-orphan, composite-identity, and stale-projection bugs
-  before fixing them.
+- [x] Add schema-neutral log regressions and correct event-time fallback plus empty-text
+  numeric severity derivation.
+- [ ] Add correctness tests demonstrating the metric-series, AI-classification,
+  retention-orphan, composite-identity, and stale-projection bugs before fixing them.
 - [ ] Add `cargo fmt --check` and Clippy to CI; clean the current Clippy baseline rather
   than adding broad allows.
 - [ ] Define a repeatable reference machine/profile in `docs/performance.md`.
@@ -840,7 +845,8 @@ Current documentation work:
 ## Validation Performed For This Review
 
 - `cargo fmt -- --check`: passed.
-- `cargo test`: passed, 109 tests after the first trace-filter correctness slice.
+- `cargo test`: passed, 112 tests after the trace-filter and schema-neutral log semantics
+  slices.
 - `cargo clippy --all-targets -- -D warnings`: failed with 11 library diagnostics and
   13 diagnostics across all targets, including two oversized handler interfaces and
   several style findings.
