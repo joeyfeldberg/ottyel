@@ -486,9 +486,11 @@ fn ui_state_defaults_to_trace_list_focus() {
 
 #[test]
 fn help_title_and_footer_follow_active_pane() {
-    let mut state = UiState::default();
-    state.active_tab = Tab::Logs as usize;
-    state.show_help = true;
+    let state = UiState {
+        active_tab: Tab::Logs as usize,
+        show_help: true,
+        ..UiState::default()
+    };
 
     assert_eq!(help_title(&state), "Help: Logs Feed");
     assert_eq!(footer_text(&state), "help: esc/?/enter close");

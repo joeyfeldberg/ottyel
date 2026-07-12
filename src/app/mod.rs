@@ -75,6 +75,24 @@ struct LlmTimelineRefreshResult {
     timeline: Result<Vec<LlmTimelineItem>>,
 }
 
+struct TerminalEventContext<'a> {
+    query: &'a QueryService,
+    state: &'a mut UiState,
+    snapshot: &'a mut DashboardSnapshot,
+    trace_detail_cache: &'a mut TraceDetailCache,
+    llm_timeline_cache: &'a LlmTimelineCache,
+    trace_paging: &'a mut TraceListPager,
+    trace_page_tx: &'a mpsc::UnboundedSender<TracePageRefreshResult>,
+}
+
+#[derive(Debug, Default)]
+struct TerminalEventUpdate {
+    quit: bool,
+    needs_redraw: bool,
+    render_ready: bool,
+    persist_preferences: bool,
+}
+
 pub async fn run(cli: Cli) -> Result<()> {
     match cli.command.unwrap_or(Command::Serve(ServeArgs::default())) {
         Command::Serve(args) => serve(args).await,
@@ -96,8 +114,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     let ui_result = run_terminal(&query, &args).await;
     let _ = shutdown_tx.send(true);
-    let server_result = server.await.context("ingest task join failure")??;
-    let _ = server_result;
+    server.await.context("ingest task join failure")??;
     ui_result
 }
 
@@ -282,51 +299,28 @@ async fn terminal_loop(
             }
             maybe_event = events.next() => {
                 match maybe_event.transpose()? {
-                        Some(Event::Key(key)) if key.kind == KeyEventKind::Press => {
-                        let before = state.clone();
-                        let outcome = input::handle_key(
-                            key.code,
-                            key.modifiers,
-                            ratatui::layout::Rect::new(0, 0, terminal.size()?.width, terminal.size()?.height),
-                            &mut state,
-                            &snapshot,
-                        );
-                        if matches!(outcome, InputOutcome::Quit) {
-                            break;
-                        }
-                        let changed = apply_input_outcome(
-                            outcome,
-                            query,
-                            &mut state,
-                            &mut snapshot,
-                            &mut trace_detail_cache,
-                            &llm_timeline_cache,
-                            &mut trace_paging,
-                            &trace_page_tx,
-                        )?;
-                        let state_changed = before != state;
-                        needs_redraw |= changed || state_changed;
-                        if changed || state_changed {
-                            render_ready = true;
-                            persist_preferences_if_changed(&state, &mut saved_preferences);
-                        }
-                    }
                     Some(event) => {
-                        if handle_terminal_event(
+                        let size = terminal.size()?;
+                        let update = handle_terminal_event(
                             event,
-                            ratatui::layout::Rect::new(0, 0, terminal.size()?.width, terminal.size()?.height),
-                            query,
-                            &mut state,
-                            &mut snapshot,
-                            &mut trace_detail_cache,
-                            &llm_timeline_cache,
-                            &mut trace_paging,
-                            &trace_page_tx,
-                            &mut saved_preferences,
-                            &mut needs_redraw,
-                            &mut render_ready,
-                        )? {
+                            ratatui::layout::Rect::new(0, 0, size.width, size.height),
+                            &mut TerminalEventContext {
+                                query,
+                                state: &mut state,
+                                snapshot: &mut snapshot,
+                                trace_detail_cache: &mut trace_detail_cache,
+                                llm_timeline_cache: &llm_timeline_cache,
+                                trace_paging: &mut trace_paging,
+                                trace_page_tx: &trace_page_tx,
+                            },
+                        )?;
+                        if update.quit {
                             break;
+                        }
+                        needs_redraw |= update.needs_redraw;
+                        render_ready |= update.render_ready;
+                        if update.persist_preferences {
+                            persist_preferences_if_changed(&state, &mut saved_preferences);
                         }
                     }
                     None => break,
@@ -341,39 +335,32 @@ async fn terminal_loop(
 fn handle_terminal_event(
     event: Event,
     root: ratatui::layout::Rect,
-    query: &QueryService,
-    state: &mut UiState,
-    snapshot: &mut DashboardSnapshot,
-    trace_detail_cache: &mut TraceDetailCache,
-    llm_timeline_cache: &LlmTimelineCache,
-    trace_paging: &mut TraceListPager,
-    trace_page_tx: &mpsc::UnboundedSender<TracePageRefreshResult>,
-    saved_preferences: &mut UserPreferences,
-    needs_redraw: &mut bool,
-    render_ready: &mut bool,
-) -> Result<bool> {
+    context: &mut TerminalEventContext<'_>,
+) -> Result<TerminalEventUpdate> {
     match event {
         Event::Key(key) if key.kind == KeyEventKind::Press => {
-            let before = state.clone();
-            let outcome = input::handle_key(key.code, key.modifiers, root, state, snapshot);
+            let before = context.state.clone();
+            let outcome = input::handle_key(
+                key.code,
+                key.modifiers,
+                root,
+                context.state,
+                context.snapshot,
+            );
             if matches!(outcome, InputOutcome::Quit) {
-                return Ok(true);
+                return Ok(TerminalEventUpdate {
+                    quit: true,
+                    ..TerminalEventUpdate::default()
+                });
             }
-            let changed = apply_input_outcome(
-                outcome,
-                query,
-                state,
-                snapshot,
-                trace_detail_cache,
-                llm_timeline_cache,
-                trace_paging,
-                trace_page_tx,
-            )?;
-            let state_changed = before != *state;
-            *needs_redraw |= changed || state_changed;
-            if changed || state_changed {
-                *render_ready = true;
-                persist_preferences_if_changed(state, saved_preferences);
+            let changed = context.apply_input_outcome(outcome)? || before != *context.state;
+            if changed {
+                return Ok(TerminalEventUpdate {
+                    needs_redraw: true,
+                    render_ready: true,
+                    persist_preferences: true,
+                    ..TerminalEventUpdate::default()
+                });
             }
         }
         Event::Mouse(mouse) => {
@@ -382,43 +369,34 @@ fn handle_terminal_event(
                 crossterm::event::MouseEventKind::ScrollDown
                     | crossterm::event::MouseEventKind::ScrollUp
             );
-            let before = state.clone();
-            let outcome = input::handle_mouse(mouse, root, state, snapshot);
-            let state_changed = before != *state;
-            if !matches!(outcome, InputOutcome::None) {
-                let changed = apply_input_outcome(
-                    outcome,
-                    query,
-                    state,
-                    snapshot,
-                    trace_detail_cache,
-                    llm_timeline_cache,
-                    trace_paging,
-                    trace_page_tx,
-                )?;
-                *needs_redraw |= changed || state_changed;
-                if (changed || state_changed) && !is_wheel {
-                    *render_ready = true;
-                }
-                if changed || state_changed {
-                    persist_preferences_if_changed(state, saved_preferences);
-                }
-            } else if state_changed {
-                *needs_redraw = true;
-                if !is_wheel {
-                    *render_ready = true;
-                }
-                persist_preferences_if_changed(state, saved_preferences);
+            let before = context.state.clone();
+            let outcome = input::handle_mouse(mouse, root, context.state, context.snapshot);
+            let refresh_changed = if matches!(outcome, InputOutcome::None) {
+                false
+            } else {
+                context.apply_input_outcome(outcome)?
+            };
+            let changed = refresh_changed || before != *context.state;
+            if changed {
+                return Ok(TerminalEventUpdate {
+                    needs_redraw: true,
+                    render_ready: !is_wheel,
+                    persist_preferences: true,
+                    ..TerminalEventUpdate::default()
+                });
             }
         }
         Event::Resize(_, _) => {
-            *needs_redraw = true;
-            *render_ready = true;
+            return Ok(TerminalEventUpdate {
+                needs_redraw: true,
+                render_ready: true,
+                ..TerminalEventUpdate::default()
+            });
         }
         _ => {}
     }
 
-    Ok(false)
+    Ok(TerminalEventUpdate::default())
 }
 
 fn persist_preferences_if_changed(state: &UiState, saved_preferences: &mut UserPreferences) {
@@ -428,53 +406,47 @@ fn persist_preferences_if_changed(state: &UiState, saved_preferences: &mut UserP
     }
 }
 
-fn apply_input_outcome(
-    outcome: InputOutcome,
-    query: &QueryService,
-    state: &mut UiState,
-    snapshot: &mut DashboardSnapshot,
-    trace_detail_cache: &mut TraceDetailCache,
-    llm_timeline_cache: &LlmTimelineCache,
-    trace_paging: &mut TraceListPager,
-    trace_page_tx: &mpsc::UnboundedSender<TracePageRefreshResult>,
-) -> Result<bool> {
-    match outcome {
-        InputOutcome::None => Ok(false),
-        InputOutcome::RefreshDetails => {
-            refresh_detail_state(
-                query,
-                state,
-                snapshot,
-                trace_detail_cache,
-                llm_timeline_cache,
-            )?;
-            Ok(true)
+impl TerminalEventContext<'_> {
+    fn apply_input_outcome(&mut self, outcome: InputOutcome) -> Result<bool> {
+        match outcome {
+            InputOutcome::None => Ok(false),
+            InputOutcome::RefreshDetails => {
+                refresh_detail_state(
+                    self.query,
+                    self.state,
+                    self.snapshot,
+                    self.trace_detail_cache,
+                    self.llm_timeline_cache,
+                )?;
+                Ok(true)
+            }
+            InputOutcome::RefreshSnapshot => {
+                let filters = input::filters(self.state, &self.snapshot.services);
+                let trace_anchor =
+                    trace_paging::TraceListAnchor::capture(self.snapshot, self.state);
+                let selected_llm_span_id = selected_llm_span_id(self.snapshot, self.state);
+                *self.snapshot = self.query.snapshot(&filters)?;
+                restore_selected_llm_span(self.snapshot, self.state, selected_llm_span_id);
+                trace_paging::sync_first_page_for_filters(
+                    self.query,
+                    self.state,
+                    self.snapshot,
+                    self.trace_paging,
+                    self.trace_page_tx,
+                    filters,
+                    trace_anchor,
+                )?;
+                refresh_detail_state(
+                    self.query,
+                    self.state,
+                    self.snapshot,
+                    self.trace_detail_cache,
+                    self.llm_timeline_cache,
+                )?;
+                Ok(true)
+            }
+            InputOutcome::Quit => Ok(false),
         }
-        InputOutcome::RefreshSnapshot => {
-            let filters = input::filters(state, &snapshot.services);
-            let trace_anchor = trace_paging::TraceListAnchor::capture(snapshot, state);
-            let selected_llm_span_id = selected_llm_span_id(snapshot, state);
-            *snapshot = query.snapshot(&filters)?;
-            restore_selected_llm_span(snapshot, state, selected_llm_span_id);
-            trace_paging::sync_first_page_for_filters(
-                query,
-                state,
-                snapshot,
-                trace_paging,
-                trace_page_tx,
-                filters,
-                trace_anchor,
-            )?;
-            refresh_detail_state(
-                query,
-                state,
-                snapshot,
-                trace_detail_cache,
-                llm_timeline_cache,
-            )?;
-            Ok(true)
-        }
-        InputOutcome::Quit => Ok(false),
     }
 }
 

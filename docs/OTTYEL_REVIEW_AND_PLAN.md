@@ -128,7 +128,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P1 | MCP claims read-only behavior but opens a writable store | `src/app/mod.rs`, `src/store/mod.rs` | `ottyel mcp` can create a database and execute schema initialization and WAL pragmas |
 | P1 | MCP responses can be unbounded | `src/mcp/resources.rs`, `src/mcp/tools.rs` | A large trace or prompt can consume excessive time and model context; `search_llm` always computes all aggregates |
 | P2 | Large modules slow safe change | `src/app/input.rs`, `src/store/queries.rs`, `src/ui/details.rs`, `src/ui/traces.rs` | Several production modules exceed the repository's own 800-line stop threshold |
-| P2 | Quality gates are incomplete | `.github/workflows/rust.yml` | CI runs build and test but not format, Clippy, migration, conformance, or performance checks |
+| P2 (partially resolved 2026-07-11) | Quality gates were incomplete | `.github/workflows/rust.yml` | Normal CI now enforces format, strict all-target Clippy, and tests; migration, conformance, and performance jobs remain open |
 | P2 | Product documentation was materially stale | `ROADMAP.md`, `README.md` | The private roadmap was replaced on 2026-07-10; README claims and crossed screenshot filenames/captions still need evidence-based updates |
 
 ## Detailed Review
@@ -467,7 +467,7 @@ Goal: make correctness and performance changes measurable before changing the st
   numeric severity derivation.
 - [ ] Add correctness tests demonstrating the metric-series, AI-classification,
   retention-orphan, composite-identity, and stale-projection bugs before fixing them.
-- [ ] Add `cargo fmt --check` and Clippy to CI; clean the current Clippy baseline rather
+- [x] Add `cargo fmt --check` and Clippy to CI; clean the current Clippy baseline rather
   than adding broad allows.
 - [ ] Define a repeatable reference machine/profile in `docs/performance.md`.
 
@@ -810,18 +810,18 @@ when it makes totals silently incomplete.
 
 Keep each pull request a vertical, reversible step with tests and measurements.
 
-1. Add correctness regressions and the repeatable performance harness.
-2. Make format and Clippy clean and enforce them in CI.
-3. Add migrations, integrity checks, and read-only store open mode.
-4. Add the writer owner/read pool without changing the v1 logical schema.
-5. Add the bounded ingest queue, request budgets, gzip, typed errors, and ingest health.
-6. Ship the v2 composite trace/log schema, materialized trace summaries, and whole-trace
+1. [ ] Add correctness regressions and the repeatable performance harness.
+2. [x] Make format and Clippy clean and enforce them in CI.
+3. [ ] Add migrations, integrity checks, and read-only store open mode.
+4. [ ] Add the writer owner/read pool without changing the v1 logical schema.
+5. [ ] Add the bounded ingest queue, request budgets, gzip, typed errors, and ingest health.
+6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and whole-trace
    retention.
-7. Ship faithful metric streams/points and targeted metric series queries.
-8. Replace the monolithic snapshot with active-view asynchronous read models.
-9. Add the typed OTel GenAI/OpenInference operation projection and exact run/session
+7. [ ] Ship faithful metric streams/points and targeted metric series queries.
+8. [ ] Replace the monolithic snapshot with active-view asynchronous read models.
+9. [ ] Add the typed OTel GenAI/OpenInference operation projection and exact run/session
    aggregates.
-10. Rework AI Runs and MCP investigation flows on the new read models.
+10. [ ] Rework AI Runs and MCP investigation flows on the new read models.
 
 Do not combine pull requests 4 through 9 into one migration. Each step should retain a
 working TUI, expose compatibility behavior, and include a rollback or recovery story.
@@ -847,9 +847,9 @@ Current documentation work:
 - `cargo fmt -- --check`: passed.
 - `cargo test`: passed, 112 tests after the trace-filter and schema-neutral log semantics
   slices.
-- `cargo clippy --all-targets -- -D warnings`: failed with 11 library diagnostics and
-  13 diagnostics across all targets, including two oversized handler interfaces and
-  several style findings.
+- `cargo clippy --all-targets -- -D warnings`: passed after resolving all 13 baseline
+  diagnostics without lint suppressions.
+- `cargo test ui::snapshot_tests`: passed, 8 snapshots.
 - UI snapshots and both checked-in screenshots were inspected.
 - Store queries and retention were exercised against the directional synthetic database
   described above.

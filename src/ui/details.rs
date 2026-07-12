@@ -374,10 +374,10 @@ pub(crate) fn build_log_detail_lines(log: &LogSummary, palette: Palette) -> Vec<
 }
 
 pub(crate) fn format_log_body(body: &str) -> Vec<String> {
-    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body) {
-        if let Ok(pretty) = serde_json::to_string_pretty(&value) {
-            return pretty.lines().map(ToString::to_string).collect();
-        }
+    if let Ok(value) = serde_json::from_str::<serde_json::Value>(body)
+        && let Ok(pretty) = serde_json::to_string_pretty(&value)
+    {
+        return pretty.lines().map(ToString::to_string).collect();
     }
 
     body.lines().map(ToString::to_string).collect()
@@ -434,17 +434,13 @@ fn build_llm_detail_lines(
     {
         lines.push(Line::raw(""));
         lines.push(section_header("prompt", palette.accent));
-        lines.extend(
-            truncated_block(
-                prompt,
-                state.llm_expand_prompt,
-                LLM_PREVIEW_LINE_LIMIT,
-                'i',
-                palette.muted,
-            )
-            .into_iter()
-            .map(Line::from),
-        );
+        lines.extend(truncated_block(
+            prompt,
+            state.llm_expand_prompt,
+            LLM_PREVIEW_LINE_LIMIT,
+            'i',
+            palette.muted,
+        ));
     }
 
     if let Some(output) = item
@@ -454,17 +450,13 @@ fn build_llm_detail_lines(
     {
         lines.push(Line::raw(""));
         lines.push(section_header("output", palette.success));
-        lines.extend(
-            truncated_block(
-                output,
-                state.llm_expand_output,
-                LLM_PREVIEW_LINE_LIMIT,
-                'o',
-                palette.muted,
-            )
-            .into_iter()
-            .map(Line::from),
-        );
+        lines.extend(truncated_block(
+            output,
+            state.llm_expand_output,
+            LLM_PREVIEW_LINE_LIMIT,
+            'o',
+            palette.muted,
+        ));
     }
 
     if item.tool_name.is_some() || item.tool_args.is_some() {
@@ -484,10 +476,10 @@ fn build_llm_detail_lines(
 
 fn llm_prompt_name(span_name: &str) -> String {
     let trimmed = span_name.trim();
-    if let Some(prompt) = trimmed.strip_prefix("Prompt: ").map(str::trim) {
-        if !prompt.is_empty() {
-            return prompt.to_string();
-        }
+    if let Some(prompt) = trimmed.strip_prefix("Prompt: ").map(str::trim)
+        && !prompt.is_empty()
+    {
+        return prompt.to_string();
     }
     trimmed.to_string()
 }

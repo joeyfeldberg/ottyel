@@ -496,10 +496,10 @@ fn llm_model_label(provider: &str, model: &str) -> String {
 
 fn llm_prompt_name(span_name: &str) -> String {
     let trimmed = span_name.trim();
-    if let Some(prompt) = trimmed.strip_prefix("Prompt: ").map(str::trim) {
-        if !prompt.is_empty() {
-            return prompt.to_string();
-        }
+    if let Some(prompt) = trimmed.strip_prefix("Prompt: ").map(str::trim)
+        && !prompt.is_empty()
+    {
+        return prompt.to_string();
     }
     trimmed.to_string()
 }

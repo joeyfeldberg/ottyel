@@ -70,10 +70,12 @@ pub(super) fn resources_read_result(
             "spans": query.trace_detail(trace_id).map_err(internal_error)?,
         })
     } else if let Some(trace_id) = uri.strip_prefix("ottyel://logs/") {
-        let mut filters = QueryFilters::default();
-        filters.log_filters = LogFilters {
-            pinned_trace_id: Some(trace_id.to_string()),
-            ..LogFilters::default()
+        let filters = QueryFilters {
+            log_filters: LogFilters {
+                pinned_trace_id: Some(trace_id.to_string()),
+                ..LogFilters::default()
+            },
+            ..QueryFilters::default()
         };
         json!({
             "traceId": trace_id,

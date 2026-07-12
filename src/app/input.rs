@@ -1345,8 +1345,10 @@ mod tests {
 
     #[test]
     fn clicking_selected_trace_opens_trace_detail() {
-        let mut state = UiState::default();
-        state.active_tab = Tab::Traces as usize;
+        let mut state = UiState {
+            active_tab: Tab::Traces as usize,
+            ..UiState::default()
+        };
         let snapshot = snapshot_with_trace();
 
         let outcome = handle_mouse(

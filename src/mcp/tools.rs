@@ -218,37 +218,37 @@ fn tool_result(payload: Value) -> Result<Value, McpError> {
 }
 
 fn filters_from_args(args: &Value) -> Result<QueryFilters, McpError> {
-    let mut filters = QueryFilters::default();
-    filters.service = optional_string(args, "service");
-    filters.search_query = optional_string(args, "query");
-    filters.errors_only = args
-        .get("errorsOnly")
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    filters.time_window = args
-        .get("timeWindow")
-        .and_then(Value::as_str)
-        .map(parse_time_window)
-        .transpose()?
-        .unwrap_or(TimeWindow::TwentyFourHours);
-    filters.log_filters = LogFilters {
-        severity: args
-            .get("severity")
-            .and_then(Value::as_str)
-            .map(parse_log_severity)
-            .transpose()?
-            .unwrap_or_default(),
-        correlation: args
-            .get("correlation")
-            .and_then(Value::as_str)
-            .map(parse_log_correlation)
-            .transpose()?
-            .unwrap_or_default(),
+    Ok(QueryFilters {
+        service: optional_string(args, "service"),
         search_query: optional_string(args, "query"),
-        pinned_trace_id: optional_string(args, "traceId"),
-        pinned_span_id: optional_string(args, "spanId"),
-    };
-    Ok(filters)
+        errors_only: args
+            .get("errorsOnly")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        time_window: args
+            .get("timeWindow")
+            .and_then(Value::as_str)
+            .map(parse_time_window)
+            .transpose()?
+            .unwrap_or(TimeWindow::TwentyFourHours),
+        log_filters: LogFilters {
+            severity: args
+                .get("severity")
+                .and_then(Value::as_str)
+                .map(parse_log_severity)
+                .transpose()?
+                .unwrap_or_default(),
+            correlation: args
+                .get("correlation")
+                .and_then(Value::as_str)
+                .map(parse_log_correlation)
+                .transpose()?
+                .unwrap_or_default(),
+            search_query: optional_string(args, "query"),
+            pinned_trace_id: optional_string(args, "traceId"),
+            pinned_span_id: optional_string(args, "spanId"),
+        },
+    })
 }
 
 fn limit(args: &Value) -> usize {
