@@ -456,9 +456,12 @@ Goal: make correctness and performance changes measurable before changing the st
   OpenInference spans, mixed conventions, malformed records, and duplicate delivery.
 - [ ] Generate fixtures through real SDK/exporter shapes where practical; do not use UI
   seed objects as ingest evidence.
-- [ ] Add a benchmark harness for ingest batches, active view queries, trace detail,
-  metric series, search, retention, and concurrent ingest/read load.
-- [ ] Cover at least 100k spans, 1m logs, 1m metric points, a 10k-span trace, and 100k AI
+- [x] Add a deterministic release-mode harness foundation for unique-batch ingest,
+  current snapshot/feed queries, trace detail, `LIKE` search, retention overhead,
+  distributions, throughput, and database/WAL growth.
+- [ ] Extend the harness with targeted metric series, controlled concurrent ingest/read
+  and UI-stall measurement, MCP response budgets, and query-plan assertions.
+- [x] Cover at least 100k spans, 1m logs, 1m metric points, a 10k-span trace, and 100k AI
   operations in the non-CI benchmark profile.
 - [ ] Record `EXPLAIN QUERY PLAN` assertions for critical list/detail queries.
 - [x] Add complete-trace summary regressions for error-only, service, text, time-window,
@@ -469,7 +472,9 @@ Goal: make correctness and performance changes measurable before changing the st
   retention-orphan, composite-identity, and stale-projection bugs before fixing them.
 - [x] Add `cargo fmt --check` and Clippy to CI; clean the current Clippy baseline rather
   than adding broad allows.
-- [ ] Define a repeatable reference machine/profile in `docs/performance.md`.
+- [x] Define the repeatable smoke/reference profiles and machine protocol in
+  `docs/performance.md`.
+- [ ] Designate a stable reference machine and preserve the first clean reference result.
 
 Acceptance:
 
@@ -845,11 +850,13 @@ Current documentation work:
 ## Validation Performed For This Review
 
 - `cargo fmt -- --check`: passed.
-- `cargo test`: passed, 112 tests after the trace-filter and schema-neutral log semantics
-  slices.
+- `cargo test`: passed, 112 product tests plus 6 performance-harness support tests.
 - `cargo clippy --all-targets -- -D warnings`: passed after resolving all 13 baseline
   diagnostics without lint suppressions.
 - `cargo test ui::snapshot_tests`: passed, 8 snapshots.
+- `cargo bench --bench store_baseline -- --profile smoke`: passed with 9 measured
+  scenarios, exact cardinality checks, and 2 explicitly unsupported scenarios. The smoke
+  run is diagnostic only and does not prove the reference budgets.
 - UI snapshots and both checked-in screenshots were inspected.
 - Store queries and retention were exercised against the directional synthetic database
   described above.
