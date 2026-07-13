@@ -286,7 +286,7 @@ fn test_span(
 }
 
 fn dependent_row_counts(store: &Store) -> (i64, i64, i64) {
-    let conn = store.conn.lock().expect("sqlite mutex poisoned");
+    let conn = store.reader_connection_for_test();
     conn.query_row(
         r#"
         SELECT
@@ -301,7 +301,7 @@ fn dependent_row_counts(store: &Store) -> (i64, i64, i64) {
 }
 
 fn orphan_counts(store: &Store) -> (i64, i64, i64) {
-    let conn = store.conn.lock().expect("sqlite mutex poisoned");
+    let conn = store.reader_connection_for_test();
     conn.query_row(
         r#"
         SELECT

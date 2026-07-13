@@ -34,7 +34,7 @@ impl Store {
         threshold_unix_nano: Option<i64>,
         search_query: Option<&str>,
     ) -> Result<Page<TraceSummary, TraceCursor>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let mut sql = r#"
             SELECT
                 summary.trace_id,
@@ -107,7 +107,7 @@ impl Store {
     }
 
     pub fn services(&self, threshold_unix_nano: Option<i64>) -> Result<Vec<String>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let mut sql = String::from("SELECT service_name FROM (");
         sql.push_str("SELECT DISTINCT service_name FROM spans");
         if let Some(threshold) = threshold_unix_nano {
@@ -133,7 +133,7 @@ impl Store {
         &self,
         threshold_unix_nano: Option<i64>,
     ) -> Result<(usize, usize, usize, usize, usize)> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let trace_count: usize = conn.query_row(
             &format!(
                 "SELECT COUNT(DISTINCT trace_id) FROM spans{}",
@@ -205,7 +205,7 @@ impl Store {
     pub fn trace_detail(&self, trace_id: &str) -> Result<Vec<SpanDetail>> {
         let events_by_span = self.span_events_by_trace(trace_id)?;
         let links_by_span = self.span_links_by_trace(trace_id)?;
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let mut stmt = conn.prepare(
             r#"
             SELECT
@@ -275,7 +275,7 @@ impl Store {
         search_query: Option<&str>,
         log_filters: &LogFilters,
     ) -> Result<Page<LogSummary, LogCursor>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let mut sql = String::from(
             "SELECT id, service_name, timestamp_unix_nano, severity, body, trace_id, span_id, resource_attributes_json, attributes_json FROM logs",
         );
@@ -379,7 +379,7 @@ impl Store {
         threshold_unix_nano: Option<i64>,
         search_query: Option<&str>,
     ) -> Result<Page<MetricSummary, MetricCursor>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let mut sql = String::from(
             r#"
             SELECT id, service_name, metric_name, instrument_kind, timestamp_unix_nano, value, summary
@@ -461,7 +461,7 @@ impl Store {
         threshold_unix_nano: Option<i64>,
         search_query: Option<&str>,
     ) -> Result<Page<LlmSummary, LlmCursor>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let mut sql = String::from(
             r#"
             SELECT llm_spans.trace_id, llm_spans.span_id, spans.start_time_unix_nano, llm_spans.service_name, spans.span_name, provider, model, operation,
@@ -572,7 +572,7 @@ impl Store {
         threshold_unix_nano: Option<i64>,
         search_query: Option<&str>,
     ) -> Result<Vec<LlmRollup>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let column = match dimension {
             LlmRollupDimension::Model => "model",
             LlmRollupDimension::Provider => "provider",
@@ -641,7 +641,7 @@ impl Store {
         threshold_unix_nano: Option<i64>,
         search_query: Option<&str>,
     ) -> Result<Vec<LlmSessionSummary>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let mut source_sql = String::from(
             r#"
             SELECT llm_spans.service_name, provider, model, total_tokens, cost, latency_ms, status,
@@ -726,7 +726,7 @@ impl Store {
         threshold_unix_nano: Option<i64>,
         search_query: Option<&str>,
     ) -> Result<Vec<LlmModelComparison>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let mut sql = String::from(
             r#"
             SELECT provider, model,
@@ -791,7 +791,7 @@ impl Store {
         threshold_unix_nano: Option<i64>,
         search_query: Option<&str>,
     ) -> Result<Vec<LlmTopCall>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let mut sql = String::from(
             r#"
             SELECT llm_spans.trace_id, llm_spans.span_id, llm_spans.service_name,
@@ -836,7 +836,7 @@ impl Store {
         &self,
         trace_id: &str,
     ) -> Result<HashMap<String, Vec<SpanEventDetail>>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let mut stmt = conn.prepare(
             r#"
             SELECT span_id, name, timestamp_unix_nano, attributes_json
@@ -867,7 +867,7 @@ impl Store {
     }
 
     fn span_links_by_trace(&self, trace_id: &str) -> Result<HashMap<String, Vec<SpanLinkDetail>>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let mut stmt = conn.prepare(
             r#"
             SELECT span_id, linked_trace_id, linked_span_id, trace_state, attributes_json
@@ -899,7 +899,7 @@ impl Store {
     }
 
     fn llm_timeline_spans(&self, trace_id: &str, span_id: &str) -> Result<Vec<SpanDetail>> {
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let conn = self.reader();
         let mut stmt = conn.prepare(
             r#"
             WITH RECURSIVE subtree AS (

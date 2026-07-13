@@ -22,8 +22,8 @@ use super::{
 
 impl Store {
     pub fn ingest_traces(&self, request: ExportTraceServiceRequest) -> Result<usize> {
-        let retention = self.retention_policy()?;
-        let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let (writer, retention) = self.write_access()?;
+        let mut conn = writer.lock().expect("sqlite mutex poisoned");
         let tx = conn.transaction()?;
         let mut inserted = 0usize;
 
@@ -154,8 +154,8 @@ impl Store {
     }
 
     pub fn ingest_logs(&self, request: ExportLogsServiceRequest) -> Result<usize> {
-        let retention = self.retention_policy()?;
-        let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let (writer, retention) = self.write_access()?;
+        let mut conn = writer.lock().expect("sqlite mutex poisoned");
         let tx = conn.transaction()?;
         let mut inserted = 0usize;
 
@@ -196,8 +196,8 @@ impl Store {
     }
 
     pub fn ingest_metrics(&self, request: ExportMetricsServiceRequest) -> Result<usize> {
-        let retention = self.retention_policy()?;
-        let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let (writer, retention) = self.write_access()?;
+        let mut conn = writer.lock().expect("sqlite mutex poisoned");
         let tx = conn.transaction()?;
         let mut inserted = 0usize;
 
@@ -403,7 +403,8 @@ impl Store {
             .saturating_mul(60 * 60 * 1_000_000_000);
         let threshold_nanos = now_unix_nanos().saturating_sub(retention_nanos);
 
-        let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let (writer, _) = self.write_access()?;
+        let mut conn = writer.lock().expect("sqlite mutex poisoned");
         let tx = conn.transaction()?;
         tx.execute(
             "DELETE FROM logs WHERE timestamp_unix_nano < ?1",

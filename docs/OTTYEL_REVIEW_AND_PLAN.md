@@ -90,9 +90,10 @@ protect the UI from query cost:
 
 Those later performance changes were directionally correct. They moved periodic work to
 blocking tasks, cached selected trace detail, bounded one LLM session scan to 256 rows,
-and paged traces. They optimized symptoms around the current store interface. They did
-not change the single-connection store, per-request retention, global aggregate scans,
-or monolithic all-tab snapshot.
+and paged traces. At the reviewed revision they optimized symptoms without changing the
+single-connection store, per-request retention, global aggregate scans, or monolithic
+all-tab snapshot. The read-pool foundation added on 2026-07-13 removes the shared
+reader/writer connection; the other three problems remain.
 
 ## Current Strengths To Preserve
 
@@ -115,7 +116,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | --- | --- | --- | --- |
 | P0 (resolved 2026-07-10) | Trace filters produced partial summaries | `src/store/queries.rs`, `src/store/tests.rs` | Candidate trace IDs are now selected before complete-trace aggregation; regressions cover error-only, service, text, time, and cursor paging |
 | P0 | Metric streams are conflated and lossy | `src/store/ingest.rs`, `src/ui/details.rs` | Different attribute sets are charted together; histogram buckets, quantiles, temporality details, exemplars, unit, and description are lost |
-| P0 | Every store operation shares one mutex-protected connection | `src/store/mod.rs` | OTLP/HTTP, OTLP/gRPC, UI reads, MCP reads, and retention block one another |
+| P0 (partially resolved 2026-07-13) | Store ownership and async database work remain incomplete | `src/store/mod.rs`, `src/store/reader_pool.rs`, `src/store/reader_pool_tests.rs` | Queries now lease one of four bounded physical read-only connections and no longer take the writer mutex; writes and retention still use a direct mutex, pool waits have no timeout/overload result, and synchronous SQLite still runs on async handlers |
 | P0 | Retention runs after every export | `src/store/ingest.rs` | Sustained ingest pays repeated table scans and delete transactions even when nothing expires |
 | P0 | OTLP overload and failure behavior is incomplete | `src/ingest.rs` | No explicit bounded queue, partial success, consistent request limits, gzip setup, or retry-correct error mapping |
 | P0 | SQLite identity is based on global `span_id` | `src/store/schema.rs` | The logical identity `(trace_id, span_id)` is not preserved; joins and upserts can corrupt colliding traces |
@@ -137,16 +138,24 @@ These are foundations. They should be migrated, not replaced with a separate pro
 
 ### 1. Store And Ingest Contention
 
-`Store` wraps one `rusqlite::Connection` in `Arc<Mutex<_>>`. Synchronous database work
-runs directly in async HTTP and gRPC handlers. WAL cannot provide concurrent reader
-benefits when all access is serialized before SQLite sees it.
+At the reviewed revision, `Store` wrapped one `rusqlite::Connection` in
+`Arc<Mutex<_>>`, so WAL could not provide concurrent reader benefits. Since 2026-07-13,
+the Store keeps one serialized writer connection and an eager fixed pool of four
+physical read-only/query-only connections. Every query leases a reader without taking
+the writer mutex. Regression tests hold real WAL transactions in both directions: a
+writer commits while a reader snapshot remains stable, and a reader returns the prior
+committed state while a writer transaction is open.
+
+This is only the connection-separation foundation. The writer is still a direct
+`Arc<Mutex<Connection>>`, reader checkout can wait indefinitely, and synchronous SQLite
+work still runs directly in async HTTP and gRPC handlers.
 
 Each trace, log, or metric export:
 
-1. takes the same mutex;
+1. takes the writer mutex;
 2. writes one transaction using repeated `execute` calls;
 3. commits;
-4. reacquires the mutex;
+4. reacquires the writer mutex;
 5. issues retention deletes across all signal tables;
 6. counts every span and may evict the oldest complete traces.
 
@@ -357,9 +366,10 @@ Observed behavior:
   B-tree;
 - leading-wildcard JSON/text search scans candidate rows.
 
-At the default three-second snapshot cadence, this work competes with both OTLP
-transports for the same mutex. The dominant gains will come from data projections,
-indexes, active-view queries, and connection ownership, not micro-optimizing Ratatui.
+At the default three-second snapshot cadence, this work still competes for local CPU and
+storage bandwidth, but it no longer takes the writer mutex. The dominant remaining gains
+will come from data projections, indexes, active-view queries, bounded writer ownership,
+and blocking-worker routing, not micro-optimizing Ratatui.
 
 ## Target Architecture
 
@@ -506,8 +516,11 @@ Goal: create the seam required for every subsequent data fix.
   operations. It rejects missing or incompatible databases without schema migration,
   blocks direct SQL and every ingest path, and preserves live WAL visibility.
 - [ ] Set private database and directory permissions on Unix.
-- [ ] Replace `Arc<Mutex<Connection>>` with a dedicated writer owner and a small bounded
-  read connection pool.
+- [x] Move every query path onto a shared fixed pool of four physical read-only/query-only
+  WAL connections. Tests cover bounded checkout, clone/drop ownership, stable reader
+  snapshots, writer progress, and reader progress during a writer transaction.
+- [ ] Replace the remaining writer `Arc<Mutex<Connection>>` with a dedicated owner and
+  bounded wait/overload contract.
 - [ ] Route every database call through blocking workers; no SQLite call may run on the
   terminal event loop or an async network worker.
 - [ ] Use prepared/cached statements and batch one signal export per transaction.
@@ -519,7 +532,7 @@ Acceptance:
 - MCP can open an existing database without implicit database creation or writes to
   schema, data, or persistent settings; SQLite may manage WAL/SHM coordination sidecars
   for live visibility;
-- UI reads proceed during a representative writer transaction under WAL;
+- UI/store reads proceed during a representative writer transaction under WAL;
 - all async handlers remain responsive while the database is deliberately slowed;
 - migration interruption tests recover without silent data loss;
 - existing v1 data remains inspectable after upgrade.
@@ -837,7 +850,9 @@ Keep each pull request a vertical, reversible step with tests and measurements.
 2. [x] Make format and Clippy clean and enforce them in CI.
 3. [x] Add migrations, integrity checks, and read-only store open mode. Backup/recovery
    remains a separate Phase 1 prerequisite for the first non-trivial migration.
-4. [ ] Add the writer owner/read pool without changing the v1 logical schema.
+4. [ ] Add the writer owner/read pool without changing the v1 logical schema. The bounded
+   read pool and separate writer connection are complete; dedicated writer ownership,
+   bounded waiting, overload reporting, and blocking-worker routing remain.
 5. [ ] Add the bounded ingest queue, request budgets, gzip, typed errors, and ingest health.
 6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled
    bounded whole-trace retention.
@@ -869,13 +884,15 @@ Current documentation work:
 ## Validation Performed For This Review
 
 - `cargo fmt -- --check`: passed.
-- `cargo test`: passed, 112 product tests plus 6 performance-harness support tests.
-- `cargo clippy --all-targets -- -D warnings`: passed after resolving all 13 baseline
-  diagnostics without lint suppressions.
+- `cargo test`: passed, 143 product tests plus 6 performance-harness support tests.
+- `cargo clippy --all-targets --all-features -- -D warnings`: passed without lint
+  suppressions.
 - `cargo test ui::snapshot_tests`: passed, 8 snapshots.
 - `cargo bench --bench store_baseline -- --profile smoke`: passed with 9 measured
   scenarios, exact cardinality checks, and 2 explicitly unsupported scenarios. The smoke
   run is diagnostic only and does not prove the reference budgets.
+- Focused WAL concurrency tests prove reader and writer transaction progress in both
+  directions; the public benchmark still lacks a deterministic overlap rendezvous.
 - UI snapshots and both checked-in screenshots were inspected.
 - Store queries and retention were exercised against the directional synthetic database
   described above.

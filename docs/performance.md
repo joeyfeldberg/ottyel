@@ -84,8 +84,8 @@ The harness explicitly reports two unsupported scenarios in JSON:
 
 - `targeted_metric_series`: no public query currently identifies and downsamples one
   metric series. Timing the global metric feed would mislabel the operation.
-- `concurrent_ingest_read`: a controlled contention workload and latency contract for
-  the current single-connection store are not implemented in this first slice.
+- `concurrent_ingest_read`: the harness does not yet have a controlled overlap rendezvous
+  or separate read/write latency contract for the current Store.
 
 `targeted_metric_series` must remain unsupported until the corresponding query exists.
 `concurrent_ingest_read` becomes supported when the harness defines and implements a

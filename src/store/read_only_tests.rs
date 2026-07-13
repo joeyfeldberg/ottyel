@@ -57,7 +57,7 @@ fn cold_wal_read_preserves_main_database_and_only_creates_coordination_sidecars(
     create_compatible_database(&path, 1);
     let writer = Store::open(&path, 24, 1_000).unwrap();
     let expected = {
-        let conn = writer.conn.lock().unwrap();
+        let conn = writer.writer_connection_for_test().unwrap().lock().unwrap();
         logical_state(&conn)
     };
     assert_eq!(expected.journal_mode, "wal");
@@ -180,9 +180,10 @@ fn read_only_store_rejects_direct_sql_and_every_ingest_entrypoint() {
     drop(create_compatible_database(&path, 1));
     let before = filesystem_snapshot(tempdir.path());
     let store = Store::open_read_only(&path).unwrap();
+    assert!(store.writer_connection_for_test().is_none());
 
     {
-        let conn = store.conn.lock().unwrap();
+        let conn = store.reader_connection_for_test();
         assert!(conn.is_readonly(MAIN_DB).unwrap());
         assert_eq!(pragma_i64(&conn, "query_only"), 1);
         let error = conn
@@ -244,7 +245,7 @@ fn assert_compatible_reader(reader: &Store, expected: &LogicalState) {
     let spans = reader.trace_detail("trace-preserve").unwrap();
     assert_eq!(spans.len(), 1);
     assert_eq!(spans[0].span_name, "preserve me");
-    let conn = reader.conn.lock().unwrap();
+    let conn = reader.reader_connection_for_test();
     assert!(conn.is_readonly(MAIN_DB).unwrap());
     assert_eq!(pragma_i64(&conn, "query_only"), 1);
     assert_eq!(logical_state(&conn), *expected);

@@ -16,7 +16,7 @@ fn fresh_database_creates_the_v1_schema_and_connection_configuration() {
     let path = tempdir.path().join("ottyel.db");
 
     let store = Store::open(&path, 24, 1_000).unwrap();
-    let conn = store.conn.lock().unwrap();
+    let conn = store.writer_connection_for_test().unwrap().lock().unwrap();
     assert_eq!(schema_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
     assert_eq!(user_schema_objects(&conn), expected_v1_objects());
     assert_eq!(pragma_string(&conn, "journal_mode"), "wal");
