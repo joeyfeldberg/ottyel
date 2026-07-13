@@ -127,7 +127,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P1 (partially resolved 2026-07-11) | Log time and severity semantics were wrong and remain incomplete | `src/store/helpers.rs`, `src/store/ingest.rs`, `src/store/tests/log_semantics.rs` | Event-time fallback and empty-text numeric severity labels are corrected; the v1 schema still drops observed time, numeric severity, event name, and other fields |
 | P1 (resolved 2026-07-13) | Retention could leave corrupt-looking investigations | `src/store/ingest.rs`, `src/store/tests/retention.rs` | Time and span-cap retention now evict whole traces transactionally and remove event, link, and LLM orphans by trace/span identity; scheduled maintenance and the v2 composite schema remain open |
 | P1 | Startup and runtime failures are not visible in the TUI | `src/app/mod.rs` | A failed listener bind is not reported until exit; a refresh error exits the terminal loop instead of showing stale data plus an error |
-| P1 | MCP claims read-only behavior but opens a writable store | `src/app/mod.rs`, `src/store/mod.rs` | `ottyel mcp` can create a database and execute schema initialization and WAL pragmas |
+| P1 (resolved 2026-07-13) | MCP and doctor used writable store initialization | `src/app/mod.rs`, `src/store/mod.rs`, `src/store/read_only_tests.rs`, `src/mcp/tests.rs` | MCP and non-repair doctor now open a physically read-only main database, enable connection-local query-only mode, validate exact v0/v1 schemas without migration, and reject direct SQL and ingest writes; SQLite WAL/SHM coordination sidecars remain allowed so a live reader sees later commits |
 | P1 | MCP responses can be unbounded | `src/mcp/resources.rs`, `src/mcp/tools.rs` | A large trace or prompt can consume excessive time and model context; `search_llm` always computes all aggregates |
 | P2 | Large modules slow safe change | `src/app/input.rs`, `src/store/queries.rs`, `src/ui/details.rs`, `src/ui/traces.rs` | Several production modules exceed the repository's own 800-line stop threshold |
 | P2 (partially resolved 2026-07-11) | Quality gates were incomplete | `.github/workflows/rust.yml` | Normal CI now enforces format, strict all-target Clippy, and tests; migration, conformance, and performance jobs remain open |
@@ -313,8 +313,13 @@ model, not a dump of database rows. Current problems include:
 - trace detail and AI detail have no verbosity/content policy;
 - `search_llm` recomputes and returns every aggregate section on each call;
 - tools publish no output schemas;
-- MCP opens the database through the writable initialization path;
 - aggregate completeness and normalization provenance are not returned.
+
+Database opening is no longer one of these problems. MCP and non-repair doctor now use
+a physically read-only main connection plus connection-local query-only mode, without
+implicit database creation, migration, or persistent schema/data/settings writes. This
+deliberately does not use SQLite immutable mode: SQLite may create or update WAL/SHM
+coordination sidecars so an already-open MCP reader continues to see later writer commits.
 
 Keep MCP deterministic. Do not add an embedded model. Give external agents small,
 composable, typed tools that return evidence, coverage, and caveats.
@@ -497,7 +502,9 @@ Goal: create the seam required for every subsequent data fix.
   keep normal current-version opens on lightweight exact-schema validation.
 - [ ] Back up or copy the v1 database before the first non-trivial migration and define
   its recovery path.
-- [ ] Add a read-only/query-only open mode for MCP and non-repair doctor operations.
+- [x] Add a physically read-only plus query-only open mode for MCP and non-repair doctor
+  operations. It rejects missing or incompatible databases without schema migration,
+  blocks direct SQL and every ingest path, and preserves live WAL visibility.
 - [ ] Set private database and directory permissions on Unix.
 - [ ] Replace `Arc<Mutex<Connection>>` with a dedicated writer owner and a small bounded
   read connection pool.
@@ -509,7 +516,9 @@ Goal: create the seam required for every subsequent data fix.
 
 Acceptance:
 
-- MCP can open an existing database without creating or modifying it;
+- MCP can open an existing database without implicit database creation or writes to
+  schema, data, or persistent settings; SQLite may manage WAL/SHM coordination sidecars
+  for live visibility;
 - UI reads proceed during a representative writer transaction under WAL;
 - all async handlers remain responsive while the database is deliberately slowed;
 - migration interruption tests recover without silent data loss;
@@ -680,6 +689,8 @@ Acceptance:
 
 Goal: give coding agents bounded, semantically correct evidence instead of database dumps.
 
+- [x] Route MCP store access through a physically read-only main connection with
+  connection-local query-only enforcement and live WAL visibility.
 - [ ] Correct protocol negotiation, JSON-RPC parse/error handling, lifecycle behavior,
   cancellation where useful, and current MCP conformance tests.
 - [ ] Add output schemas and explicit read-only annotations/descriptions where supported.
@@ -713,7 +724,8 @@ Acceptance:
 - a local agent can answer "why was this run slow?" using bounded calls with cited trace,
   span, event, and log IDs;
 - malformed input yields a protocol response and does not terminate the server;
-- MCP opening and querying leaves database bytes and schema unchanged.
+- MCP opening and querying cannot write schema, data, or persistent database settings;
+  SQLite-managed WAL/SHM coordination sidecars are permitted for live visibility.
 
 ### Phase 8: Maintenance, Code Locality, And Release Quality
 
@@ -823,8 +835,8 @@ Keep each pull request a vertical, reversible step with tests and measurements.
 
 1. [ ] Add correctness regressions and the repeatable performance harness.
 2. [x] Make format and Clippy clean and enforce them in CI.
-3. [ ] Add migrations, integrity checks, and read-only store open mode. The migration
-   foundation and integrity gates are complete; backup/recovery and read-only open remain.
+3. [x] Add migrations, integrity checks, and read-only store open mode. Backup/recovery
+   remains a separate Phase 1 prerequisite for the first non-trivial migration.
 4. [ ] Add the writer owner/read pool without changing the v1 logical schema.
 5. [ ] Add the bounded ingest queue, request budgets, gzip, typed errors, and ingest health.
 6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled

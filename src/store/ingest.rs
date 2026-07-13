@@ -22,6 +22,7 @@ use super::{
 
 impl Store {
     pub fn ingest_traces(&self, request: ExportTraceServiceRequest) -> Result<usize> {
+        let retention = self.retention_policy()?;
         let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
         let tx = conn.transaction()?;
         let mut inserted = 0usize;
@@ -148,11 +149,12 @@ impl Store {
 
         tx.commit()?;
         drop(conn);
-        self.enforce_retention()?;
+        self.enforce_retention(retention)?;
         Ok(inserted)
     }
 
     pub fn ingest_logs(&self, request: ExportLogsServiceRequest) -> Result<usize> {
+        let retention = self.retention_policy()?;
         let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
         let tx = conn.transaction()?;
         let mut inserted = 0usize;
@@ -189,11 +191,12 @@ impl Store {
 
         tx.commit()?;
         drop(conn);
-        self.enforce_retention()?;
+        self.enforce_retention(retention)?;
         Ok(inserted)
     }
 
     pub fn ingest_metrics(&self, request: ExportMetricsServiceRequest) -> Result<usize> {
+        let retention = self.retention_policy()?;
         let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
         let tx = conn.transaction()?;
         let mut inserted = 0usize;
@@ -213,7 +216,7 @@ impl Store {
 
         tx.commit()?;
         drop(conn);
-        self.enforce_retention()?;
+        self.enforce_retention(retention)?;
         Ok(inserted)
     }
 
@@ -394,8 +397,8 @@ impl Store {
         Ok(inserted)
     }
 
-    fn enforce_retention(&self) -> Result<()> {
-        let retention_nanos = i64::try_from(self.retention_hours)
+    fn enforce_retention(&self, retention: super::RetentionPolicy) -> Result<()> {
+        let retention_nanos = i64::try_from(retention.hours)
             .unwrap_or(i64::MAX)
             .saturating_mul(60 * 60 * 1_000_000_000);
         let threshold_nanos = now_unix_nanos().saturating_sub(retention_nanos);
@@ -438,7 +441,7 @@ impl Store {
         }
 
         let span_count: i64 = tx.query_row("SELECT COUNT(*) FROM spans", [], |row| row.get(0))?;
-        let max_spans = i64::try_from(self.max_spans).unwrap_or(i64::MAX);
+        let max_spans = i64::try_from(retention.maximum_spans).unwrap_or(i64::MAX);
         if span_count > max_spans {
             let to_trim = span_count - max_spans;
             tx.execute(

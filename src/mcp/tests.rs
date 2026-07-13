@@ -259,6 +259,7 @@ fn search_logs_accepts_returned_cursor() {
 
 struct TestQuery {
     query: QueryService,
+    _writer: Store,
     _database: NamedTempFile,
 }
 
@@ -272,24 +273,28 @@ impl Deref for TestQuery {
 
 fn empty_query() -> TestQuery {
     let file = NamedTempFile::new().unwrap();
-    let store = Store::open(file.path(), 24, 1000).unwrap();
+    let writer = Store::open(file.path(), 24, 1000).unwrap();
+    let reader = Store::open_read_only(file.path()).unwrap();
     TestQuery {
-        query: QueryService::new(store, 50),
+        query: QueryService::new(reader, 50),
+        _writer: writer,
         _database: file,
     }
 }
 
 fn query_with_trace_and_logs() -> TestQuery {
     let file = NamedTempFile::new().unwrap();
-    let store = Store::open(file.path(), 24, 1000).unwrap();
+    let writer = Store::open(file.path(), 24, 1000).unwrap();
     let now = current_unix_nanos();
-    store.ingest_traces(trace_request(now, 1)).unwrap();
-    store
+    writer.ingest_traces(trace_request(now, 1)).unwrap();
+    writer
         .ingest_traces(trace_request(now + 10_000_000, 2))
         .unwrap();
-    store.ingest_logs(log_request(now)).unwrap();
+    writer.ingest_logs(log_request(now)).unwrap();
+    let reader = Store::open_read_only(file.path()).unwrap();
     TestQuery {
-        query: QueryService::new(store, 50),
+        query: QueryService::new(reader, 50),
+        _writer: writer,
         _database: file,
     }
 }

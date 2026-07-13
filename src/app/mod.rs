@@ -119,7 +119,7 @@ async fn serve(args: ServeArgs) -> Result<()> {
 }
 
 fn doctor(args: DoctorArgs) -> Result<()> {
-    let store = Store::open(&args.db_path, 24, 1000)?;
+    let store = Store::open_read_only(&args.db_path)?;
     let (traces, errors, logs, metrics, llm) = store.counts(None)?;
     println!("db: {}", args.db_path.display());
     println!("traces: {traces}");
@@ -131,7 +131,7 @@ fn doctor(args: DoctorArgs) -> Result<()> {
 }
 
 fn mcp(args: McpArgs) -> Result<()> {
-    let store = Store::open(&args.db_path, 24, 1000)?;
+    let store = Store::open_read_only(&args.db_path)?;
     let query = QueryService::new(store, args.page_size);
     crate::mcp::serve_stdio(query)
 }

@@ -40,6 +40,26 @@ pub(super) fn initialize(conn: &mut Connection) -> Result<()> {
     configure_connection(conn)
 }
 
+pub(super) fn validate_read_only(conn: &Connection) -> Result<()> {
+    let version = schema_version(conn)?;
+    ensure_supported_version(version)?;
+
+    match version {
+        0 if !has_user_schema(conn)? => {
+            bail!("unversioned database is empty and cannot be opened read-only")
+        }
+        0 => {
+            v1::validate_strict(conn).context("unversioned database is incompatible with v1 schema")
+        }
+        LATEST_SCHEMA_VERSION => {
+            v1::validate_strict(conn).context("version 1 database has an incompatible schema")
+        }
+        _ => bail!(
+            "database schema version {version} requires migration to version {LATEST_SCHEMA_VERSION} and cannot be opened read-only"
+        ),
+    }
+}
+
 fn ensure_supported_version(version: i64) -> Result<()> {
     if version < 0 {
         bail!("database schema version {version} is invalid");
