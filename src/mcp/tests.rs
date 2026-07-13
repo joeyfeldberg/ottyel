@@ -1,4 +1,4 @@
-use std::io::Write;
+use std::{io::Write, ops::Deref};
 
 use opentelemetry_proto::tonic::{
     collector::{logs::v1::ExportLogsServiceRequest, trace::v1::ExportTraceServiceRequest},
@@ -257,13 +257,29 @@ fn search_logs_accepts_returned_cursor() {
     assert_ne!(first["logs"][0]["body"], second["logs"][0]["body"]);
 }
 
-fn empty_query() -> QueryService {
-    let file = NamedTempFile::new().unwrap();
-    let store = Store::open(file.path(), 24, 1000).unwrap();
-    QueryService::new(store, 50)
+struct TestQuery {
+    query: QueryService,
+    _database: NamedTempFile,
 }
 
-fn query_with_trace_and_logs() -> QueryService {
+impl Deref for TestQuery {
+    type Target = QueryService;
+
+    fn deref(&self) -> &Self::Target {
+        &self.query
+    }
+}
+
+fn empty_query() -> TestQuery {
+    let file = NamedTempFile::new().unwrap();
+    let store = Store::open(file.path(), 24, 1000).unwrap();
+    TestQuery {
+        query: QueryService::new(store, 50),
+        _database: file,
+    }
+}
+
+fn query_with_trace_and_logs() -> TestQuery {
     let file = NamedTempFile::new().unwrap();
     let store = Store::open(file.path(), 24, 1000).unwrap();
     let now = current_unix_nanos();
@@ -272,7 +288,10 @@ fn query_with_trace_and_logs() -> QueryService {
         .ingest_traces(trace_request(now + 10_000_000, 2))
         .unwrap();
     store.ingest_logs(log_request(now)).unwrap();
-    QueryService::new(store, 50)
+    TestQuery {
+        query: QueryService::new(store, 50),
+        _database: file,
+    }
 }
 
 fn call_tool(query: &QueryService, name: &str, arguments: Value) -> Value {

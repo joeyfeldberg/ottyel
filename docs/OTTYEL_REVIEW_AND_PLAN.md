@@ -119,7 +119,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P0 | Retention runs after every export | `src/store/ingest.rs` | Sustained ingest pays repeated table scans and delete transactions even when nothing expires |
 | P0 | OTLP overload and failure behavior is incomplete | `src/ingest.rs` | No explicit bounded queue, partial success, consistent request limits, gzip setup, or retry-correct error mapping |
 | P0 | SQLite identity is based on global `span_id` | `src/store/schema.rs` | The logical identity `(trace_id, span_id)` is not preserved; joins and upserts can corrupt colliding traces |
-| P0 | There is no schema migration mechanism | `src/store/schema.rs` | Correcting the store cannot be shipped safely to an existing database |
+| P0 (resolved 2026-07-13) | There was no schema migration mechanism | `src/store/schema.rs`, `src/store/schema/` | Ordered `user_version` migrations now preserve exact legacy v0 data, validate the frozen schema, and roll back DDL, version changes, and failed post-checks together; backup and recovery for the first non-trivial v2 migration remain open |
 | P0 | Sensitive AI content has no central policy | store, TUI, and MCP paths | Prompts, outputs, tool arguments, and raw attributes can be persisted and returned without masking or payload budgets |
 | P1 | AI operations are misclassified as LLM calls | `src/domain.rs` | OpenInference agent, tool, retrieval, evaluator, and prompt spans inflate model-call counts and show as `unknown/unknown` |
 | P1 | Current GenAI events and attributes are only partly understood | `src/domain.rs`, `src/store/ingest.rs` | Event-based inference details and evaluations are ignored; current structured messages, tool results, cache/reasoning tokens, agents, and TTFT are missing |
@@ -491,10 +491,12 @@ Acceptance:
 
 Goal: create the seam required for every subsequent data fix.
 
-- [ ] Add ordered, transactional schema migrations using `PRAGMA user_version` or a
-  migration table; test fresh install and every supported upgrade path.
-- [ ] Back up or copy the v1 database before a non-trivial migration and run integrity
-  checks before and after migration.
+- [x] Add ordered, transactional `PRAGMA user_version` migrations; test fresh install,
+  exact legacy v0 upgrade, current v1 reopen, incompatible versions, and rollback.
+- [x] Run full integrity checks before and inside each actual migration transaction;
+  keep normal current-version opens on lightweight exact-schema validation.
+- [ ] Back up or copy the v1 database before the first non-trivial migration and define
+  its recovery path.
 - [ ] Add a read-only/query-only open mode for MCP and non-repair doctor operations.
 - [ ] Set private database and directory permissions on Unix.
 - [ ] Replace `Arc<Mutex<Connection>>` with a dedicated writer owner and a small bounded
@@ -821,7 +823,8 @@ Keep each pull request a vertical, reversible step with tests and measurements.
 
 1. [ ] Add correctness regressions and the repeatable performance harness.
 2. [x] Make format and Clippy clean and enforce them in CI.
-3. [ ] Add migrations, integrity checks, and read-only store open mode.
+3. [ ] Add migrations, integrity checks, and read-only store open mode. The migration
+   foundation and integrity gates are complete; backup/recovery and read-only open remain.
 4. [ ] Add the writer owner/read pool without changing the v1 logical schema.
 5. [ ] Add the bounded ingest queue, request budgets, gzip, typed errors, and ingest health.
 6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled

@@ -26,9 +26,10 @@ impl Store {
                 .with_context(|| format!("failed to create {}", parent.display()))?;
         }
 
-        let conn = Connection::open(path)
+        let mut conn = Connection::open(path)
             .with_context(|| format!("failed to open sqlite db {}", path.display()))?;
-        schema::initialize(&conn)?;
+        schema::initialize(&mut conn)
+            .with_context(|| format!("failed to initialize sqlite db {}", path.display()))?;
 
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
