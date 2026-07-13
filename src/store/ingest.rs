@@ -395,56 +395,120 @@ impl Store {
     }
 
     fn enforce_retention(&self) -> Result<()> {
-        let threshold_nanos =
-            now_unix_nanos().saturating_sub(self.retention_hours as i64 * 60 * 60 * 1_000_000_000);
+        let retention_nanos = i64::try_from(self.retention_hours)
+            .unwrap_or(i64::MAX)
+            .saturating_mul(60 * 60 * 1_000_000_000);
+        let threshold_nanos = now_unix_nanos().saturating_sub(retention_nanos);
 
-        let conn = self.conn.lock().expect("sqlite mutex poisoned");
-        conn.execute(
+        let mut conn = self.conn.lock().expect("sqlite mutex poisoned");
+        let tx = conn.transaction()?;
+        tx.execute(
             "DELETE FROM logs WHERE timestamp_unix_nano < ?1",
             [threshold_nanos],
         )?;
-        conn.execute(
+        tx.execute(
             "DELETE FROM metrics WHERE timestamp_unix_nano < ?1",
             [threshold_nanos],
         )?;
-        conn.execute(
-            "DELETE FROM spans WHERE end_time_unix_nano < ?1",
+        let has_expired_spans: bool = tx.query_row(
+            r#"
+            SELECT EXISTS (
+                SELECT 1
+                FROM spans
+                WHERE end_time_unix_nano < ?1
+                LIMIT 1
+            )
+            "#,
             [threshold_nanos],
+            |row| row.get(0),
         )?;
-        conn.execute(
-            "DELETE FROM span_events WHERE timestamp_unix_nano < ?1",
-            [threshold_nanos],
-        )?;
-        conn.execute(
-            "DELETE FROM span_links WHERE span_id NOT IN (SELECT span_id FROM spans)",
-            [],
-        )?;
-        conn.execute(
-            "DELETE FROM llm_spans WHERE span_id NOT IN (SELECT span_id FROM spans)",
-            [],
-        )?;
-
-        let span_count: i64 = conn.query_row("SELECT COUNT(*) FROM spans", [], |row| row.get(0))?;
-        if span_count > self.max_spans as i64 {
-            let to_trim = span_count - self.max_spans as i64;
-            conn.execute(
+        if has_expired_spans {
+            tx.execute(
                 r#"
                 DELETE FROM spans
-                WHERE span_id IN (
-                    SELECT span_id FROM spans ORDER BY start_time_unix_nano ASC LIMIT ?1
+                WHERE trace_id IN (
+                    SELECT trace_id
+                    FROM spans
+                    GROUP BY trace_id
+                    HAVING MAX(end_time_unix_nano) < ?1
+                )
+                "#,
+                [threshold_nanos],
+            )?;
+        }
+
+        let span_count: i64 = tx.query_row("SELECT COUNT(*) FROM spans", [], |row| row.get(0))?;
+        let max_spans = i64::try_from(self.max_spans).unwrap_or(i64::MAX);
+        if span_count > max_spans {
+            let to_trim = span_count - max_spans;
+            tx.execute(
+                r#"
+                WITH trace_sizes AS (
+                    SELECT
+                        trace_id,
+                        COUNT(*) AS span_count,
+                        MAX(end_time_unix_nano) AS latest_end_time_unix_nano
+                    FROM spans
+                    GROUP BY trace_id
+                ),
+                ranked_traces AS (
+                    SELECT
+                        trace_id,
+                        SUM(span_count) OVER (
+                            ORDER BY latest_end_time_unix_nano ASC, trace_id ASC
+                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
+                        ) - span_count AS spans_before
+                    FROM trace_sizes
+                )
+                DELETE FROM spans
+                WHERE trace_id IN (
+                    SELECT trace_id
+                    FROM ranked_traces
+                    WHERE spans_before < ?1
                 )
                 "#,
                 [to_trim],
             )?;
-            conn.execute(
-                "DELETE FROM span_links WHERE span_id NOT IN (SELECT span_id FROM spans)",
-                [],
-            )?;
-            conn.execute(
-                "DELETE FROM llm_spans WHERE span_id NOT IN (SELECT span_id FROM spans)",
-                [],
-            )?;
         }
+
+        tx.execute(
+            r#"
+            DELETE FROM span_events
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM spans
+                WHERE spans.trace_id = span_events.trace_id
+                  AND spans.span_id = span_events.span_id
+            )
+            "#,
+            [],
+        )?;
+        tx.execute(
+            r#"
+            DELETE FROM span_links
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM spans
+                WHERE spans.trace_id = span_links.trace_id
+                  AND spans.span_id = span_links.span_id
+            )
+            "#,
+            [],
+        )?;
+        tx.execute(
+            r#"
+            DELETE FROM llm_spans
+            WHERE NOT EXISTS (
+                SELECT 1
+                FROM spans
+                WHERE spans.trace_id = llm_spans.trace_id
+                  AND spans.span_id = llm_spans.span_id
+            )
+            "#,
+            [],
+        )?;
+
+        tx.commit()?;
         Ok(())
     }
 }

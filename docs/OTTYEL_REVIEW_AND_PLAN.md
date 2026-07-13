@@ -1,8 +1,10 @@
 # Ottyel Implementation Review and Plan
 
-Status: proposed implementation plan
+Status: active implementation plan
 
 Review date: 2026-07-10
+
+Execution updated: 2026-07-13
 
 Reviewed revision: `06bf94d` (`main`)
 
@@ -123,7 +125,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P1 | Current GenAI events and attributes are only partly understood | `src/domain.rs`, `src/store/ingest.rs` | Event-based inference details and evaluations are ignored; current structured messages, tool results, cache/reasoning tokens, agents, and TTFT are missing |
 | P1 | The all-tab snapshot does work that is not rendered | `src/query.rs`, `src/app/mod.rs` | Every refresh reads every signal; rollups and top calls are queried after their UI panels were removed; the first trace page is queried twice |
 | P1 (partially resolved 2026-07-11) | Log time and severity semantics were wrong and remain incomplete | `src/store/helpers.rs`, `src/store/ingest.rs`, `src/store/tests/log_semantics.rs` | Event-time fallback and empty-text numeric severity labels are corrected; the v1 schema still drops observed time, numeric severity, event name, and other fields |
-| P1 | Retention can leave corrupt-looking investigations | `src/store/ingest.rs` | Span-count trimming deletes individual spans, leaves orphan span events, and can retain partial traces |
+| P1 (resolved 2026-07-13) | Retention could leave corrupt-looking investigations | `src/store/ingest.rs`, `src/store/tests/retention.rs` | Time and span-cap retention now evict whole traces transactionally and remove event, link, and LLM orphans by trace/span identity; scheduled maintenance and the v2 composite schema remain open |
 | P1 | Startup and runtime failures are not visible in the TUI | `src/app/mod.rs` | A failed listener bind is not reported until exit; a refresh error exits the terminal loop instead of showing stale data plus an error |
 | P1 | MCP claims read-only behavior but opens a writable store | `src/app/mod.rs`, `src/store/mod.rs` | `ottyel mcp` can create a database and execute schema initialization and WAL pragmas |
 | P1 | MCP responses can be unbounded | `src/mcp/resources.rs`, `src/mcp/tools.rs` | A large trace or prompt can consume excessive time and model context; `search_llm` always computes all aggregates |
@@ -146,7 +148,7 @@ Each trace, log, or metric export:
 3. commits;
 4. reacquires the mutex;
 5. issues retention deletes across all signal tables;
-6. counts every span and may trim individual rows.
+6. counts every span and may evict the oldest complete traces.
 
 The correct SQLite design is one dedicated writer plus a small read pool. SQLite still
 has one writer, but UI and MCP reads can use WAL snapshots while a bounded writer queue
@@ -468,8 +470,10 @@ Goal: make correctness and performance changes measurable before changing the st
   and cursor-paged trace filters, then correct candidate-trace query semantics.
 - [x] Add schema-neutral log regressions and correct event-time fallback plus empty-text
   numeric severity derivation.
+- [x] Add OTLP-shaped retention regressions, preserve mixed-age traces and old events,
+  evict whole traces at the span cap, and clean dependent rows by trace/span identity.
 - [ ] Add correctness tests demonstrating the metric-series, AI-classification,
-  retention-orphan, composite-identity, and stale-projection bugs before fixing them.
+  composite-identity, and stale-projection bugs before fixing them.
 - [x] Add `cargo fmt --check` and Clippy to CI; clean the current Clippy baseline rather
   than adding broad allows.
 - [x] Define the repeatable smoke/reference profiles and machine protocol in
@@ -820,8 +824,8 @@ Keep each pull request a vertical, reversible step with tests and measurements.
 3. [ ] Add migrations, integrity checks, and read-only store open mode.
 4. [ ] Add the writer owner/read pool without changing the v1 logical schema.
 5. [ ] Add the bounded ingest queue, request budgets, gzip, typed errors, and ingest health.
-6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and whole-trace
-   retention.
+6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled
+   bounded whole-trace retention.
 7. [ ] Ship faithful metric streams/points and targeted metric series queries.
 8. [ ] Replace the monolithic snapshot with active-view asynchronous read models.
 9. [ ] Add the typed OTel GenAI/OpenInference operation projection and exact run/session

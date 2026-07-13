@@ -23,6 +23,7 @@ use crate::{
 use super::Store;
 
 mod log_semantics;
+mod retention;
 
 #[test]
 fn store_ingests_all_three_signals() {
