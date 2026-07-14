@@ -56,10 +56,9 @@ fn cold_wal_read_preserves_main_database_and_only_creates_coordination_sidecars(
     let path = tempdir.path().join("ottyel.db");
     create_compatible_database(&path, 1);
     let writer = Store::open(&path, 24, 1_000).unwrap();
-    let expected = {
-        let conn = writer.writer_connection_for_test().unwrap().lock().unwrap();
-        logical_state(&conn)
-    };
+    let expected = writer
+        .execute_write_for_test(|conn| Ok(logical_state(conn)))
+        .unwrap();
     assert_eq!(expected.journal_mode, "wal");
     drop(writer);
 
@@ -180,7 +179,7 @@ fn read_only_store_rejects_direct_sql_and_every_ingest_entrypoint() {
     drop(create_compatible_database(&path, 1));
     let before = filesystem_snapshot(tempdir.path());
     let store = Store::open_read_only(&path).unwrap();
-    assert!(store.writer_connection_for_test().is_none());
+    assert!(!store.has_writer_for_test());
 
     {
         let conn = store.reader_connection_for_test();

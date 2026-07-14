@@ -52,9 +52,20 @@ fn held_reader_snapshot_does_not_block_ingest_and_refreshes_after_restart() {
 fn held_writer_transaction_does_not_block_reader_and_is_visible_after_commit() {
     let tempdir = tempdir().unwrap();
     let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1_000).unwrap();
-    let mut writer = store.writer_connection_for_test().unwrap().lock().unwrap();
-    let transaction = writer.transaction().unwrap();
-    insert_log(&transaction, "uncommitted writer row");
+    let writer = store.clone();
+    let (inserted_tx, inserted_rx) = mpsc::channel();
+    let (commit_tx, commit_rx) = mpsc::channel();
+    let writer_handle = thread::spawn(move || {
+        writer.execute_write_for_test(move |conn| {
+            let transaction = conn.transaction()?;
+            insert_log(&transaction, "uncommitted writer row");
+            inserted_tx.send(()).unwrap();
+            commit_rx.recv().unwrap();
+            transaction.commit()?;
+            Ok(())
+        })
+    });
+    inserted_rx.recv_timeout(WAIT).unwrap();
 
     let reader = store.clone();
     let (result_tx, result_rx) = mpsc::channel();
@@ -63,8 +74,8 @@ fn held_writer_transaction_does_not_block_reader_and_is_visible_after_commit() {
     });
     let read_result = result_rx.recv_timeout(WAIT);
     if read_result.is_err() {
-        transaction.rollback().unwrap();
-        drop(writer);
+        commit_tx.send(()).unwrap();
+        let _ = writer_handle.join();
         let _ = result_rx.recv_timeout(WAIT);
         drop(handle);
         panic!("reader did not complete while a writer transaction was held");
@@ -72,8 +83,8 @@ fn held_writer_transaction_does_not_block_reader_and_is_visible_after_commit() {
     assert_eq!(read_result.unwrap().unwrap().2, 0);
     handle.join().unwrap();
 
-    transaction.commit().unwrap();
-    drop(writer);
+    commit_tx.send(()).unwrap();
+    writer_handle.join().unwrap().unwrap();
     assert_eq!(store.counts(None).unwrap().2, 1);
 }
 

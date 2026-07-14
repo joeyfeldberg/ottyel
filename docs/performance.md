@@ -70,7 +70,7 @@ the 1,000-span ingest batch.
 
 | JSON name | What the interval includes |
 | --- | --- |
-| `ingest_acknowledgement_1000_spans` | A prebuilt, previously unseen 1,000-span `Store::ingest_traces` batch, transaction commit, and current post-export retention scans. Protobuf decode and fixture construction are excluded. Every warmup and sample uses new IDs. |
+| `ingest_acknowledgement_1000_spans` | A prebuilt, previously unseen 1,000-span `Store::ingest_traces` batch, immediate writer-queue admission, owner-thread transaction commit, current post-export retention scans, and receipt acknowledgement. Protobuf decode and fixture construction are excluded. Every warmup and sample uses new IDs, and this sequential scenario does not measure saturation. |
 | `dashboard_snapshot_all_tabs` | `QueryService::snapshot` with default filters: services/counts, all four first pages, AI rollups, sessions, comparisons, and top calls. This is the current all-tab snapshot, not a future bounded overview model. |
 | `first_trace_page` | The first 50 trace summaries for `perf-service`, using the current service/time candidate query and complete-trace aggregation. |
 | `first_log_page` | The first 50 logs for `perf-service`, ordered by event timestamp and row ID. |
@@ -91,6 +91,32 @@ The harness explicitly reports two unsupported scenarios in JSON:
 `concurrent_ingest_read` becomes supported when the harness defines and implements a
 controlled contention workload and latency contract. A smaller page limit is not a
 substitute for either capability.
+
+The deterministic writer-owner tests use internal gates to prove pressure and lifecycle
+behavior, but those gates are not a benchmark workload. The 64-command storage queue is
+also not a byte or record budget: request decoding and the complete OTLP overload matrix
+remain outside this harness scenario.
+
+## Writer-Owner Smoke Check
+
+The 2026-07-14 ownership change was checked with the documented smoke profile on the same
+machine. The pre-change report used clean revision `debf7f4`; the post-change report used
+the implementation worktree before commit.
+
+| Diagnostic | Before | After |
+| --- | ---: | ---: |
+| Setup | 120.3 ms | 151.0 ms |
+| 1,000-span acknowledgement p50 | 15.929 ms | 15.136 ms |
+| 1,000-span acknowledgement p95 | 21.627 ms | 21.254 ms |
+| All-tab snapshot p50 | 18.393 ms | 18.279 ms |
+| All-tab snapshot p95 | 19.117 ms | 18.652 ms |
+| Main database | 7,802,880 bytes | 7,802,880 bytes |
+| Live WAL | 4,445,512 bytes | 4,445,512 bytes |
+
+Five smoke samples can catch an extreme regression but cannot establish a throughput
+gain. Setup variance increased in this pair, while measured operation percentiles were
+flat to directionally lower. A controlled concurrent scenario and repeated reference
+runs remain required before making a performance claim.
 
 ## Report Schema
 

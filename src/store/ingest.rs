@@ -6,14 +6,14 @@ use opentelemetry_proto::tonic::{
     },
     metrics::v1::{Metric, metric},
 };
-use rusqlite::params;
+use rusqlite::{Connection, params};
 
 use crate::domain::{
     LlmAttributes, attributes_to_map, extract_llm_attributes, extract_service_name,
 };
 
 use super::{
-    Store,
+    AsyncWriteReceipt, RetentionPolicy, Store,
     helpers::{
         any_value_text, format_metric_summary, hex_bytes, log_severity, log_time_unix_nano,
         now_unix_nanos, number_value, resource_to_map, span_kind_name, status_code_name,
@@ -21,9 +21,31 @@ use super::{
 };
 
 impl Store {
+    /// Attempts immediate admission to the bounded writer queue, returning
+    /// [`super::StoreWriteError::Overloaded`] when full. Once admitted, this waits without a
+    /// completion deadline for the definitive writer acknowledgement or an
+    /// [`super::StoreWriteError::OutcomeUnknown`] failure.
+    ///
+    /// Queue and acknowledgement failures can be classified by downcasting the returned error to
+    /// [`super::StoreWriteError`].
     pub fn ingest_traces(&self, request: ExportTraceServiceRequest) -> Result<usize> {
         let (writer, retention) = self.write_access()?;
-        let mut conn = writer.lock().expect("sqlite mutex poisoned");
+        writer.execute(move |conn| Self::write_traces(conn, request, retention))
+    }
+
+    pub(crate) fn try_ingest_traces(
+        &self,
+        request: ExportTraceServiceRequest,
+    ) -> Result<AsyncWriteReceipt<usize>> {
+        let (writer, retention) = self.write_access()?;
+        writer.try_execute_async(move |conn| Self::write_traces(conn, request, retention))
+    }
+
+    fn write_traces(
+        conn: &mut Connection,
+        request: ExportTraceServiceRequest,
+        retention: RetentionPolicy,
+    ) -> Result<usize> {
         let tx = conn.transaction()?;
         let mut inserted = 0usize;
 
@@ -141,21 +163,42 @@ impl Store {
                     }
 
                     if let Some(llm) = llm {
-                        self.insert_llm_row(&tx, &trace_id, &span_id, &service_name, &llm)?;
+                        Self::insert_llm_row(&tx, &trace_id, &span_id, &service_name, &llm)?;
                     }
                 }
             }
         }
 
         tx.commit()?;
-        drop(conn);
-        self.enforce_retention(retention)?;
+        Self::enforce_retention(conn, retention)?;
         Ok(inserted)
     }
 
+    /// Attempts immediate admission to the bounded writer queue, returning
+    /// [`super::StoreWriteError::Overloaded`] when full. Once admitted, this waits without a
+    /// completion deadline for the definitive writer acknowledgement or an
+    /// [`super::StoreWriteError::OutcomeUnknown`] failure.
+    ///
+    /// Queue and acknowledgement failures can be classified by downcasting the returned error to
+    /// [`super::StoreWriteError`].
     pub fn ingest_logs(&self, request: ExportLogsServiceRequest) -> Result<usize> {
         let (writer, retention) = self.write_access()?;
-        let mut conn = writer.lock().expect("sqlite mutex poisoned");
+        writer.execute(move |conn| Self::write_logs(conn, request, retention))
+    }
+
+    pub(crate) fn try_ingest_logs(
+        &self,
+        request: ExportLogsServiceRequest,
+    ) -> Result<AsyncWriteReceipt<usize>> {
+        let (writer, retention) = self.write_access()?;
+        writer.try_execute_async(move |conn| Self::write_logs(conn, request, retention))
+    }
+
+    fn write_logs(
+        conn: &mut Connection,
+        request: ExportLogsServiceRequest,
+        retention: RetentionPolicy,
+    ) -> Result<usize> {
         let tx = conn.transaction()?;
         let mut inserted = 0usize;
 
@@ -190,14 +233,35 @@ impl Store {
         }
 
         tx.commit()?;
-        drop(conn);
-        self.enforce_retention(retention)?;
+        Self::enforce_retention(conn, retention)?;
         Ok(inserted)
     }
 
+    /// Attempts immediate admission to the bounded writer queue, returning
+    /// [`super::StoreWriteError::Overloaded`] when full. Once admitted, this waits without a
+    /// completion deadline for the definitive writer acknowledgement or an
+    /// [`super::StoreWriteError::OutcomeUnknown`] failure.
+    ///
+    /// Queue and acknowledgement failures can be classified by downcasting the returned error to
+    /// [`super::StoreWriteError`].
     pub fn ingest_metrics(&self, request: ExportMetricsServiceRequest) -> Result<usize> {
         let (writer, retention) = self.write_access()?;
-        let mut conn = writer.lock().expect("sqlite mutex poisoned");
+        writer.execute(move |conn| Self::write_metrics(conn, request, retention))
+    }
+
+    pub(crate) fn try_ingest_metrics(
+        &self,
+        request: ExportMetricsServiceRequest,
+    ) -> Result<AsyncWriteReceipt<usize>> {
+        let (writer, retention) = self.write_access()?;
+        writer.try_execute_async(move |conn| Self::write_metrics(conn, request, retention))
+    }
+
+    fn write_metrics(
+        conn: &mut Connection,
+        request: ExportMetricsServiceRequest,
+        retention: RetentionPolicy,
+    ) -> Result<usize> {
         let tx = conn.transaction()?;
         let mut inserted = 0usize;
 
@@ -209,19 +273,17 @@ impl Store {
             for scope_metrics in resource_metrics.scope_metrics {
                 for metric in scope_metrics.metrics {
                     inserted +=
-                        self.insert_metric_rows(&tx, &service_name, &resource_json, metric)?;
+                        Self::insert_metric_rows(&tx, &service_name, &resource_json, metric)?;
                 }
             }
         }
 
         tx.commit()?;
-        drop(conn);
-        self.enforce_retention(retention)?;
+        Self::enforce_retention(conn, retention)?;
         Ok(inserted)
     }
 
     fn insert_llm_row(
-        &self,
         tx: &rusqlite::Transaction<'_>,
         trace_id: &str,
         span_id: &str,
@@ -270,7 +332,6 @@ impl Store {
     }
 
     fn insert_metric_rows(
-        &self,
         tx: &rusqlite::Transaction<'_>,
         service_name: &str,
         resource_json: &str,
@@ -397,14 +458,12 @@ impl Store {
         Ok(inserted)
     }
 
-    fn enforce_retention(&self, retention: super::RetentionPolicy) -> Result<()> {
+    fn enforce_retention(conn: &mut Connection, retention: RetentionPolicy) -> Result<()> {
         let retention_nanos = i64::try_from(retention.hours)
             .unwrap_or(i64::MAX)
             .saturating_mul(60 * 60 * 1_000_000_000);
         let threshold_nanos = now_unix_nanos().saturating_sub(retention_nanos);
 
-        let (writer, _) = self.write_access()?;
-        let mut conn = writer.lock().expect("sqlite mutex poisoned");
         let tx = conn.transaction()?;
         tx.execute(
             "DELETE FROM logs WHERE timestamp_unix_nano < ?1",

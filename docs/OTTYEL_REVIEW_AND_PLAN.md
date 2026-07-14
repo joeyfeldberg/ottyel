@@ -4,7 +4,7 @@ Status: active implementation plan
 
 Review date: 2026-07-10
 
-Execution updated: 2026-07-13
+Execution updated: 2026-07-14
 
 Reviewed revision: `06bf94d` (`main`)
 
@@ -22,9 +22,11 @@ pivot, and initial AI-aware views are more than a demo.
 The current implementation is not yet a trustworthy observability workstation. It can
 display plausible but incorrect trace summaries, merge unrelated metric streams, count
 agent and tool spans as model calls, silently omit important OTLP fields, and make model
-comparisons across incomparable work. The receiver also serializes every ingest and
-query through one SQLite connection and runs retention after every export. UI caches
-mask that design under small loads but do not remove it.
+comparisons across incomparable work. At the reviewed revision, the receiver also
+serialized every ingest and query through one SQLite connection. The current store now
+uses a dedicated writer owner plus four WAL readers, but still runs retention after every
+export. UI caches mask the remaining aggregate and retention cost under small loads but
+do not remove it.
 
 The right product is not a terminal clone of Grafana, Jaeger, or a hosted LLM dashboard.
 Ottyel should be the fastest local answer to these questions:
@@ -92,8 +94,9 @@ Those later performance changes were directionally correct. They moved periodic 
 blocking tasks, cached selected trace detail, bounded one LLM session scan to 256 rows,
 and paged traces. At the reviewed revision they optimized symptoms without changing the
 single-connection store, per-request retention, global aggregate scans, or monolithic
-all-tab snapshot. The read-pool foundation added on 2026-07-13 removes the shared
-reader/writer connection; the other three problems remain.
+all-tab snapshot. The read-pool and writer-owner work completed through 2026-07-14
+removes the shared connection and async OTLP-handler blocking; per-request retention,
+global aggregate scans, and the monolithic all-tab snapshot remain.
 
 ## Current Strengths To Preserve
 
@@ -116,9 +119,9 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | --- | --- | --- | --- |
 | P0 (resolved 2026-07-10) | Trace filters produced partial summaries | `src/store/queries.rs`, `src/store/tests.rs` | Candidate trace IDs are now selected before complete-trace aggregation; regressions cover error-only, service, text, time, and cursor paging |
 | P0 | Metric streams are conflated and lossy | `src/store/ingest.rs`, `src/ui/details.rs` | Different attribute sets are charted together; histogram buckets, quantiles, temporality details, exemplars, unit, and description are lost |
-| P0 (partially resolved 2026-07-13) | Store ownership and async database work remain incomplete | `src/store/mod.rs`, `src/store/reader_pool.rs`, `src/store/reader_pool_tests.rs` | Queries now lease one of four bounded physical read-only connections and no longer take the writer mutex; writes and retention still use a direct mutex, pool waits have no timeout/overload result, and synchronous SQLite still runs on async handlers |
+| P0 (partially resolved 2026-07-14) | Store ownership and async database work remain incomplete | `src/store/writer.rs`, `src/store/reader_pool.rs`, `src/ingest.rs` | One named thread now owns SQLite writes behind immediate 64-command admission, queries use four physical read-only connections, and all six OTLP handlers await async receipts; startup/migration, the initial TUI snapshot, reader checkout, completion, and shutdown still lack a fully bounded worker contract |
 | P0 | Retention runs after every export | `src/store/ingest.rs` | Sustained ingest pays repeated table scans and delete transactions even when nothing expires |
-| P0 | OTLP overload and failure behavior is incomplete | `src/ingest.rs` | No explicit bounded queue, partial success, consistent request limits, gzip setup, or retry-correct error mapping |
+| P0 (partially resolved 2026-07-14) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/store/writer.rs` | Writer admission is command-count bounded and lifecycle failures are retryable, but decoded request bytes/records, partial success, gzip/content types, protocol error bodies, RetryInfo, duplicate handling, and graceful drain remain incomplete |
 | P0 | SQLite identity is based on global `span_id` | `src/store/schema.rs` | The logical identity `(trace_id, span_id)` is not preserved; joins and upserts can corrupt colliding traces |
 | P0 (resolved 2026-07-13) | There was no schema migration mechanism | `src/store/schema.rs`, `src/store/schema/` | Ordered `user_version` migrations now preserve exact legacy v0 data, validate the frozen schema, and roll back DDL, version changes, and failed post-checks together; backup and recovery for the first non-trivial v2 migration remain open |
 | P0 | Sensitive AI content has no central policy | store, TUI, and MCP paths | Prompts, outputs, tool arguments, and raw attributes can be persisted and returned without masking or payload budgets |
@@ -139,29 +142,40 @@ These are foundations. They should be migrated, not replaced with a separate pro
 ### 1. Store And Ingest Contention
 
 At the reviewed revision, `Store` wrapped one `rusqlite::Connection` in
-`Arc<Mutex<_>>`, so WAL could not provide concurrent reader benefits. Since 2026-07-13,
-the Store keeps one serialized writer connection and an eager fixed pool of four
-physical read-only/query-only connections. Every query leases a reader without taking
-the writer mutex. Regression tests hold real WAL transactions in both directions: a
-writer commits while a reader snapshot remains stable, and a reader returns the prior
-committed state while a writer transaction is open.
+`Arc<Mutex<_>>`, so WAL could not provide concurrent reader benefits. The current Store
+keeps an eager fixed pool of four physical read-only/query-only connections and moves the
+writable connection into one named owner thread. Every query leases a reader without
+taking the writer, and every write is admitted with `try_send` to a fixed 64-command
+queue. Store clones share both owners.
 
-This is only the connection-separation foundation. The writer is still a direct
-`Arc<Mutex<Connection>>`, reader checkout can wait indefinitely, and synchronous SQLite
-work still runs directly in async HTTP and gRPC handlers.
+Synchronous callers wait only after admission. HTTP and gRPC traces, logs, and metrics
+perform the same immediate admission and then asynchronously await a commit receipt;
+there is no Tokio blocking-task queue in front of store backpressure. Full or closed
+admission and a lost post-admission acknowledgement are public, downcastable
+`StoreWriteError` variants. The transports map all three lifecycle failures to HTTP 503
+or gRPC `Unavailable`; ordinary projection, SQLite, and retention errors retain the
+existing internal-error path.
 
-Each trace, log, or metric export:
+Each admitted trace, log, or metric export now:
 
-1. takes the writer mutex;
-2. writes one transaction using repeated `execute` calls;
-3. commits;
-4. reacquires the writer mutex;
-5. issues retention deletes across all signal tables;
-6. counts every span and may evict the oldest complete traces.
+1. waits in the bounded command queue, if the owner is already active;
+2. writes and commits one signal transaction on the owner thread;
+3. runs the existing retention transaction on the same owner before the next command;
+4. returns the result to a synchronous or asynchronous receipt.
 
-The correct SQLite design is one dedicated writer plus a small read pool. SQLite still
-has one writer, but UI and MCP reads can use WAL snapshots while a bounded writer queue
-provides explicit pressure and commit acknowledgements.
+Deterministic tests prove FIFO serialization, immediate Full, ordinary-error recovery,
+pre-commit rollback and fail-closed behavior after panic, clone ownership, cancellation
+that does not cancel accepted work, full-queue drain on final drop, and current-thread
+Tokio responsiveness. WAL regressions still prove reader and writer progress in both
+directions.
+
+This is a storage-command bound, not the complete OTLP ingest bound. Request bodies are
+decoded before admission, one command can contain an unbounded record set, admitted work
+has no completion deadline, and final owner drop joins without a shutdown deadline.
+Reader checkout, store open/migration, and the first terminal snapshot can still block
+their caller. Retention still scans after every export, and an error after the signal
+transaction commits can remain outcome-ambiguous. These constraints stay open rather
+than being hidden behind the completed writer-owner item.
 
 ### 2. Query Cost And Incorrect Read Models
 
@@ -519,10 +533,14 @@ Goal: create the seam required for every subsequent data fix.
 - [x] Move every query path onto a shared fixed pool of four physical read-only/query-only
   WAL connections. Tests cover bounded checkout, clone/drop ownership, stable reader
   snapshots, writer progress, and reader progress during a writer transaction.
-- [ ] Replace the remaining writer `Arc<Mutex<Connection>>` with a dedicated owner and
-  bounded wait/overload contract.
-- [ ] Route every database call through blocking workers; no SQLite call may run on the
-  terminal event loop or an async network worker.
+- [x] Replace the remaining writer `Arc<Mutex<Connection>>` with a dedicated owner,
+  immediate bounded admission, typed overload/unavailable/outcome-unknown errors,
+  fail-closed panic handling, and drain-on-final-drop tests.
+- [x] Route all six async OTLP export handlers through direct bounded admission and async
+  receipts; SQLite write and retention work run only on the dedicated owner thread.
+- [ ] Move store open/migration, the initial terminal snapshot, and every remaining
+  database call off the terminal event loop or async network workers. Add bounded reader
+  checkout and shutdown deadlines instead of relying on indefinite waits.
 - [ ] Use prepared/cached statements and batch one signal export per transaction.
 - [ ] Add a typed `StoreError` classification: invalid data, busy/overloaded, unavailable,
   corruption, migration required, and internal defect.
@@ -850,10 +868,12 @@ Keep each pull request a vertical, reversible step with tests and measurements.
 2. [x] Make format and Clippy clean and enforce them in CI.
 3. [x] Add migrations, integrity checks, and read-only store open mode. Backup/recovery
    remains a separate Phase 1 prerequisite for the first non-trivial migration.
-4. [ ] Add the writer owner/read pool without changing the v1 logical schema. The bounded
-   read pool and separate writer connection are complete; dedicated writer ownership,
-   bounded waiting, overload reporting, and blocking-worker routing remain.
-5. [ ] Add the bounded ingest queue, request budgets, gzip, typed errors, and ingest health.
+4. [x] Add the writer owner/read pool without changing the v1 logical schema. Queries use
+   four read-only WAL connections; one named thread owns writes behind immediate
+   64-command admission; lifecycle failures are typed; and all six OTLP handlers await
+   receipts without blocking Tokio workers.
+5. [ ] Extend storage admission into a complete ingest policy with request budgets, gzip,
+   comprehensive typed errors, duplicate handling, and ingest health.
 6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled
    bounded whole-trace retention.
 7. [ ] Ship faithful metric streams/points and targeted metric series queries.
@@ -884,7 +904,7 @@ Current documentation work:
 ## Validation Performed For This Review
 
 - `cargo fmt -- --check`: passed.
-- `cargo test`: passed, 143 product tests plus 6 performance-harness support tests.
+- `cargo test`: passed, 151 product tests plus 6 performance-harness support tests.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed without lint
   suppressions.
 - `cargo test ui::snapshot_tests`: passed, 8 snapshots.
@@ -893,6 +913,15 @@ Current documentation work:
   run is diagnostic only and does not prove the reference budgets.
 - Focused WAL concurrency tests prove reader and writer transaction progress in both
   directions; the public benchmark still lacks a deterministic overlap rendezvous.
+- Six dedicated writer-owner regressions cover Full, FIFO clone submission, normal-error
+  recovery, panic rollback/fail-closed behavior, full-queue drain with dropped receipts,
+  and self-thread teardown. Four ingest tests cover HTTP/gRPC success, lifecycle status
+  mapping, and a gated current-thread responsiveness proof.
+- Same-machine smoke runs before and after the writer owner showed no broad regression:
+  1,000-span acknowledgement p50/p95 moved from 15.929/21.627 ms to 15.136/21.254 ms;
+  database and WAL sizes were unchanged. Setup moved from 120.3 ms to 151.0 ms, so this
+  five-sample diagnostic is not evidence of a throughput improvement or a passed
+  reference budget.
 - UI snapshots and both checked-in screenshots were inspected.
 - Store queries and retention were exercised against the directional synthetic database
   described above.

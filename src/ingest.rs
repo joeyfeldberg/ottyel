@@ -28,7 +28,7 @@ use tokio::sync::watch;
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Request, Response, Status, transport::Server};
 
-use crate::store::Store;
+use crate::store::{AsyncWriteReceipt, Store, StoreWriteError};
 
 #[derive(Clone)]
 struct IngestState {
@@ -93,51 +93,75 @@ async fn serve_grpc_listener(
 }
 
 async fn export_traces(State(state): State<IngestState>, body: Bytes) -> impl IntoResponse {
-    decode_and_handle::<ExportTraceServiceRequest, _, _>(body, move |request| {
-        state
-            .store
-            .ingest_traces(request)
-            .map(|_| ExportTraceServiceResponse::default())
-    })
+    decode_and_handle::<ExportTraceServiceRequest, ExportTraceServiceResponse, _>(
+        body,
+        move |request| state.store.try_ingest_traces(request),
+    )
+    .await
 }
 
 async fn export_logs(State(state): State<IngestState>, body: Bytes) -> impl IntoResponse {
-    decode_and_handle::<ExportLogsServiceRequest, _, _>(body, move |request| {
-        state
-            .store
-            .ingest_logs(request)
-            .map(|_| ExportLogsServiceResponse::default())
-    })
+    decode_and_handle::<ExportLogsServiceRequest, ExportLogsServiceResponse, _>(
+        body,
+        move |request| state.store.try_ingest_logs(request),
+    )
+    .await
 }
 
 async fn export_metrics(State(state): State<IngestState>, body: Bytes) -> impl IntoResponse {
-    decode_and_handle::<ExportMetricsServiceRequest, _, _>(body, move |request| {
-        state
-            .store
-            .ingest_metrics(request)
-            .map(|_| ExportMetricsServiceResponse::default())
-    })
+    decode_and_handle::<ExportMetricsServiceRequest, ExportMetricsServiceResponse, _>(
+        body,
+        move |request| state.store.try_ingest_metrics(request),
+    )
+    .await
 }
 
-fn decode_and_handle<Req, Resp, F>(body: Bytes, handler: F) -> impl IntoResponse
+async fn decode_and_handle<Req, Resp, F>(body: Bytes, handler: F) -> axum::response::Response
 where
     Req: Message + Default,
     Resp: Message + Default,
-    F: FnOnce(Req) -> Result<Resp>,
+    F: FnOnce(Req) -> Result<AsyncWriteReceipt<usize>>,
 {
     match Req::decode(body) {
         Ok(request) => match handler(request) {
-            Ok(response) => {
-                let mut headers = HeaderMap::new();
-                headers.insert(
-                    axum::http::header::CONTENT_TYPE,
-                    HeaderValue::from_static("application/x-protobuf"),
-                );
-                (StatusCode::OK, headers, response.encode_to_vec()).into_response()
-            }
-            Err(err) => (StatusCode::INTERNAL_SERVER_ERROR, err.to_string()).into_response(),
+            Ok(receipt) => match receipt.wait().await {
+                Ok(_) => {
+                    let response = Resp::default();
+                    let mut headers = HeaderMap::new();
+                    headers.insert(
+                        axum::http::header::CONTENT_TYPE,
+                        HeaderValue::from_static("application/x-protobuf"),
+                    );
+                    (StatusCode::OK, headers, response.encode_to_vec()).into_response()
+                }
+                Err(err) => store_http_error(err),
+            },
+            Err(err) => store_http_error(err),
         },
         Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
+    }
+}
+
+fn store_http_error(err: anyhow::Error) -> axum::response::Response {
+    let status = match err.downcast_ref::<StoreWriteError>() {
+        Some(
+            StoreWriteError::Overloaded
+            | StoreWriteError::Unavailable
+            | StoreWriteError::OutcomeUnknown,
+        ) => StatusCode::SERVICE_UNAVAILABLE,
+        None => StatusCode::INTERNAL_SERVER_ERROR,
+    };
+    (status, err.to_string()).into_response()
+}
+
+fn store_status(err: anyhow::Error) -> Status {
+    match err.downcast_ref::<StoreWriteError>() {
+        Some(
+            StoreWriteError::Overloaded
+            | StoreWriteError::Unavailable
+            | StoreWriteError::OutcomeUnknown,
+        ) => Status::unavailable(err.to_string()),
+        None => Status::internal(err.to_string()),
     }
 }
 
@@ -149,10 +173,6 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
     }
 }
 
-fn internal_status(err: anyhow::Error) -> Status {
-    Status::internal(err.to_string())
-}
-
 #[tonic::async_trait]
 impl TraceService for IngestState {
     async fn export(
@@ -160,9 +180,12 @@ impl TraceService for IngestState {
         request: Request<ExportTraceServiceRequest>,
     ) -> std::result::Result<Response<ExportTraceServiceResponse>, Status> {
         self.store
-            .ingest_traces(request.into_inner())
+            .try_ingest_traces(request.into_inner())
+            .map_err(store_status)?
+            .wait()
+            .await
             .map(|_| Response::new(ExportTraceServiceResponse::default()))
-            .map_err(internal_status)
+            .map_err(store_status)
     }
 }
 
@@ -173,9 +196,12 @@ impl LogsService for IngestState {
         request: Request<ExportLogsServiceRequest>,
     ) -> std::result::Result<Response<ExportLogsServiceResponse>, Status> {
         self.store
-            .ingest_logs(request.into_inner())
+            .try_ingest_logs(request.into_inner())
+            .map_err(store_status)?
+            .wait()
+            .await
             .map(|_| Response::new(ExportLogsServiceResponse::default()))
-            .map_err(internal_status)
+            .map_err(store_status)
     }
 }
 
@@ -186,16 +212,25 @@ impl MetricsService for IngestState {
         request: Request<ExportMetricsServiceRequest>,
     ) -> std::result::Result<Response<ExportMetricsServiceResponse>, Status> {
         self.store
-            .ingest_metrics(request.into_inner())
+            .try_ingest_metrics(request.into_inner())
+            .map_err(store_status)?
+            .wait()
+            .await
             .map(|_| Response::new(ExportMetricsServiceResponse::default()))
-            .map_err(internal_status)
+            .map_err(store_status)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+    use std::{
+        sync::mpsc,
+        task::Poll,
+        thread,
+        time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    };
 
+    use anyhow::anyhow;
     use axum::http::StatusCode;
     use axum::{Router, body::Body, http::Request, routing::post};
     use opentelemetry_proto::tonic::{
@@ -208,12 +243,12 @@ mod tests {
     };
     use prost::Message;
     use tempfile::tempdir;
-    use tonic::transport::Channel;
+    use tonic::{Code, transport::Channel};
     use tower::ServiceExt;
 
-    use crate::store::Store;
+    use crate::store::{Store, StoreWriteError};
 
-    use super::{IngestState, export_traces, serve_grpc_listener};
+    use super::{IngestState, export_traces, serve_grpc_listener, store_http_error, store_status};
 
     #[tokio::test]
     async fn traces_endpoint_accepts_otlp_protobuf() {
@@ -265,6 +300,97 @@ mod tests {
         let _ = shutdown_tx.send(true);
         server.await.unwrap().unwrap();
 
+        assert_eq!(store.counts(None).unwrap().0, 1);
+    }
+
+    #[test]
+    fn writer_lifecycle_errors_are_retryable_and_operation_errors_are_internal() {
+        for error in [
+            StoreWriteError::Overloaded,
+            StoreWriteError::Unavailable,
+            StoreWriteError::OutcomeUnknown,
+        ] {
+            assert_eq!(
+                store_http_error(anyhow!(error)).status(),
+                StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert_eq!(store_status(anyhow!(error)).code(), Code::Unavailable);
+        }
+
+        assert_eq!(
+            store_http_error(anyhow!("sqlite operation failed")).status(),
+            StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert_eq!(
+            store_status(anyhow!("sqlite operation failed")).code(),
+            Code::Internal
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_handler_yields_while_an_admitted_write_waits_for_the_owner() {
+        let now = now_nanos() as u64;
+        let tempdir = tempdir().unwrap();
+        let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+        let app = Router::new()
+            .route("/v1/traces", post(export_traces))
+            .with_state(IngestState {
+                store: store.clone(),
+            });
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let blocking_store = store.clone();
+        let blocker = thread::spawn(move || {
+            blocking_store.execute_write_for_test(move |_| {
+                entered_sender.send(()).unwrap();
+                release_receiver.recv().unwrap();
+                Ok(())
+            })
+        });
+        entered_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let request = Request::post("/v1/traces")
+            .header("content-type", "application/x-protobuf")
+            .body(Body::from(trace_export_request(now).encode_to_vec()))
+            .unwrap();
+        let mut response_future = Box::pin(app.oneshot(request));
+        let watchdog_release = release_sender.clone();
+        let (cancel_sender, cancel_receiver) = mpsc::channel();
+        let watchdog = thread::spawn(move || {
+            if cancel_receiver
+                .recv_timeout(Duration::from_millis(500))
+                .is_err()
+            {
+                let _ = watchdog_release.send(());
+            }
+        });
+        let started = Instant::now();
+        let first_poll = futures::poll!(response_future.as_mut());
+        let poll_duration = started.elapsed();
+
+        if matches!(first_poll, Poll::Ready(_)) {
+            let _ = cancel_sender.send(());
+            let _ = release_sender.send(());
+            watchdog.join().unwrap();
+            blocker.join().unwrap().unwrap();
+            if poll_duration >= Duration::from_millis(250) {
+                panic!("HTTP handler blocked the current-thread runtime until SQLite completed");
+            }
+            panic!("HTTP handler completed before the gated writer was released");
+        }
+        assert!(poll_duration < Duration::from_millis(250));
+
+        cancel_sender.send(()).unwrap();
+        release_sender.send(()).unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(2), response_future)
+            .await
+            .unwrap()
+            .unwrap();
+        watchdog.join().unwrap();
+        blocker.join().unwrap().unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(store.counts(None).unwrap().0, 1);
     }
 

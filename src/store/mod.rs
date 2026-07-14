@@ -3,16 +3,16 @@ mod ingest;
 mod queries;
 mod reader_pool;
 mod schema;
+mod writer;
 
-use std::{
-    fs,
-    path::Path,
-    sync::{Arc, Mutex},
-};
+use std::{fs, path::Path};
 
 use anyhow::{Context, Result, bail};
 use reader_pool::{ReaderLease, ReaderPool};
 use rusqlite::Connection;
+pub(crate) use writer::AsyncWriteReceipt;
+pub use writer::StoreWriteError;
+use writer::WriterOwner;
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RetentionPolicy {
@@ -23,7 +23,7 @@ pub(super) struct RetentionPolicy {
 #[derive(Debug, Clone)]
 enum StoreAccess {
     ReadWrite {
-        writer: Arc<Mutex<Connection>>,
+        writer: WriterOwner,
         retention: RetentionPolicy,
     },
     ReadOnly,
@@ -51,13 +51,15 @@ impl Store {
             .with_context(|| format!("failed to open sqlite db {}", path.display()))?;
         schema::initialize(&mut conn)
             .with_context(|| format!("failed to initialize sqlite db {}", path.display()))?;
+        let writer = WriterOwner::start(conn)
+            .with_context(|| format!("failed to start sqlite writer for {}", path.display()))?;
         let readers = ReaderPool::open(path).with_context(|| {
             format!("failed to initialize sqlite readers for {}", path.display())
         })?;
 
         Ok(Self {
             access: StoreAccess::ReadWrite {
-                writer: Arc::new(Mutex::new(conn)),
+                writer,
                 retention: RetentionPolicy {
                     hours: retention_hours,
                     maximum_spans: max_spans,
@@ -86,7 +88,7 @@ impl Store {
         })
     }
 
-    pub(super) fn write_access(&self) -> Result<(&Arc<Mutex<Connection>>, RetentionPolicy)> {
+    fn write_access(&self) -> Result<(&WriterOwner, RetentionPolicy)> {
         match &self.access {
             StoreAccess::ReadWrite { writer, retention } => Ok((writer, *retention)),
             StoreAccess::ReadOnly => bail!("cannot ingest telemetry through a read-only store"),
@@ -98,10 +100,19 @@ impl Store {
     }
 
     #[cfg(test)]
-    fn writer_connection_for_test(&self) -> Option<&Arc<Mutex<Connection>>> {
+    fn has_writer_for_test(&self) -> bool {
+        matches!(self.access, StoreAccess::ReadWrite { .. })
+    }
+
+    #[cfg(test)]
+    pub(crate) fn execute_write_for_test<T, F>(&self, operation: F) -> Result<T>
+    where
+        T: Send + 'static,
+        F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
+    {
         match &self.access {
-            StoreAccess::ReadWrite { writer, .. } => Some(writer),
-            StoreAccess::ReadOnly => None,
+            StoreAccess::ReadWrite { writer, .. } => writer.execute(operation),
+            StoreAccess::ReadOnly => bail!("cannot write through a read-only store"),
         }
     }
 
@@ -126,7 +137,7 @@ impl Store {
             (
                 StoreAccess::ReadWrite { writer: left, .. },
                 StoreAccess::ReadWrite { writer: right, .. },
-            ) => Arc::ptr_eq(left, right),
+            ) => left.shares_owner_with(right),
             (StoreAccess::ReadWrite { .. }, StoreAccess::ReadOnly)
             | (StoreAccess::ReadOnly, StoreAccess::ReadWrite { .. })
             | (StoreAccess::ReadOnly, StoreAccess::ReadOnly) => false,
