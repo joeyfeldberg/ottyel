@@ -4,7 +4,7 @@ Status: active implementation plan
 
 Review date: 2026-07-10
 
-Execution updated: 2026-07-14
+Execution updated: 2026-07-16
 
 Reviewed revision: `06bf94d` (`main`)
 
@@ -24,9 +24,12 @@ display plausible but incorrect trace summaries, merge unrelated metric streams,
 agent and tool spans as model calls, silently omit important OTLP fields, and make model
 comparisons across incomparable work. At the reviewed revision, the receiver also
 serialized every ingest and query through one SQLite connection. The current store now
-uses a dedicated writer owner plus four WAL readers, but still runs retention after every
-export. UI caches mask the remaining aggregate and retention cost under small loads but
-do not remove it.
+uses a dedicated writer owner plus four WAL readers. OTLP requests also pass through one
+shared cross-transport admission gate with transport-byte limits, compression handling,
+structural acceptance budgets, and a request deadline. Retention still runs after every
+export. The structural budgets are evaluated after Prost decoding and therefore do not
+yet bound decoded-object allocation; UI caches likewise mask remaining aggregate and
+retention cost under small loads without removing it.
 
 The right product is not a terminal clone of Grafana, Jaeger, or a hosted LLM dashboard.
 Ottyel should be the fastest local answer to these questions:
@@ -95,13 +98,18 @@ blocking tasks, cached selected trace detail, bounded one LLM session scan to 25
 and paged traces. At the reviewed revision they optimized symptoms without changing the
 single-connection store, per-request retention, global aggregate scans, or monolithic
 all-tab snapshot. The read-pool and writer-owner work completed through 2026-07-14
-removes the shared connection and async OTLP-handler blocking; per-request retention,
-global aggregate scans, and the monolithic all-tab snapshot remain.
+removes the shared connection and async OTLP-handler blocking. The first OTLP hardening
+slice completed on 2026-07-16 adds cross-transport request admission and protocol
+envelopes; pre-allocation payload accounting, per-request retention, global aggregate
+scans, and the monolithic all-tab snapshot remain.
 
 ## Current Strengths To Preserve
 
 - Both default OTLP ports and both transports already exist.
 - A successful export is acknowledged only after a SQLite transaction commits.
+- Binary OTLP identity and gzip requests are accepted for every signal on both transports.
+- HTTP protocol errors use protobuf status bodies, and overload is rejected before body
+  buffering or gRPC message decoding.
 - Raw resource and record attributes are retained for the fields that are stored.
 - Span events and links are queryable and visible.
 - Trace detail is a two-step list-to-tree workflow with stable keyboard semantics.
@@ -121,7 +129,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P0 | Metric streams are conflated and lossy | `src/store/ingest.rs`, `src/ui/details.rs` | Different attribute sets are charted together; histogram buckets, quantiles, temporality details, exemplars, unit, and description are lost |
 | P0 (partially resolved 2026-07-14) | Store ownership and async database work remain incomplete | `src/store/writer.rs`, `src/store/reader_pool.rs`, `src/ingest.rs` | One named thread now owns SQLite writes behind immediate 64-command admission, queries use four physical read-only connections, and all six OTLP handlers await async receipts; startup/migration, the initial TUI snapshot, reader checkout, completion, and shutdown still lack a fully bounded worker contract |
 | P0 | Retention runs after every export | `src/store/ingest.rs` | Sustained ingest pays repeated table scans and delete transactions even when nothing expires |
-| P0 (partially resolved 2026-07-14) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/store/writer.rs` | Writer admission is command-count bounded and lifecycle failures are retryable, but decoded request bytes/records, partial success, gzip/content types, protocol error bodies, RetryInfo, duplicate handling, and graceful drain remain incomplete |
+| P0 (partially resolved 2026-07-16) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/ingest/`, `src/store/writer.rs` | One shared request gate now covers both transports from pre-decode admission through commit; binary identity/gzip, HTTP wire/decompressed limits and protobuf status bodies, gRPC message limits, post-decode structural budgets, client response deadlines, and retry-correct capacity/lifecycle errors are covered. Schema-aware pre-allocation accounting, partial success, duplicate policy, batching, retry hints, health, and graceful drain remain incomplete |
 | P0 | SQLite identity is based on global `span_id` | `src/store/schema.rs` | The logical identity `(trace_id, span_id)` is not preserved; joins and upserts can corrupt colliding traces |
 | P0 (resolved 2026-07-13) | There was no schema migration mechanism | `src/store/schema.rs`, `src/store/schema/` | Ordered `user_version` migrations now preserve exact legacy v0 data, validate the frozen schema, and roll back DDL, version changes, and failed post-checks together; backup and recovery for the first non-trivial v2 migration remain open |
 | P0 | Sensitive AI content has no central policy | store, TUI, and MCP paths | Prompts, outputs, tool arguments, and raw attributes can be persisted and returned without masking or payload budgets |
@@ -156,26 +164,43 @@ admission and a lost post-admission acknowledgement are public, downcastable
 or gRPC `Unavailable`; ordinary projection, SQLite, and retention errors retain the
 existing internal-error path.
 
+Before that storage boundary, one configurable semaphore now admits at most four OTLP
+requests by default across HTTP and gRPC. A permit is acquired before an HTTP body is read
+or a gRPC message is decoded and is retained through validation, writer admission, and
+transaction acknowledgement. The default transport and decompressed protobuf limits are
+4 MiB, and clients wait at most 30 seconds by default before receiving a retryable timeout.
+Accepted SQLite work continues after that response and retains its permit until the
+outcome is known. HTTP can enforce wire and decompressed limits separately; Tonic exposes
+one gRPC decoding limit, so gRPC uses the smaller configured value for both compressed and
+decompressed messages.
+
 Each admitted trace, log, or metric export now:
 
-1. waits in the bounded command queue, if the owner is already active;
-2. writes and commits one signal transaction on the owner thread;
-3. runs the existing retention transaction on the same owner before the next command;
-4. returns the result to a synchronous or asynchronous receipt.
+1. acquires shared request capacity before body buffering or protobuf decoding;
+2. applies transport-byte limits, decompression, and whole-request structural policy;
+3. waits in the bounded storage command queue, if the owner is already active;
+4. writes and commits one signal transaction on the owner thread;
+5. runs the existing retention transaction on the same owner before the next command;
+6. returns the result to a synchronous or asynchronous receipt before releasing capacity.
 
 Deterministic tests prove FIFO serialization, immediate Full, ordinary-error recovery,
 pre-commit rollback and fail-closed behavior after panic, clone ownership, cancellation
 that does not cancel accepted work, full-queue drain on final drop, and current-thread
 Tokio responsiveness. WAL regressions still prove reader and writer progress in both
-directions.
+directions. OTLP tests cover identity and gzip for all signals, exact and over-limit
+envelopes, malformed payloads, structural-policy rejection without writes, capacity
+rejection, request timeout, and retry classification.
 
-This is a storage-command bound, not the complete OTLP ingest bound. Request bodies are
-decoded before admission, one command can contain an unbounded record set, admitted work
-has no completion deadline, and final owner drop joins without a shutdown deadline.
-Reader checkout, store open/migration, and the first terminal snapshot can still block
-their caller. Retention still scans after every export, and an error after the signal
-transaction commits can remain outcome-ambiguous. These constraints stay open rather
-than being hidden behind the completed writer-owner item.
+This is still not a complete heap or lifecycle bound. Wire and decompressed bytes are
+bounded, but Prost/Tonic materialize the request before record, attribute, structure,
+depth, and per-value validation. A compact protobuf containing millions of empty records
+can therefore allocate far more than its wire size before rejection. Closing that gap
+requires schema-aware preflight before Prost allocation, including a custom gRPC decode
+path. A deadline response can also be outcome-unknown if accepted storage work commits
+after the client times out, which makes duplicate handling mandatory. Reader checkout,
+store open/migration, the first terminal snapshot, and final owner join still lack bounded
+completion. Retention still scans after every export. These constraints stay open rather
+than being hidden behind the completed admission slice.
 
 ### 2. Query Cost And Incorrect Read Models
 
@@ -270,22 +295,37 @@ quality decision without cohorts and sample counts.
 
 ### 6. OTLP Protocol Behavior
 
-The binary protobuf success path is small and works, but receiver behavior needs a
-deliberate contract:
+The first receiver hardening slice now gives the binary protobuf path a concrete envelope
+contract:
 
-- configure gzip acceptance for HTTP and gRPC;
-- validate HTTP content type and use matching response encoding;
-- return protobuf `google.rpc.Status` bodies for HTTP failures;
-- distinguish bad data from transient storage failure and overload;
-- use retryable HTTP 429/503 and gRPC `ResourceExhausted`/`Unavailable` when appropriate;
-- return per-signal partial success when only some records are rejected;
-- enforce wire-size, decompressed-size, record-count, and queue-byte limits;
-- expose accepted, rejected, duplicate, and dropped counts by signal and reason;
-- optionally add OTLP/JSON after the binary and compressed paths are conformant.
+- identity and gzip are accepted for traces, logs, and metrics over HTTP and gRPC;
+- HTTP requires `application/x-protobuf`, returns matching binary responses, and encodes
+  failures as wire-compatible `google.rpc.Status` messages;
+- HTTP enforces separate wire and decompressed byte limits, while gRPC uses Tonic's one
+  effective limit for both compressed and decompressed messages;
+- one cross-transport gate rejects excess concurrency before body buffering or message
+  decode and stays held until commit acknowledgement;
+- whole-request record, attribute, structure, AnyValue-depth, and individual-value limits
+  reject atomically after decoding;
+- invalid/oversized requests are non-retryable, while capacity, timeout, and writer
+  lifecycle failures use retryable HTTP/gRPC statuses;
+- client wait has a configurable deadline; accepted SQLite work continues and retains
+  capacity until its outcome is known.
 
-HTTP 500 and gRPC `Internal` for every storage error can cause exporters to treat a
-transient problem as non-retryable. Backpressure must be explicit rather than emerging
-as a blocked Tokio worker on the SQLite mutex.
+This is useful protection, but the word "bounded" must remain qualified. Prost/Tonic
+allocate the decoded graph before the structural visitor runs. A schema-aware protobuf
+preflight and custom gRPC decode path are still required to make record and attribute
+limits true memory-admission controls. The remaining protocol contract must also:
+
+- validate record invariants and return per-signal partial success for mixed-validity
+  requests where the OTLP data model permits it;
+- define retransmission and duplicate handling for deadline-unknown outcomes;
+- add writer byte/record accounting, bounded coalescing, retry hints, and consistent
+  transient SQLite classification;
+- expose accepted, committed, rejected, duplicate, dropped, queued, and latency health by
+  signal and transport;
+- stop intake and drain or reject accepted work within a shutdown deadline;
+- optionally add OTLP/JSON only after the binary and compressed paths are conformant.
 
 ### 7. Retention And Lifecycle
 
@@ -563,16 +603,26 @@ Goal: behave predictably under malformed, compressed, concurrent, and excessive 
   signal.
 - [ ] Decode and validate IDs, timestamps, record counts, and required invariants before
   projection; reject bad records without losing valid siblings when possible.
-- [ ] Add a bounded queue with record and byte budgets and await commit acknowledgement.
+- [x] Add one configurable cross-transport request gate before HTTP body read or gRPC
+  decode, retain capacity through commit acknowledgement, time out stalled intake, and
+  bound client wait without cancelling accepted SQLite work.
+- [ ] Move structural validation before Prost allocation and extend writer admission with
+  record and byte accounting. Current post-decode budgets are acceptance limits, not heap
+  bounds.
 - [ ] Coalesce adjacent batches within a small time/size budget without delaying low-rate
   local development traffic.
-- [ ] Configure gzip for both transports and consistent wire/decompressed size limits.
-- [ ] Validate HTTP content types and encode OTLP success, partial success, and
+- [x] Configure identity/gzip for every signal on both transports and enforce HTTP
+  wire/decompressed limits plus Tonic's documented single gRPC message limit.
+- [x] Validate HTTP binary content types and encode binary OTLP success and
   `google.rpc.Status` failure bodies correctly.
-- [ ] Map invalid data, overload, and transient storage failure to retry-correct HTTP and
-  gRPC statuses.
-- [ ] Add HTTP and gRPC integration tests for all three signals, gzip, empty envelopes,
-  malformed subsets, limits, overload, and graceful shutdown.
+- [ ] Add partial-success bodies and rejected-record counts after record-level validation
+  exists.
+- [x] Map malformed/oversized envelopes, request capacity, timeout, writer lifecycle, and
+  internal failures to retry-correct HTTP and gRPC statuses.
+- [x] Add HTTP and gRPC coverage for all signals, identity/gzip, exact/oversized envelopes,
+  post-decode policy limits, overload, and timeout.
+- [ ] Complete the conformance matrix for mixed-validity records, raw corrupt gRPC frames,
+  cross-transport contention, duplicate exports, and graceful shutdown.
 - [ ] Add optional OTLP/JSON only after binary protobuf conformance is covered.
 - [ ] Expose in-memory accepted/rejected/rate/queue/latency statistics by signal.
 
@@ -873,7 +923,11 @@ Keep each pull request a vertical, reversible step with tests and measurements.
    64-command admission; lifecycle failures are typed; and all six OTLP handlers await
    receipts without blocking Tokio workers.
 5. [ ] Extend storage admission into a complete ingest policy with request budgets, gzip,
-   comprehensive typed errors, duplicate handling, and ingest health.
+   comprehensive typed errors, duplicate handling, and ingest health. The first slice now
+   provides shared pre-decode concurrency, transport-byte limits, post-decode structural
+   budgets, identity/gzip, a client response deadline, protocol error envelopes, and
+   retry-correct capacity/lifecycle failures. Pre-allocation accounting, batching, partial
+   success, duplicates, health, and drain remain.
 6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled
    bounded whole-trace retention.
 7. [ ] Ship faithful metric streams/points and targeted metric series queries.
@@ -904,9 +958,10 @@ Current documentation work:
 ## Validation Performed For This Review
 
 - `cargo fmt -- --check`: passed.
-- `cargo test`: passed, 151 product tests plus 6 performance-harness support tests.
+- `cargo test`: passed, 177 product tests plus 6 performance-harness support tests.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed without lint
   suppressions.
+- `RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --all-features`: passed.
 - `cargo test ui::snapshot_tests`: passed, 8 snapshots.
 - `cargo bench --bench store_baseline -- --profile smoke`: passed with 9 measured
   scenarios, exact cardinality checks, and 2 explicitly unsupported scenarios. The smoke
@@ -915,8 +970,11 @@ Current documentation work:
   directions; the public benchmark still lacks a deterministic overlap rendezvous.
 - Six dedicated writer-owner regressions cover Full, FIFO clone submission, normal-error
   recovery, panic rollback/fail-closed behavior, full-queue drain with dropped receipts,
-  and self-thread teardown. Four ingest tests cover HTTP/gRPC success, lifecycle status
-  mapping, and a gated current-thread responsiveness proof.
+  and self-thread teardown. Twenty-seven receiver tests cover both transports and all
+  signals with identity/gzip, byte and structural limits, malformed envelopes, protobuf
+  HTTP errors, overload, retry classification, timeout, permit lifetime, atomic rejection,
+  and Tokio responsiveness. Configuration tests cover zero, semaphore-overflow, aligned
+  defaults, and programmatic-consumption validation.
 - Same-machine smoke runs before and after the writer owner showed no broad regression:
   1,000-span acknowledgement p50/p95 moved from 15.929/21.627 ms to 15.136/21.254 ms;
   database and WAL sizes were unchanged. Setup moved from 120.3 ms to 151.0 ms, so this

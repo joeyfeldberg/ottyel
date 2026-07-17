@@ -1,14 +1,10 @@
-use std::net::SocketAddr;
+mod grpc;
+mod http;
+mod policy;
+
+use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result};
-use axum::{
-    Router,
-    body::Bytes,
-    extract::State,
-    http::{HeaderMap, HeaderValue, StatusCode},
-    response::IntoResponse,
-    routing::post,
-};
 use opentelemetry_proto::tonic::collector::{
     logs::v1::{
         ExportLogsServiceRequest, ExportLogsServiceResponse,
@@ -23,22 +19,40 @@ use opentelemetry_proto::tonic::collector::{
         trace_service_server::{TraceService, TraceServiceServer},
     },
 };
-use prost::Message;
-use tokio::sync::watch;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{Request, Response, Status, transport::Server};
+use tonic::{
+    Request, Response, Status, codec::CompressionEncoding,
+    service::interceptor::InterceptedService, transport::Server,
+};
 
 use crate::store::{AsyncWriteReceipt, Store, StoreWriteError};
+
+pub use policy::IngestLimits;
 
 #[derive(Clone)]
 struct IngestState {
     store: Store,
+    limits: Arc<IngestLimits>,
+    admission: Arc<Semaphore>,
+}
+
+impl IngestState {
+    fn new(store: Store, limits: IngestLimits) -> Self {
+        let max_in_flight = limits.max_in_flight;
+        Self {
+            store,
+            limits: Arc::new(limits),
+            admission: Arc::new(Semaphore::new(max_in_flight)),
+        }
+    }
 }
 
 pub async fn serve(
     http_bind: &str,
     grpc_bind: &str,
     store: Store,
+    limits: IngestLimits,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let http_addr: SocketAddr = http_bind
@@ -47,7 +61,7 @@ pub async fn serve(
     let grpc_addr: SocketAddr = grpc_bind
         .parse()
         .with_context(|| format!("invalid gRPC bind addr {grpc_bind}"))?;
-    let state = IngestState { store };
+    let state = IngestState::new(store, limits);
 
     let http_listener = tokio::net::TcpListener::bind(http_addr).await?;
     let grpc_listener = tokio::net::TcpListener::bind(grpc_addr).await?;
@@ -64,13 +78,7 @@ async fn serve_http_listener(
     state: IngestState,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
-    let app = Router::new()
-        .route("/v1/traces", post(export_traces))
-        .route("/v1/logs", post(export_logs))
-        .route("/v1/metrics", post(export_metrics))
-        .with_state(state);
-
-    axum::serve(listener, app)
+    axum::serve(listener, http::router(state))
         .with_graceful_shutdown(wait_for_shutdown(shutdown))
         .await?;
     Ok(())
@@ -82,76 +90,39 @@ async fn serve_grpc_listener(
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let incoming = TcpListenerStream::new(listener);
+    let message_limit = state.limits.grpc_message_bytes();
+    let request_timeout = state.limits.request_timeout;
+
+    let traces = TraceServiceServer::new(state.clone())
+        .accept_compressed(CompressionEncoding::Gzip)
+        .max_decoding_message_size(message_limit);
+    let traces =
+        InterceptedService::new(traces, grpc::admission_interceptor(state.admission.clone()));
+    let traces = grpc::NormalizeTonicSizeError::new(traces);
+
+    let logs = LogsServiceServer::new(state.clone())
+        .accept_compressed(CompressionEncoding::Gzip)
+        .max_decoding_message_size(message_limit);
+    let logs = InterceptedService::new(logs, grpc::admission_interceptor(state.admission.clone()));
+    let logs = grpc::NormalizeTonicSizeError::new(logs);
+
+    let metrics = MetricsServiceServer::new(state.clone())
+        .accept_compressed(CompressionEncoding::Gzip)
+        .max_decoding_message_size(message_limit);
+    let metrics = InterceptedService::new(
+        metrics,
+        grpc::admission_interceptor(state.admission.clone()),
+    );
+    let metrics = grpc::NormalizeTonicSizeError::new(metrics);
 
     Server::builder()
-        .add_service(TraceServiceServer::new(state.clone()))
-        .add_service(LogsServiceServer::new(state.clone()))
-        .add_service(MetricsServiceServer::new(state))
+        .timeout(request_timeout)
+        .add_service(traces)
+        .add_service(logs)
+        .add_service(metrics)
         .serve_with_incoming_shutdown(incoming, wait_for_shutdown(shutdown))
         .await?;
     Ok(())
-}
-
-async fn export_traces(State(state): State<IngestState>, body: Bytes) -> impl IntoResponse {
-    decode_and_handle::<ExportTraceServiceRequest, ExportTraceServiceResponse, _>(
-        body,
-        move |request| state.store.try_ingest_traces(request),
-    )
-    .await
-}
-
-async fn export_logs(State(state): State<IngestState>, body: Bytes) -> impl IntoResponse {
-    decode_and_handle::<ExportLogsServiceRequest, ExportLogsServiceResponse, _>(
-        body,
-        move |request| state.store.try_ingest_logs(request),
-    )
-    .await
-}
-
-async fn export_metrics(State(state): State<IngestState>, body: Bytes) -> impl IntoResponse {
-    decode_and_handle::<ExportMetricsServiceRequest, ExportMetricsServiceResponse, _>(
-        body,
-        move |request| state.store.try_ingest_metrics(request),
-    )
-    .await
-}
-
-async fn decode_and_handle<Req, Resp, F>(body: Bytes, handler: F) -> axum::response::Response
-where
-    Req: Message + Default,
-    Resp: Message + Default,
-    F: FnOnce(Req) -> Result<AsyncWriteReceipt<usize>>,
-{
-    match Req::decode(body) {
-        Ok(request) => match handler(request) {
-            Ok(receipt) => match receipt.wait().await {
-                Ok(_) => {
-                    let response = Resp::default();
-                    let mut headers = HeaderMap::new();
-                    headers.insert(
-                        axum::http::header::CONTENT_TYPE,
-                        HeaderValue::from_static("application/x-protobuf"),
-                    );
-                    (StatusCode::OK, headers, response.encode_to_vec()).into_response()
-                }
-                Err(err) => store_http_error(err),
-            },
-            Err(err) => store_http_error(err),
-        },
-        Err(err) => (StatusCode::BAD_REQUEST, err.to_string()).into_response(),
-    }
-}
-
-fn store_http_error(err: anyhow::Error) -> axum::response::Response {
-    let status = match err.downcast_ref::<StoreWriteError>() {
-        Some(
-            StoreWriteError::Overloaded
-            | StoreWriteError::Unavailable
-            | StoreWriteError::OutcomeUnknown,
-        ) => StatusCode::SERVICE_UNAVAILABLE,
-        None => StatusCode::INTERNAL_SERVER_ERROR,
-    };
-    (status, err.to_string()).into_response()
 }
 
 fn store_status(err: anyhow::Error) -> Status {
@@ -163,6 +134,20 @@ fn store_status(err: anyhow::Error) -> Status {
         ) => Status::unavailable(err.to_string()),
         None => Status::internal(err.to_string()),
     }
+}
+
+async fn wait_for_write(
+    receipt: AsyncWriteReceipt<usize>,
+    permit: OwnedSemaphorePermit,
+) -> anyhow::Result<()> {
+    // The detached waiter preserves both the write acknowledgement and admission permit if the
+    // transport request is cancelled or times out after SQLite has accepted the operation.
+    let waiter = tokio::spawn(async move {
+        let result = receipt.wait().await.map(|_| ());
+        drop(permit);
+        result
+    });
+    waiter.await.map_err(anyhow::Error::from)?
 }
 
 async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
@@ -179,13 +164,15 @@ impl TraceService for IngestState {
         &self,
         request: Request<ExportTraceServiceRequest>,
     ) -> std::result::Result<Response<ExportTraceServiceResponse>, Status> {
-        self.store
-            .try_ingest_traces(request.into_inner())
-            .map_err(store_status)?
-            .wait()
+        let (request, permit) = grpc::prepare_request(request, self.limits.clone()).await?;
+        let receipt = self
+            .store
+            .try_ingest_traces(request)
+            .map_err(store_status)?;
+        wait_for_write(receipt, permit)
             .await
-            .map(|_| Response::new(ExportTraceServiceResponse::default()))
-            .map_err(store_status)
+            .map_err(store_status)?;
+        Ok(Response::new(ExportTraceServiceResponse::default()))
     }
 }
 
@@ -195,13 +182,12 @@ impl LogsService for IngestState {
         &self,
         request: Request<ExportLogsServiceRequest>,
     ) -> std::result::Result<Response<ExportLogsServiceResponse>, Status> {
-        self.store
-            .try_ingest_logs(request.into_inner())
-            .map_err(store_status)?
-            .wait()
+        let (request, permit) = grpc::prepare_request(request, self.limits.clone()).await?;
+        let receipt = self.store.try_ingest_logs(request).map_err(store_status)?;
+        wait_for_write(receipt, permit)
             .await
-            .map(|_| Response::new(ExportLogsServiceResponse::default()))
-            .map_err(store_status)
+            .map_err(store_status)?;
+        Ok(Response::new(ExportLogsServiceResponse::default()))
     }
 }
 
@@ -211,13 +197,15 @@ impl MetricsService for IngestState {
         &self,
         request: Request<ExportMetricsServiceRequest>,
     ) -> std::result::Result<Response<ExportMetricsServiceResponse>, Status> {
-        self.store
-            .try_ingest_metrics(request.into_inner())
-            .map_err(store_status)?
-            .wait()
+        let (request, permit) = grpc::prepare_request(request, self.limits.clone()).await?;
+        let receipt = self
+            .store
+            .try_ingest_metrics(request)
+            .map_err(store_status)?;
+        wait_for_write(receipt, permit)
             .await
-            .map(|_| Response::new(ExportMetricsServiceResponse::default()))
-            .map_err(store_status)
+            .map_err(store_status)?;
+        Ok(Response::new(ExportMetricsServiceResponse::default()))
     }
 }
 
@@ -232,34 +220,38 @@ mod tests {
 
     use anyhow::anyhow;
     use axum::http::StatusCode;
-    use axum::{Router, body::Body, http::Request, routing::post};
+    use axum::{body::Body, http::Request};
     use opentelemetry_proto::tonic::{
-        collector::trace::v1::{
-            ExportTraceServiceRequest, trace_service_client::TraceServiceClient,
+        collector::{
+            logs::v1::{ExportLogsServiceRequest, logs_service_client::LogsServiceClient},
+            metrics::v1::{
+                ExportMetricsServiceRequest, metrics_service_client::MetricsServiceClient,
+            },
+            trace::v1::{ExportTraceServiceRequest, trace_service_client::TraceServiceClient},
         },
         common::v1::{AnyValue, InstrumentationScope, KeyValue, any_value},
+        logs::v1::{LogRecord, ResourceLogs, ScopeLogs},
+        metrics::v1::{Gauge, Metric, NumberDataPoint, ResourceMetrics, ScopeMetrics, metric},
         resource::v1::Resource,
         trace::v1::{ResourceSpans, ScopeSpans, Span, Status},
     };
     use prost::Message;
     use tempfile::tempdir;
-    use tonic::{Code, transport::Channel};
+    use tonic::{Code, codec::CompressionEncoding, transport::Channel};
     use tower::ServiceExt;
 
     use crate::store::{Store, StoreWriteError};
 
-    use super::{IngestState, export_traces, serve_grpc_listener, store_http_error, store_status};
+    use super::{
+        IngestLimits, IngestState, http as ingest_http, serve_grpc_listener, store_status,
+    };
 
     #[tokio::test]
     async fn traces_endpoint_accepts_otlp_protobuf() {
         let now = now_nanos() as u64;
         let tempdir = tempdir().unwrap();
         let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
-        let app = Router::new()
-            .route("/v1/traces", post(export_traces))
-            .with_state(IngestState {
-                store: store.clone(),
-            });
+        let app = ingest_http::router(IngestState::new(store.clone(), IngestLimits::default()));
 
         let payload = trace_export_request(now).encode_to_vec();
 
@@ -287,9 +279,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
         let server = tokio::spawn(serve_grpc_listener(
             listener,
-            IngestState {
-                store: store.clone(),
-            },
+            IngestState::new(store.clone(), IngestLimits::default()),
             shutdown_rx,
         ));
 
@@ -303,6 +293,202 @@ mod tests {
         assert_eq!(store.counts(None).unwrap().0, 1);
     }
 
+    #[tokio::test]
+    async fn grpc_identity_and_gzip_ingest_succeed_for_all_three_signals() {
+        for compressed in [false, true] {
+            let now = now_nanos() as u64;
+            let tempdir = tempdir().unwrap();
+            let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let server = tokio::spawn(serve_grpc_listener(
+                listener,
+                IngestState::new(store.clone(), IngestLimits::default()),
+                shutdown_rx,
+            ));
+            let channel = connect_channel(&format!("http://{addr}")).await;
+
+            let traces = TraceServiceClient::new(channel.clone());
+            let mut traces = if compressed {
+                traces.send_compressed(CompressionEncoding::Gzip)
+            } else {
+                traces
+            };
+            traces.export(trace_export_request(now)).await.unwrap();
+
+            let logs = LogsServiceClient::new(channel.clone());
+            let mut logs = if compressed {
+                logs.send_compressed(CompressionEncoding::Gzip)
+            } else {
+                logs
+            };
+            logs.export(log_export_request(now)).await.unwrap();
+
+            let metrics = MetricsServiceClient::new(channel);
+            let mut metrics = if compressed {
+                metrics.send_compressed(CompressionEncoding::Gzip)
+            } else {
+                metrics
+            };
+            metrics.export(metric_export_request(now)).await.unwrap();
+
+            let _ = shutdown_tx.send(true);
+            server.await.unwrap().unwrap();
+            let counts = store.counts(None).unwrap();
+            assert_eq!((counts.0, counts.2, counts.3), (1, 1, 1));
+        }
+    }
+
+    #[tokio::test]
+    async fn tonic_plain_and_gzip_message_overflow_are_resource_exhausted() {
+        let now = now_nanos() as u64;
+        let tempdir = tempdir().unwrap();
+        let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+        let limits = IngestLimits {
+            max_wire_bytes: 128,
+            max_decompressed_bytes: 4096,
+            max_value_bytes: 10_000,
+            ..IngestLimits::default()
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_grpc_listener(
+            listener,
+            IngestState::new(store.clone(), limits),
+            shutdown_rx,
+        ));
+        let channel = connect_channel(&format!("http://{addr}")).await;
+        let mut request = trace_export_request(now);
+        request.resource_spans[0].scope_spans[0].spans[0].name = "x".repeat(1024);
+
+        let plain = TraceServiceClient::new(channel.clone())
+            .export(request.clone())
+            .await
+            .unwrap_err();
+        assert_eq!(plain.code(), Code::ResourceExhausted);
+
+        let compressed = TraceServiceClient::new(channel)
+            .send_compressed(CompressionEncoding::Gzip)
+            .export(request)
+            .await
+            .unwrap_err();
+        assert_eq!(compressed.code(), Code::ResourceExhausted);
+
+        let _ = shutdown_tx.send(true);
+        server.await.unwrap().unwrap();
+        assert_eq!(store.counts(None).unwrap().0, 0);
+    }
+
+    #[tokio::test]
+    async fn grpc_policy_failure_is_atomic_and_capacity_failure_is_retryable() {
+        let now = now_nanos() as u64;
+        let tempdir = tempdir().unwrap();
+        let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+        let limits = IngestLimits {
+            max_in_flight: 1,
+            max_value_bytes: 3,
+            ..IngestLimits::default()
+        };
+        let state = IngestState::new(store.clone(), limits);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_grpc_listener(listener, state.clone(), shutdown_rx));
+        let channel = connect_channel(&format!("http://{addr}")).await;
+
+        let policy = TraceServiceClient::new(channel.clone())
+            .export(trace_export_request(now))
+            .await
+            .unwrap_err();
+        assert_eq!(policy.code(), Code::ResourceExhausted);
+        assert_eq!(store.counts(None).unwrap().0, 0);
+
+        let held = state.admission.clone().acquire_owned().await.unwrap();
+        let overload = TraceServiceClient::new(channel)
+            .export(ExportTraceServiceRequest::default())
+            .await
+            .unwrap_err();
+        assert_eq!(overload.code(), Code::Unavailable);
+        drop(held);
+
+        let _ = shutdown_tx.send(true);
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn grpc_writer_timeout_is_retryable_and_retains_permit_until_commit() {
+        let now = now_nanos() as u64;
+        let tempdir = tempdir().unwrap();
+        let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+        let limits = IngestLimits {
+            max_in_flight: 1,
+            request_timeout: Duration::from_millis(100),
+            ..IngestLimits::default()
+        };
+        let state = IngestState::new(store.clone(), limits);
+        let (entered_sender, entered_receiver) = mpsc::channel();
+        let (release_sender, release_receiver) = mpsc::channel();
+        let blocking_store = store.clone();
+        let blocker = thread::spawn(move || {
+            blocking_store.execute_write_for_test(move |_| {
+                entered_sender.send(()).unwrap();
+                release_receiver.recv().unwrap();
+                Ok(())
+            })
+        });
+        entered_receiver
+            .recv_timeout(Duration::from_secs(2))
+            .unwrap();
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_grpc_listener(listener, state.clone(), shutdown_rx));
+        let mut client = connect_trace_client(&format!("http://{addr}")).await;
+
+        let first = tokio::time::timeout(
+            Duration::from_secs(2),
+            client.export(trace_export_request(now)),
+        )
+        .await;
+        let permit_retained_after_timeout = state.admission.available_permits() == 0;
+
+        release_sender.send(()).unwrap();
+        blocker.join().unwrap().unwrap();
+        for _ in 0..100 {
+            if state.admission.available_permits() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let permit_released_after_commit = state.admission.available_permits() == 1;
+        let committed_after_timeout = store.counts(None).unwrap().0;
+        let recovered = client.export(ExportTraceServiceRequest::default()).await;
+
+        let _ = shutdown_tx.send(true);
+        server.await.unwrap().unwrap();
+
+        let error = first
+            .expect("Tonic server timeout did not bound the request")
+            .unwrap_err();
+        assert_eq!(error.code(), Code::Cancelled);
+        assert!(matches!(
+            error.code(),
+            Code::Cancelled
+                | Code::DeadlineExceeded
+                | Code::Aborted
+                | Code::OutOfRange
+                | Code::Unavailable
+                | Code::DataLoss
+        ));
+        assert!(permit_retained_after_timeout);
+        assert!(permit_released_after_commit);
+        assert_eq!(committed_after_timeout, 1);
+        recovered.unwrap();
+    }
+
     #[test]
     fn writer_lifecycle_errors_are_retryable_and_operation_errors_are_internal() {
         for error in [
@@ -311,14 +497,14 @@ mod tests {
             StoreWriteError::OutcomeUnknown,
         ] {
             assert_eq!(
-                store_http_error(anyhow!(error)).status(),
+                ingest_http::store_error(anyhow!(error)).status(),
                 StatusCode::SERVICE_UNAVAILABLE
             );
             assert_eq!(store_status(anyhow!(error)).code(), Code::Unavailable);
         }
 
         assert_eq!(
-            store_http_error(anyhow!("sqlite operation failed")).status(),
+            ingest_http::store_error(anyhow!("sqlite operation failed")).status(),
             StatusCode::INTERNAL_SERVER_ERROR
         );
         assert_eq!(
@@ -332,11 +518,7 @@ mod tests {
         let now = now_nanos() as u64;
         let tempdir = tempdir().unwrap();
         let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
-        let app = Router::new()
-            .route("/v1/traces", post(export_traces))
-            .with_state(IngestState {
-                store: store.clone(),
-            });
+        let app = ingest_http::router(IngestState::new(store.clone(), IngestLimits::default()));
         let (entered_sender, entered_receiver) = mpsc::channel();
         let (release_sender, release_receiver) = mpsc::channel();
         let blocking_store = store.clone();
@@ -406,6 +588,24 @@ mod tests {
             .unwrap()
     }
 
+    async fn connect_channel(endpoint: &str) -> Channel {
+        for _ in 0..10 {
+            if let Ok(channel) = Channel::from_shared(endpoint.to_string())
+                .unwrap()
+                .connect()
+                .await
+            {
+                return channel;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        Channel::from_shared(endpoint.to_string())
+            .unwrap()
+            .connect()
+            .await
+            .unwrap()
+    }
+
     fn trace_export_request(now: u64) -> ExportTraceServiceRequest {
         ExportTraceServiceRequest {
             resource_spans: vec![ResourceSpans {
@@ -445,6 +645,45 @@ mod tests {
                         flags: 0,
                     }],
                 }],
+            }],
+        }
+    }
+
+    fn log_export_request(now: u64) -> ExportLogsServiceRequest {
+        ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord {
+                        time_unix_nano: now,
+                        body: Some(AnyValue {
+                            value: Some(any_value::Value::StringValue("ok".into())),
+                        }),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        }
+    }
+
+    fn metric_export_request(now: u64) -> ExportMetricsServiceRequest {
+        ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![Metric {
+                        name: "requests".into(),
+                        data: Some(metric::Data::Gauge(Gauge {
+                            data_points: vec![NumberDataPoint {
+                                time_unix_nano: now,
+                                ..Default::default()
+                            }],
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
             }],
         }
     }
