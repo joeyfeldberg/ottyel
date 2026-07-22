@@ -6,11 +6,18 @@ use std::{
 };
 
 use axum::http;
+use prost::{Message, bytes::Bytes};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tonic::{Code, Request, Status, service::Interceptor};
 use tower::Service;
 
-use super::{IngestLimits, policy::ValidateOtlp};
+use super::{
+    IngestLimits,
+    policy::ValidateOtlp,
+    preflight::{PreflightError, PreflightOtlp},
+};
+
+pub(super) mod server;
 
 #[derive(Clone)]
 struct AdmissionPermit(Arc<OwnedSemaphorePermit>);
@@ -28,28 +35,33 @@ pub(super) fn admission_interceptor(admission: Arc<Semaphore>) -> impl Intercept
     }
 }
 
-pub(super) async fn prepare_request<T>(
-    mut request: Request<T>,
+pub(super) async fn prepare_raw_request<T>(
+    request: Request<Bytes>,
     limits: Arc<IngestLimits>,
-) -> Result<(T, OwnedSemaphorePermit), Status>
+) -> Result<(Request<T>, OwnedSemaphorePermit), Status>
 where
-    T: ValidateOtlp,
+    T: Message + Default + ValidateOtlp + PreflightOtlp,
 {
-    let permit = request
-        .extensions_mut()
+    let (metadata, mut extensions, message) = request.into_parts();
+    let permit = extensions
         .remove::<AdmissionPermit>()
         .ok_or_else(|| Status::internal("missing ingest admission permit"))?;
     let permit = Arc::try_unwrap(permit.0)
         .map_err(|_| Status::internal("ingest admission permit was unexpectedly cloned"))?;
-    let message = request.into_inner();
     tokio::task::spawn_blocking(move || {
+        T::preflight(message.as_ref(), &limits).map_err(|error| match error {
+            PreflightError::Malformed(error) => Status::invalid_argument(error.to_string()),
+            PreflightError::Budget(error) => Status::resource_exhausted(error.to_string()),
+        })?;
+        let message = T::decode(message)
+            .map_err(|_| Status::invalid_argument("request body is not valid OTLP protobuf"))?;
         message
             .validate(&limits)
             .map_err(|err| Status::resource_exhausted(err.to_string()))?;
-        Ok((message, permit))
+        Ok((Request::from_parts(metadata, extensions, message), permit))
     })
     .await
-    .map_err(|_| Status::internal("request validator task failed"))?
+    .map_err(|_| Status::internal("request decoder task failed"))?
 }
 
 #[derive(Clone)]

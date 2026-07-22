@@ -66,19 +66,19 @@ pub struct ServeArgs {
     /// Accepted storage work may finish afterward and retains capacity until its outcome.
     #[arg(long, default_value_t = NonZeroU64::new(30_000).unwrap())]
     pub otlp_request_timeout_ms: NonZeroU64,
-    /// Post-decode maximum spans, log records, or metric data points per OTLP request.
+    /// Preflight and post-decode maximum spans, log records, or metric data points per request.
     #[arg(long, default_value_t = NonZeroUsize::new(10_000).unwrap())]
     pub max_otlp_records: NonZeroUsize,
-    /// Post-decode maximum KeyValue attributes across an OTLP request.
+    /// Preflight and post-decode maximum KeyValue attributes across an OTLP request.
     #[arg(long, default_value_t = NonZeroUsize::new(100_000).unwrap())]
     pub max_otlp_attributes: NonZeroUsize,
-    /// Post-decode maximum envelopes, nested values, and repeated structural items per request.
+    /// Preflight and post-decode maximum envelopes, nested values, and structural items.
     #[arg(long, default_value_t = NonZeroUsize::new(250_000).unwrap())]
     pub max_otlp_structures: NonZeroUsize,
-    /// Post-decode maximum nested AnyValue depth, including the root value.
+    /// Preflight and post-decode maximum nested AnyValue depth, including the root value.
     #[arg(long, default_value_t = NonZeroUsize::new(16).unwrap())]
     pub max_otlp_any_value_depth: NonZeroUsize,
-    /// Post-decode maximum bytes in any individual dynamic protobuf string or bytes field.
+    /// Preflight and post-decode maximum bytes in each dynamic protobuf string or bytes field.
     #[arg(long, default_value_t = NonZeroUsize::new(1024 * 1024).unwrap())]
     pub max_otlp_value_bytes: NonZeroUsize,
 }

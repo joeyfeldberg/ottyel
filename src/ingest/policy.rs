@@ -21,7 +21,8 @@ use crate::config::ServeArgs;
 /// Production values are built from validated, nonzero [`ServeArgs`] fields. HTTP applies separate
 /// transport and decompressed byte budgets. The gRPC decoder uses the smaller budget because Tonic
 /// applies one limit to both the compressed message and its decompressed form. Record, attribute,
-/// structure, depth, and dynamic-value budgets are enforced after Prost has decoded the request.
+/// structure, depth, and dynamic-value budgets are checked against encoded fields before Prost
+/// allocates the request graph, then checked again against the decoded graph.
 pub struct IngestLimits {
     pub(super) max_in_flight: usize,
     pub(super) max_wire_bytes: usize,

@@ -1,30 +1,14 @@
 mod grpc;
 mod http;
 mod policy;
+mod preflight;
 
 use std::{net::SocketAddr, sync::Arc};
 
 use anyhow::{Context, Result};
-use opentelemetry_proto::tonic::collector::{
-    logs::v1::{
-        ExportLogsServiceRequest, ExportLogsServiceResponse,
-        logs_service_server::{LogsService, LogsServiceServer},
-    },
-    metrics::v1::{
-        ExportMetricsServiceRequest, ExportMetricsServiceResponse,
-        metrics_service_server::{MetricsService, MetricsServiceServer},
-    },
-    trace::v1::{
-        ExportTraceServiceRequest, ExportTraceServiceResponse,
-        trace_service_server::{TraceService, TraceServiceServer},
-    },
-};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::{
-    Request, Response, Status, codec::CompressionEncoding,
-    service::interceptor::InterceptedService, transport::Server,
-};
+use tonic::{Status, service::interceptor::InterceptedService, transport::Server};
 
 use crate::store::{AsyncWriteReceipt, Store, StoreWriteError};
 
@@ -93,22 +77,18 @@ async fn serve_grpc_listener(
     let message_limit = state.limits.grpc_message_bytes();
     let request_timeout = state.limits.request_timeout;
 
-    let traces = TraceServiceServer::new(state.clone())
-        .accept_compressed(CompressionEncoding::Gzip)
-        .max_decoding_message_size(message_limit);
+    let traces =
+        grpc::server::OtlpService::<grpc::server::Traces>::new(state.clone(), message_limit);
     let traces =
         InterceptedService::new(traces, grpc::admission_interceptor(state.admission.clone()));
     let traces = grpc::NormalizeTonicSizeError::new(traces);
 
-    let logs = LogsServiceServer::new(state.clone())
-        .accept_compressed(CompressionEncoding::Gzip)
-        .max_decoding_message_size(message_limit);
+    let logs = grpc::server::OtlpService::<grpc::server::Logs>::new(state.clone(), message_limit);
     let logs = InterceptedService::new(logs, grpc::admission_interceptor(state.admission.clone()));
     let logs = grpc::NormalizeTonicSizeError::new(logs);
 
-    let metrics = MetricsServiceServer::new(state.clone())
-        .accept_compressed(CompressionEncoding::Gzip)
-        .max_decoding_message_size(message_limit);
+    let metrics =
+        grpc::server::OtlpService::<grpc::server::Metrics>::new(state.clone(), message_limit);
     let metrics = InterceptedService::new(
         metrics,
         grpc::admission_interceptor(state.admission.clone()),
@@ -155,57 +135,6 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
         if *shutdown.borrow() {
             break;
         }
-    }
-}
-
-#[tonic::async_trait]
-impl TraceService for IngestState {
-    async fn export(
-        &self,
-        request: Request<ExportTraceServiceRequest>,
-    ) -> std::result::Result<Response<ExportTraceServiceResponse>, Status> {
-        let (request, permit) = grpc::prepare_request(request, self.limits.clone()).await?;
-        let receipt = self
-            .store
-            .try_ingest_traces(request)
-            .map_err(store_status)?;
-        wait_for_write(receipt, permit)
-            .await
-            .map_err(store_status)?;
-        Ok(Response::new(ExportTraceServiceResponse::default()))
-    }
-}
-
-#[tonic::async_trait]
-impl LogsService for IngestState {
-    async fn export(
-        &self,
-        request: Request<ExportLogsServiceRequest>,
-    ) -> std::result::Result<Response<ExportLogsServiceResponse>, Status> {
-        let (request, permit) = grpc::prepare_request(request, self.limits.clone()).await?;
-        let receipt = self.store.try_ingest_logs(request).map_err(store_status)?;
-        wait_for_write(receipt, permit)
-            .await
-            .map_err(store_status)?;
-        Ok(Response::new(ExportLogsServiceResponse::default()))
-    }
-}
-
-#[tonic::async_trait]
-impl MetricsService for IngestState {
-    async fn export(
-        &self,
-        request: Request<ExportMetricsServiceRequest>,
-    ) -> std::result::Result<Response<ExportMetricsServiceResponse>, Status> {
-        let (request, permit) = grpc::prepare_request(request, self.limits.clone()).await?;
-        let receipt = self
-            .store
-            .try_ingest_metrics(request)
-            .map_err(store_status)?;
-        wait_for_write(receipt, permit)
-            .await
-            .map_err(store_status)?;
-        Ok(Response::new(ExportMetricsServiceResponse::default()))
     }
 }
 
@@ -415,6 +344,126 @@ mod tests {
 
         let _ = shutdown_tx.send(true);
         server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn grpc_preflight_rejects_budget_prefixes_and_malformed_wire_for_every_signal() {
+        use prost::bytes::Bytes;
+        use tonic::codegen::http::uri::PathAndQuery;
+
+        let tempdir = tempdir().unwrap();
+        let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+        let limits = IngestLimits {
+            max_structures: 1,
+            ..IngestLimits::default()
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_grpc_listener(
+            listener,
+            IngestState::new(store.clone(), limits),
+            shutdown_rx,
+        ));
+        let channel = connect_channel(&format!("http://{addr}")).await;
+        let paths = [
+            "/opentelemetry.proto.collector.trace.v1.TraceService/Export",
+            "/opentelemetry.proto.collector.logs.v1.LogsService/Export",
+            "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export",
+        ];
+
+        for compressed in [false, true] {
+            for path in paths {
+                let client = tonic::client::Grpc::new(channel.clone());
+                let mut client = if compressed {
+                    client.send_compressed(CompressionEncoding::Gzip)
+                } else {
+                    client
+                };
+                client.ready().await.unwrap();
+                let error = client
+                    .unary(
+                        tonic::Request::new(Bytes::from_static(&[0x0a, 0x00, 0x0a, 0x00, 0x0f])),
+                        PathAndQuery::from_static(path),
+                        super::grpc::server::RawClientCodec,
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.code(), Code::ResourceExhausted);
+            }
+        }
+
+        for compressed in [false, true] {
+            for path in paths {
+                let client = tonic::client::Grpc::new(channel.clone());
+                let mut client = if compressed {
+                    client.send_compressed(CompressionEncoding::Gzip)
+                } else {
+                    client
+                };
+                client.ready().await.unwrap();
+                let error = client
+                    .unary(
+                        tonic::Request::new(Bytes::from_static(&[0x0f])),
+                        PathAndQuery::from_static(path),
+                        super::grpc::server::RawClientCodec,
+                    )
+                    .await
+                    .unwrap_err();
+                assert_eq!(error.code(), Code::InvalidArgument);
+            }
+        }
+        assert_eq!(store.counts(None).unwrap(), (0, 0, 0, 0, 0));
+
+        let _ = shutdown_tx.send(true);
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn grpc_unary_export_rejects_a_second_message_before_ingest() {
+        use prost::bytes::Bytes;
+        use tonic::codegen::http::uri::PathAndQuery;
+
+        let now = now_nanos() as u64;
+        for compressed in [false, true] {
+            let tempdir = tempdir().unwrap();
+            let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = listener.local_addr().unwrap();
+            let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+            let server = tokio::spawn(serve_grpc_listener(
+                listener,
+                IngestState::new(store.clone(), IngestLimits::default()),
+                shutdown_rx,
+            ));
+            let channel = connect_channel(&format!("http://{addr}")).await;
+            let client = tonic::client::Grpc::new(channel);
+            let mut client = if compressed {
+                client.send_compressed(CompressionEncoding::Gzip)
+            } else {
+                client
+            };
+            client.ready().await.unwrap();
+            let messages = tokio_stream::iter([
+                Bytes::from(trace_export_request(now).encode_to_vec()),
+                Bytes::new(),
+            ]);
+            let error = client
+                .client_streaming(
+                    tonic::Request::new(messages),
+                    PathAndQuery::from_static(
+                        "/opentelemetry.proto.collector.trace.v1.TraceService/Export",
+                    ),
+                    super::grpc::server::RawClientCodec,
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(error.code(), Code::InvalidArgument);
+            assert_eq!(store.counts(None).unwrap(), (0, 0, 0, 0, 0));
+
+            let _ = shutdown_tx.send(true);
+            server.await.unwrap().unwrap();
+        }
     }
 
     #[tokio::test]

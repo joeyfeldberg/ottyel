@@ -20,7 +20,12 @@ use tokio::sync::OwnedSemaphorePermit;
 
 use crate::store::{AsyncWriteReceipt, StoreWriteError};
 
-use super::{IngestState, policy::ValidateOtlp, wait_for_write};
+use super::{
+    IngestState,
+    policy::ValidateOtlp,
+    preflight::{PreflightError, PreflightOtlp},
+    wait_for_write,
+};
 
 const PROTOBUF_CONTENT_TYPE: &str = "application/x-protobuf";
 
@@ -89,7 +94,7 @@ async fn export_metrics(State(state): State<IngestState>, request: Request) -> R
 
 async fn handle<Req, Resp, F>(state: IngestState, request: Request, ingest: F) -> Response
 where
-    Req: Message + Default + ValidateOtlp,
+    Req: Message + Default + ValidateOtlp + PreflightOtlp,
     Resp: Message + Default,
     F: FnOnce(&IngestState, Req) -> anyhow::Result<AsyncWriteReceipt<usize>>,
 {
@@ -121,7 +126,7 @@ async fn handle_admitted<Req, Resp, F>(
     permit: OwnedSemaphorePermit,
 ) -> Response
 where
-    Req: Message + Default + ValidateOtlp,
+    Req: Message + Default + ValidateOtlp + PreflightOtlp,
     Resp: Message + Default,
     F: FnOnce(&IngestState, Req) -> anyhow::Result<AsyncWriteReceipt<usize>>,
 {
@@ -151,6 +156,7 @@ where
     let limits = state.limits.clone();
     let decoded = tokio::task::spawn_blocking(move || {
         let body = decode_content(body.as_ref(), encoding, limits.max_decompressed_bytes)?;
+        Req::preflight(body.as_ref(), &limits).map_err(HttpFailure::from_preflight)?;
         let request = Req::decode(body.as_ref())
             .map_err(|_| HttpFailure::bad_request("request body is not valid OTLP protobuf"))?;
         request
@@ -324,6 +330,13 @@ impl HttpFailure {
         Self::new(StatusCode::PAYLOAD_TOO_LARGE, 8, message)
     }
 
+    fn from_preflight(error: PreflightError) -> Self {
+        match error {
+            PreflightError::Malformed(error) => Self::bad_request(error.to_string()),
+            PreflightError::Budget(error) => Self::too_large(error.to_string()),
+        }
+    }
+
     fn into_response(self) -> Response {
         protobuf_error(self.status, self.code, self.message)
     }
@@ -459,6 +472,56 @@ mod tests {
             );
             let body = response.into_body().collect().await.unwrap().to_bytes();
             assert_eq!(decode_rpc_status(&body).0, expected_code);
+        }
+    }
+
+    #[tokio::test]
+    async fn preflight_statuses_are_atomic_for_every_signal_and_content_encoding() {
+        for compressed in [false, true] {
+            let tempdir = tempdir().unwrap();
+            let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+            let limits = IngestLimits {
+                max_structures: 1,
+                ..IngestLimits::default()
+            };
+            let app = router(IngestState::new(store.clone(), limits));
+
+            for path in ["/v1/traces", "/v1/logs", "/v1/metrics"] {
+                let payload = vec![0x0a, 0x00, 0x0a, 0x00, 0x0f];
+                let (payload, encoding) = if compressed {
+                    (gzip(&payload), Some("gzip"))
+                } else {
+                    (payload, None)
+                };
+                let response = app
+                    .clone()
+                    .oneshot(protobuf_request(path, payload, encoding))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                assert_eq!(decode_rpc_status(&body).0, 8);
+            }
+            assert_eq!(store.counts(None).unwrap(), (0, 0, 0, 0, 0));
+
+            let app = router(IngestState::new(store.clone(), IngestLimits::default()));
+            for path in ["/v1/traces", "/v1/logs", "/v1/metrics"] {
+                let payload = vec![0x0f];
+                let (payload, encoding) = if compressed {
+                    (gzip(&payload), Some("gzip"))
+                } else {
+                    (payload, None)
+                };
+                let response = app
+                    .clone()
+                    .oneshot(protobuf_request(path, payload, encoding))
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+                let body = response.into_body().collect().await.unwrap().to_bytes();
+                assert_eq!(decode_rpc_status(&body).0, 3);
+            }
+            assert_eq!(store.counts(None).unwrap(), (0, 0, 0, 0, 0));
         }
     }
 

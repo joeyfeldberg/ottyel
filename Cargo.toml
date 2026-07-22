@@ -18,7 +18,7 @@ directories = "6.0"
 flate2 = "1.1"
 futures = "0.3"
 http-body-util = "0.1"
-opentelemetry-proto = { version = "0.31", features = ["full", "with-serde"] }
+opentelemetry-proto = { version = "=0.31.0", features = ["full", "with-serde"] }
 prost = "0.14"
 ratatui = "0.29"
 rusqlite = { version = "0.37", features = ["bundled"] }
