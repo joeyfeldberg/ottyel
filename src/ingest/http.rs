@@ -18,7 +18,7 @@ use opentelemetry_proto::tonic::collector::{
 use prost::Message;
 use tokio::sync::OwnedSemaphorePermit;
 
-use crate::store::{AsyncWriteReceipt, StoreWriteError};
+use crate::store::{AsyncWriteReceipt, MeasureIngest, PreparedIngest, StoreWriteError};
 
 use super::{
     IngestState,
@@ -94,9 +94,9 @@ async fn export_metrics(State(state): State<IngestState>, request: Request) -> R
 
 async fn handle<Req, Resp, F>(state: IngestState, request: Request, ingest: F) -> Response
 where
-    Req: Message + Default + ValidateOtlp + PreflightOtlp,
+    Req: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp,
     Resp: Message + Default,
-    F: FnOnce(&IngestState, Req) -> anyhow::Result<AsyncWriteReceipt<usize>>,
+    F: FnOnce(&IngestState, PreparedIngest<Req>) -> anyhow::Result<AsyncWriteReceipt<usize>>,
 {
     let permit = match state.admission.clone().try_acquire_owned() {
         Ok(permit) => permit,
@@ -126,9 +126,9 @@ async fn handle_admitted<Req, Resp, F>(
     permit: OwnedSemaphorePermit,
 ) -> Response
 where
-    Req: Message + Default + ValidateOtlp + PreflightOtlp,
+    Req: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp,
     Resp: Message + Default,
-    F: FnOnce(&IngestState, Req) -> anyhow::Result<AsyncWriteReceipt<usize>>,
+    F: FnOnce(&IngestState, PreparedIngest<Req>) -> anyhow::Result<AsyncWriteReceipt<usize>>,
 {
     let encoding = match request_encoding(request.headers()) {
         Ok(encoding) => encoding,
@@ -162,7 +162,7 @@ where
         request
             .validate(&limits)
             .map_err(|err| HttpFailure::too_large(err.to_string()))?;
-        Ok::<_, HttpFailure>((request, permit))
+        Ok::<_, HttpFailure>((PreparedIngest::prepare(request), permit))
     })
     .await;
 
@@ -277,6 +277,9 @@ fn decode_content(
 
 pub(super) fn store_error(err: anyhow::Error) -> Response {
     match err.downcast_ref::<StoreWriteError>() {
+        Some(StoreWriteError::TooLarge { .. }) => {
+            protobuf_error(StatusCode::PAYLOAD_TOO_LARGE, 8, err.to_string())
+        }
         Some(
             StoreWriteError::Overloaded
             | StoreWriteError::Unavailable

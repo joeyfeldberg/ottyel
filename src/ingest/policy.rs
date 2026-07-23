@@ -15,6 +15,11 @@ use opentelemetry_proto::tonic::{
 
 use crate::config::ServeArgs;
 
+// In the pinned OTLP schema, negative int32 and enum values can grow from five wire bytes to ten
+// canonical Prost bytes. Its declared field packing and length-delimited nesting remain within the
+// same proportional envelope; this is not a schema-independent protobuf bound.
+const MAX_CANONICAL_ENCODING_EXPANSION: usize = 2;
+
 #[derive(Clone, Debug)]
 /// Validated, immutable per-process budgets shared by every OTLP transport and signal.
 ///
@@ -44,12 +49,34 @@ impl IngestLimits {
                 maximum: tokio::sync::Semaphore::MAX_PERMITS,
             });
         }
+        let max_records = args.max_otlp_records.get();
+        let max_writer_records = args.max_otlp_writer_records.get();
+        if max_writer_records < max_records {
+            return Err(IngestConfigError::WriterRecordsBelowRequest {
+                writer: max_writer_records,
+                request: max_records,
+            });
+        }
+        let max_decompressed_bytes = args.max_otlp_decompressed_bytes.get();
+        let max_writer_bytes = args.max_otlp_writer_bytes.get();
+        let minimum_writer_bytes = max_decompressed_bytes
+            .checked_mul(MAX_CANONICAL_ENCODING_EXPANSION)
+            .ok_or(IngestConfigError::CanonicalByteHeadroomOverflow {
+                decompressed: max_decompressed_bytes,
+            })?;
+        if max_writer_bytes < minimum_writer_bytes {
+            return Err(IngestConfigError::WriterBytesBelowCanonicalRequest {
+                writer: max_writer_bytes,
+                decompressed: max_decompressed_bytes,
+                required: minimum_writer_bytes,
+            });
+        }
         Ok(Self {
             max_in_flight,
             max_wire_bytes: args.max_otlp_wire_bytes.get(),
-            max_decompressed_bytes: args.max_otlp_decompressed_bytes.get(),
+            max_decompressed_bytes,
             request_timeout: Duration::from_millis(args.otlp_request_timeout_ms.get()),
-            max_records: args.max_otlp_records.get(),
+            max_records,
             max_attributes: args.max_otlp_attributes.get(),
             max_structures: args.max_otlp_structures.get(),
             max_any_value_depth: args.max_otlp_any_value_depth.get(),
@@ -72,6 +99,22 @@ impl Default for IngestLimits {
 pub(crate) enum IngestConfigError {
     #[error("OTLP in-flight limit {configured} exceeds semaphore maximum {maximum}")]
     TooManyInFlight { configured: usize, maximum: usize },
+    #[error("OTLP writer record limit {writer} is below the per-request record limit {request}")]
+    WriterRecordsBelowRequest { writer: usize, request: usize },
+    #[error(
+        "OTLP writer byte limit {writer} is below the conservative canonical request bound \
+         {required} for decompressed-byte limit {decompressed}"
+    )]
+    WriterBytesBelowCanonicalRequest {
+        writer: usize,
+        decompressed: usize,
+        required: usize,
+    },
+    #[error(
+        "OTLP decompressed-byte limit {decompressed} is too large to derive canonical writer \
+         headroom"
+    )]
+    CanonicalByteHeadroomOverflow { decompressed: usize },
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -517,6 +560,67 @@ mod tests {
                 configured: tokio::sync::Semaphore::MAX_PERMITS + 1,
                 maximum: tokio::sync::Semaphore::MAX_PERMITS,
             }
+        );
+    }
+
+    #[test]
+    fn writer_record_limit_cannot_be_below_one_request() {
+        let args = ServeArgs {
+            max_otlp_records: NonZeroUsize::new(10).unwrap(),
+            max_otlp_writer_records: NonZeroUsize::new(9).unwrap(),
+            ..ServeArgs::default()
+        };
+
+        assert_eq!(
+            IngestLimits::try_from_args(&args).unwrap_err(),
+            IngestConfigError::WriterRecordsBelowRequest {
+                writer: 9,
+                request: 10,
+            }
+        );
+    }
+
+    #[test]
+    fn writer_byte_limit_requires_canonical_encoding_headroom() {
+        let args = ServeArgs {
+            max_otlp_decompressed_bytes: NonZeroUsize::new(10).unwrap(),
+            max_otlp_writer_bytes: NonZeroUsize::new(19).unwrap(),
+            ..ServeArgs::default()
+        };
+
+        assert_eq!(
+            IngestLimits::try_from_args(&args).unwrap_err(),
+            IngestConfigError::WriterBytesBelowCanonicalRequest {
+                writer: 19,
+                decompressed: 10,
+                required: 20,
+            }
+        );
+    }
+
+    #[test]
+    fn writer_byte_limit_accepts_exact_canonical_headroom_boundary() {
+        let args = ServeArgs {
+            max_otlp_decompressed_bytes: NonZeroUsize::new(10).unwrap(),
+            max_otlp_writer_bytes: NonZeroUsize::new(20).unwrap(),
+            ..ServeArgs::default()
+        };
+
+        IngestLimits::try_from_args(&args).unwrap();
+    }
+
+    #[test]
+    fn canonical_headroom_overflow_is_rejected() {
+        let decompressed = usize::MAX / 2 + 1;
+        let args = ServeArgs {
+            max_otlp_decompressed_bytes: NonZeroUsize::new(decompressed).unwrap(),
+            max_otlp_writer_bytes: NonZeroUsize::new(usize::MAX).unwrap(),
+            ..ServeArgs::default()
+        };
+
+        assert_eq!(
+            IngestLimits::try_from_args(&args).unwrap_err(),
+            IngestConfigError::CanonicalByteHeadroomOverflow { decompressed }
         );
     }
 

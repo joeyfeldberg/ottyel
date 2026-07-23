@@ -16,6 +16,7 @@ use super::{
     policy::ValidateOtlp,
     preflight::{PreflightError, PreflightOtlp},
 };
+use crate::store::{MeasureIngest, PreparedIngest};
 
 pub(super) mod server;
 
@@ -38,9 +39,9 @@ pub(super) fn admission_interceptor(admission: Arc<Semaphore>) -> impl Intercept
 pub(super) async fn prepare_raw_request<T>(
     request: Request<Bytes>,
     limits: Arc<IngestLimits>,
-) -> Result<(Request<T>, OwnedSemaphorePermit), Status>
+) -> Result<(Request<PreparedIngest<T>>, OwnedSemaphorePermit), Status>
 where
-    T: Message + Default + ValidateOtlp + PreflightOtlp,
+    T: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp,
 {
     let (metadata, mut extensions, message) = request.into_parts();
     let permit = extensions
@@ -58,7 +59,10 @@ where
         message
             .validate(&limits)
             .map_err(|err| Status::resource_exhausted(err.to_string()))?;
-        Ok((Request::from_parts(metadata, extensions, message), permit))
+        Ok((
+            Request::from_parts(metadata, extensions, PreparedIngest::prepare(message)),
+            permit,
+        ))
     })
     .await
     .map_err(|_| Status::internal("request decoder task failed"))?

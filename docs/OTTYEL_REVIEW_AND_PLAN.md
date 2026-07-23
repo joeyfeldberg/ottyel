@@ -4,7 +4,7 @@ Status: active implementation plan
 
 Review date: 2026-07-10
 
-Execution updated: 2026-07-22
+Execution updated: 2026-07-23
 
 Reviewed revision: `06bf94d` (`main`)
 
@@ -27,10 +27,12 @@ serialized every ingest and query through one SQLite connection. The current sto
 uses a dedicated writer owner plus four WAL readers. OTLP requests also pass through one
 shared cross-transport admission gate with transport-byte limits, compression handling,
 schema-aware preallocation budgets, a decoded-graph parity check, and a request deadline.
-Retention still runs after every export. Request graph amplification is now bounded by
-the pinned-schema preflight, but exact heap bytes, protobuf field-work CPU, writer queue
-bytes/records, and completion remain open; UI caches likewise mask remaining aggregate
-and retention cost under small loads without removing it.
+SQLite writer admission now also bounds aggregate queued and executing OTLP work by
+primary records and canonical protobuf bytes. Retention still runs after every export.
+Request graph amplification is bounded by the pinned-schema preflight, but exact heap
+bytes, protobuf field-work CPU, and accepted-work completion remain open; UI caches
+likewise mask remaining aggregate and retention cost under small loads without removing
+it.
 
 The right product is not a terminal clone of Grafana, Jaeger, or a hosted LLM dashboard.
 Ottyel should be the fastest local answer to these questions:
@@ -103,8 +105,9 @@ removes the shared connection and async OTLP-handler blocking. The first OTLP ha
 slice completed on 2026-07-16 adds cross-transport request admission and protocol
 envelopes. The 2026-07-22 follow-up moves schema-aware accounting before Prost for the
 pinned OTLP 0.31.0 request schema and moves gRPC scanning/decoding off Tokio workers;
-per-request retention, writer byte/record accounting, global aggregate scans, and the
-monolithic all-tab snapshot remain.
+the 2026-07-23 follow-up adds configurable writer admission across queued and executing
+work using exact primary-record counts and canonical Prost bytes. Per-request retention,
+global aggregate scans, and the monolithic all-tab snapshot remain.
 
 ## Current Strengths To Preserve
 
@@ -115,6 +118,8 @@ monolithic all-tab snapshot remain.
   buffering or gRPC message decoding.
 - Allocation-free protobuf preflight rejects oversized request graphs before Prost on
   both transports; gRPC also rejects extra unary message frames atomically.
+- OTLP writer admission counts queued and executing work by primary records and canonical
+  protobuf bytes, while retaining an independent fixed command bound.
 - Raw resource and record attributes are retained for the fields that are stored.
 - Span events and links are queryable and visible.
 - Trace detail is a two-step list-to-tree workflow with stable keyboard semantics.
@@ -134,7 +139,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P0 | Metric streams are conflated and lossy | `src/store/ingest.rs`, `src/ui/details.rs` | Different attribute sets are charted together; histogram buckets, quantiles, temporality details, exemplars, unit, and description are lost |
 | P0 (partially resolved 2026-07-14) | Store ownership and async database work remain incomplete | `src/store/writer.rs`, `src/store/reader_pool.rs`, `src/ingest.rs` | One named thread now owns SQLite writes behind immediate 64-command admission, queries use four physical read-only connections, and all six OTLP handlers await async receipts; startup/migration, the initial TUI snapshot, reader checkout, completion, and shutdown still lack a fully bounded worker contract |
 | P0 | Retention runs after every export | `src/store/ingest.rs` | Sustained ingest pays repeated table scans and delete transactions even when nothing expires |
-| P0 (partially resolved 2026-07-22) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/ingest/`, `src/store/writer.rs` | One shared request gate covers both transports from pre-decode admission through commit; identity/gzip, byte limits, protobuf HTTP failures, schema-aware preallocation budgets plus postdecode parity, exact unary framing, client deadlines, and retry-correct capacity/lifecycle errors are covered. Writer byte/record admission, field-work benchmarks, partial success, duplicate export policy, batching, retry hints, health, and graceful drain remain incomplete |
+| P0 (partially resolved 2026-07-23) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/ingest/`, `src/store/writer.rs` | One shared request gate covers both transports from pre-decode admission through commit; identity/gzip, byte limits, protobuf HTTP failures, schema-aware preallocation budgets plus postdecode parity, exact unary framing, client deadlines, configurable aggregate writer record/canonical-byte admission, and retry-correct capacity/lifecycle errors are covered. Field-work benchmarks, partial success, duplicate export policy, batching, retry hints, health, and graceful drain remain incomplete |
 | P0 | SQLite identity is based on global `span_id` | `src/store/schema.rs` | The logical identity `(trace_id, span_id)` is not preserved; joins and upserts can corrupt colliding traces |
 | P0 (resolved 2026-07-13) | There was no schema migration mechanism | `src/store/schema.rs`, `src/store/schema/` | Ordered `user_version` migrations now preserve exact legacy v0 data, validate the frozen schema, and roll back DDL, version changes, and failed post-checks together; backup and recovery for the first non-trivial v2 migration remain open |
 | P0 | Sensitive AI content has no central policy | store, TUI, and MCP paths | Prompts, outputs, tool arguments, and raw attributes can be persisted and returned without masking or payload budgets |
@@ -159,15 +164,19 @@ At the reviewed revision, `Store` wrapped one `rusqlite::Connection` in
 keeps an eager fixed pool of four physical read-only/query-only connections and moves the
 writable connection into one named owner thread. Every query leases a reader without
 taking the writer, and every write is admitted with `try_send` to a fixed 64-command
-queue. Store clones share both owners.
+queue. OTLP writes additionally reserve configurable aggregate capacity across queued
+and executing work. Defaults admit at most 40,000 spans/log records/metric data points
+and 16 MiB of canonical Prost-encoded request bytes. Store clones share both owners and
+the same counters.
 
 Synchronous callers wait only after admission. HTTP and gRPC traces, logs, and metrics
 perform the same immediate admission and then asynchronously await a commit receipt;
-there is no Tokio blocking-task queue in front of store backpressure. Full or closed
-admission and a lost post-admission acknowledgement are public, downcastable
-`StoreWriteError` variants. The transports map all three lifecycle failures to HTTP 503
-or gRPC `Unavailable`; ordinary projection, SQLite, and retention errors retain the
-existing internal-error path.
+there is no Tokio blocking-task queue in front of store backpressure. Aggregate
+saturation, closed admission, an individually oversized write, and a lost post-admission
+acknowledgement are public, downcastable `StoreWriteError` variants. The transports map
+single-write record/byte overflow to HTTP 413 or gRPC `ResourceExhausted`; aggregate
+capacity and lifecycle failures remain retryable HTTP 503 or gRPC `Unavailable`.
+Ordinary projection, SQLite, and retention errors retain the internal-error path.
 
 Before that storage boundary, one configurable semaphore now admits at most four OTLP
 requests by default across HTTP and gRPC. A permit is acquired before an HTTP body is read
@@ -184,19 +193,24 @@ Each admitted trace, log, or metric export now:
 1. acquires shared request capacity before body buffering or protobuf decoding;
 2. applies transport-byte limits and decompression, then scans allocation-relevant wire
    fields before Prost builds the request graph;
-3. waits in the bounded storage command queue, if the owner is already active;
-4. writes and commits one signal transaction on the owner thread;
-5. runs the existing retention transaction on the same owner before the next command;
-6. returns the result to a synchronous or asynchronous receipt before releasing capacity.
+3. validates the decoded graph and measures its exact primary records plus canonical
+   Prost-encoded length on the blocking pool;
+4. atomically reserves writer record/byte capacity and command-queue admission, then
+   waits in the bounded storage queue if the owner is active;
+5. writes and commits one signal transaction on the owner thread;
+6. runs the existing retention transaction on the same owner before the next command;
+7. releases writer weight, returns the receipt, and then releases request capacity.
 
-Deterministic tests prove FIFO serialization, immediate Full, ordinary-error recovery,
+Deterministic tests prove FIFO serialization, exact two-axis boundaries, active-job
+charging, atomic Full/disconnect rollback, arithmetic overflow, ordinary-error recovery,
 pre-commit rollback and fail-closed behavior after panic, clone ownership, cancellation
-that does not cancel accepted work, full-queue drain on final drop, and current-thread
-Tokio responsiveness. WAL regressions still prove reader and writer progress in both
-directions. OTLP tests cover identity and gzip for all signals, exact and over-limit
-envelopes, malformed payloads, preflight rejection without writes, duplicate
-allocation-bearing fields, packed metric arrays, recursion boundaries, extra gRPC
-frames, capacity, request timeout, and retry classification.
+that does not cancel accepted work, weighted full-queue drain on final drop, and
+current-thread Tokio responsiveness. WAL regressions still prove reader and writer
+progress in both directions. OTLP tests cover identity and gzip for all signals, exact
+and over-limit envelopes, malformed payloads, preflight rejection without writes,
+duplicate allocation-bearing fields, packed metric arrays, recursion boundaries, extra
+gRPC frames, writer oversize mappings, capacity, request timeout, and retry
+classification.
 
 This is still not a byte-exact heap, CPU, or lifecycle bound. An allocation-free scanner
 now walks decompressed bytes before Prost and applies request-wide record, attribute,
@@ -209,13 +223,14 @@ bypass admission. `opentelemetry-proto` is pinned to 0.31.0 because its schema t
 security boundary.
 
 The capped transport buffer, Prost capacity slack, and configured maximum accepted graph
-still consume memory. Unknown or scalar fields do not consume structural budget, so a
+still consume memory. Canonical writer bytes are deterministic admission units, not an
+allocator-byte estimate. Unknown or scalar fields do not consume structural budget, so a
 near-limit request containing millions of tiny fields can force two linear wire passes;
 benchmark that case before deciding whether a separate field/work-unit limit is needed.
 A deadline response can also be outcome-unknown if accepted storage work commits after
-the client times out, which makes duplicate export handling mandatory. Writer
-bytes/records, reader checkout, store open/migration, the first terminal snapshot, and
-final owner join still lack bounded completion. Retention still scans after every export.
+the client times out, which makes duplicate export handling mandatory. Reader checkout,
+store open/migration, the first terminal snapshot, and final owner join still lack
+bounded completion. Retention still scans after every export.
 
 ### 2. Query Cost And Incorrect Read Models
 
@@ -325,8 +340,10 @@ contract:
   graph as a parity guard;
 - gRPC accepts exactly one unary export message and performs preflight plus Prost work on
   the blocking pool after Tonic's framing, gzip, and message-size checks;
-- invalid/oversized requests are non-retryable, while capacity, timeout, and writer
-  lifecycle failures use retryable HTTP/gRPC statuses;
+- decoded requests reserve configurable aggregate writer capacity by exact primary
+  records and canonical Prost bytes until write plus retention completion;
+- invalid or individually oversized requests are non-retryable, while aggregate
+  capacity, timeout, and writer lifecycle failures use retryable HTTP/gRPC statuses;
 - client wait has a configurable deadline; accepted SQLite work continues and retains
   capacity until its outcome is known.
 
@@ -339,8 +356,7 @@ must also:
 - validate record invariants and return per-signal partial success for mixed-validity
   requests where the OTLP data model permits it;
 - define retransmission and duplicate handling for deadline-unknown outcomes;
-- add writer byte/record accounting, bounded coalescing, retry hints, and consistent
-  transient SQLite classification;
+- add bounded coalescing, retry hints, and consistent transient SQLite classification;
 - expose accepted, committed, rejected, duplicate, dropped, queued, and latency health by
   signal and transport;
 - stop intake and drain or reject accepted work within a shutdown deadline;
@@ -628,7 +644,10 @@ Goal: behave predictably under malformed, compressed, concurrent, and excessive 
 - [x] Move schema-aware record, attribute, structure, AnyValue-depth, and individual-value
   accounting before Prost for the pinned OTLP 0.31.0 schema; retain postdecode parity and
   reject allocation-bearing duplicate wire occurrences monotonically.
-- [ ] Extend writer admission with record and byte accounting.
+- [x] Extend writer admission with configurable aggregate primary-record and canonical
+  protobuf-byte accounting across queued and executing work. Keep the 64-command queue
+  as an independent bound; reject individually oversized work permanently and aggregate
+  saturation retryably.
 - [ ] Benchmark near-limit scalar/unknown-field protobufs and add an independent
   field/work-unit budget only if measured CPU cost requires it.
 - [ ] Coalesce adjacent batches within a small time/size budget without delaying low-rate
@@ -950,8 +969,9 @@ Keep each pull request a vertical, reversible step with tests and measurements.
    provides shared pre-decode concurrency, transport-byte limits, pinned-schema
    preallocation budgets plus postdecode parity, identity/gzip, exact unary framing, a
    client response deadline, protocol error envelopes, and retry-correct capacity/lifecycle
-   failures. Writer byte/record admission, worst-case field-work measurement, batching,
-   partial success, duplicate exports, health, and drain remain.
+   failures. Configurable writer record/canonical-byte admission is also complete;
+   worst-case field-work measurement, batching, partial success, duplicate exports,
+   health, and drain remain.
 6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled
    bounded whole-trace retention.
 7. [ ] Ship faithful metric streams/points and targeted metric series queries.
@@ -982,7 +1002,7 @@ Current documentation work:
 ## Validation Performed For This Review
 
 - `cargo fmt -- --check`: passed.
-- `cargo test`: passed, 190 product tests plus 6 performance-harness support tests.
+- `cargo test`: passed, 211 product tests plus 6 performance-harness support tests.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed without lint
   suppressions.
 - `RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --all-features`: passed.
@@ -992,19 +1012,28 @@ Current documentation work:
   run is diagnostic only and does not prove the reference budgets.
 - Focused WAL concurrency tests prove reader and writer transaction progress in both
   directions; the public benchmark still lacks a deterministic overlap rendezvous.
-- Six dedicated writer-owner regressions cover Full, FIFO clone submission, normal-error
-  recovery, panic rollback/fail-closed behavior, full-queue drain with dropped receipts,
-  and self-thread teardown. Forty receiver and receiver-policy tests cover both transports
-  and all signals with identity/gzip, byte and preallocation limits, malformed wire,
-  packed arrays, recursion, extra unary frames, protobuf HTTP errors, overload, retry
-  classification, timeout, permit lifetime, atomic rejection, and Tokio responsiveness.
-  Configuration tests cover zero, semaphore-overflow, aligned defaults, and
-  programmatic-consumption validation.
+- Sixteen dedicated writer-owner regressions cover command Full, exact weighted
+  boundaries, active charging, atomic rollback, arithmetic overflow, FIFO clone
+  submission, normal-error recovery, panic rollback/fail-closed behavior, weighted
+  full-queue drain with dropped receipts, and self-thread teardown. Four request-weight
+  tests cover empty, trace, log, every metric type, canonical-size parity, and valid wire
+  encodings that grow during canonical re-encoding. Forty-seven receiver and
+  receiver-policy tests cover both transports and all signals with identity/gzip, byte
+  and preallocation limits, malformed wire, packed arrays, recursion, extra unary
+  frames, protobuf HTTP errors, writer oversize, overload, retry classification, timeout,
+  permit lifetime, atomic rejection, and Tokio responsiveness. Configuration tests cover
+  zero, semaphore overflow, aligned defaults, per-request writer fit, canonical
+  re-encoding headroom, and programmatic-consumption validation.
 - Same-machine smoke runs before and after the writer owner showed no broad regression:
   1,000-span acknowledgement p50/p95 moved from 15.929/21.627 ms to 15.136/21.254 ms;
   database and WAL sizes were unchanged. Setup moved from 120.3 ms to 151.0 ms, so this
   five-sample diagnostic is not evidence of a throughput improvement or a passed
   reference budget.
+- The same five-sample smoke profile around weighted writer admission was flat on its
+  targeted path: 1,000-span acknowledgement p50/p95 moved from 15.479/23.429 ms at clean
+  `f5d86de` to 15.393/23.996 ms in the implementation worktree. Setup moved from 120.5 ms
+  to 135.6 ms; database and WAL sizes were unchanged. This remains diagnostic evidence,
+  not a throughput gain or a passed reference budget.
 - UI snapshots and both checked-in screenshots were inspected.
 - Store queries and retention were exercised against the directional synthetic database
   described above.

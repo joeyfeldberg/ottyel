@@ -70,7 +70,7 @@ the 1,000-span ingest batch.
 
 | JSON name | What the interval includes |
 | --- | --- |
-| `ingest_acknowledgement_1000_spans` | A prebuilt, previously unseen 1,000-span `Store::ingest_traces` batch, immediate writer-queue admission, owner-thread transaction commit, current post-export retention scans, and receipt acknowledgement. Protobuf decode and fixture construction are excluded. Every warmup and sample uses new IDs, and this sequential scenario does not measure saturation. |
+| `ingest_acknowledgement_1000_spans` | A prebuilt, previously unseen 1,000-span `Store::ingest_traces` batch, primary-record/canonical-byte measurement, immediate writer admission, owner-thread transaction commit, current post-export retention scans, and receipt acknowledgement. Protobuf decode and fixture construction are excluded. Every warmup and sample uses new IDs, and this sequential scenario does not measure saturation. |
 | `dashboard_snapshot_all_tabs` | `QueryService::snapshot` with default filters: services/counts, all four first pages, AI rollups, sessions, comparisons, and top calls. This is the current all-tab snapshot, not a future bounded overview model. |
 | `first_trace_page` | The first 50 trace summaries for `perf-service`, using the current service/time candidate query and complete-trace aggregation. |
 | `first_log_page` | The first 50 logs for `perf-service`, ordered by event timestamp and row ID. |
@@ -93,9 +93,11 @@ controlled contention workload and latency contract. A smaller page limit is not
 substitute for either capability.
 
 The deterministic writer-owner tests use internal gates to prove pressure and lifecycle
-behavior, but those gates are not a benchmark workload. The 64-command storage queue is
-also not a byte or record budget: request decoding and the complete OTLP overload matrix
-remain outside this harness scenario.
+behavior, but those gates are not a benchmark workload. The fixed 64-command storage
+queue remains independent from OTLP writer admission, which defaults to 40,000 aggregate
+primary records and 16 MiB of canonical protobuf bytes across queued and executing work.
+Request decoding and the complete OTLP overload matrix remain outside this harness
+scenario.
 
 ## Writer-Owner Smoke Check
 
@@ -117,6 +119,28 @@ Five smoke samples can catch an extreme regression but cannot establish a throug
 gain. Setup variance increased in this pair, while measured operation percentiles were
 flat to directionally lower. A controlled concurrent scenario and repeated reference
 runs remain required before making a performance claim.
+
+## Weighted Writer Admission Smoke Check
+
+The 2026-07-23 weighted-admission change was checked with the same smoke profile on the
+same machine. The before report used clean revision `f5d86de`; the after report used the
+implementation worktree. The timed public ingest path includes exact primary-record and
+canonical `encoded_len()` measurement.
+
+| Diagnostic | Before | After |
+| --- | ---: | ---: |
+| Setup | 120.5 ms | 135.6 ms |
+| 1,000-span acknowledgement p50 | 15.479 ms | 15.393 ms |
+| 1,000-span acknowledgement p95 | 23.429 ms | 23.996 ms |
+| All-tab snapshot p50 | 18.553 ms | 18.238 ms |
+| All-tab snapshot p95 | 18.712 ms | 18.338 ms |
+| Main database | 7,802,880 bytes | 7,802,880 bytes |
+| Live WAL | 4,445,512 bytes | 4,445,512 bytes |
+
+The five-sample acknowledgement p50 was flat and p95 increased by about 2.4%; setup
+variance increased. This diagnostic found no broad regression, but it is not a
+throughput claim or a substitute for the missing controlled-concurrency workload and
+reference-machine runs.
 
 ## Report Schema
 

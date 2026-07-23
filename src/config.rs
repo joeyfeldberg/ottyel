@@ -59,7 +59,8 @@ pub struct ServeArgs {
     #[arg(long, default_value_t = NonZeroUsize::new(4 * 1024 * 1024).unwrap())]
     pub max_otlp_wire_bytes: NonZeroUsize,
     /// Maximum decompressed protobuf bytes. HTTP enforces this separately after gzip; gRPC uses
-    /// the smaller of this and the transport limit as Tonic's single decode cap.
+    /// the smaller of this and the transport limit as Tonic's single decode cap. The writer byte
+    /// limit must provide twice this value for canonical protobuf normalization.
     #[arg(long, default_value_t = NonZeroUsize::new(4 * 1024 * 1024).unwrap())]
     pub max_otlp_decompressed_bytes: NonZeroUsize,
     /// Maximum milliseconds to await an OTLP request before returning a retryable timeout.
@@ -81,6 +82,13 @@ pub struct ServeArgs {
     /// Preflight and post-decode maximum bytes in each dynamic protobuf string or bytes field.
     #[arg(long, default_value_t = NonZeroUsize::new(1024 * 1024).unwrap())]
     pub max_otlp_value_bytes: NonZeroUsize,
+    /// Aggregate primary OTLP records queued or executing on the SQLite writer.
+    #[arg(long, default_value_t = NonZeroUsize::new(40_000).unwrap())]
+    pub max_otlp_writer_records: NonZeroUsize,
+    /// Aggregate canonical protobuf bytes queued or executing on the SQLite writer. Must be at
+    /// least twice the decompressed request limit.
+    #[arg(long, default_value_t = NonZeroUsize::new(16 * 1024 * 1024).unwrap())]
+    pub max_otlp_writer_bytes: NonZeroUsize,
 }
 
 impl Default for ServeArgs {
@@ -103,6 +111,8 @@ impl Default for ServeArgs {
             max_otlp_structures: NonZeroUsize::new(250_000).unwrap(),
             max_otlp_any_value_depth: NonZeroUsize::new(16).unwrap(),
             max_otlp_value_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
+            max_otlp_writer_records: NonZeroUsize::new(40_000).unwrap(),
+            max_otlp_writer_bytes: NonZeroUsize::new(16 * 1024 * 1024).unwrap(),
         }
     }
 }
@@ -182,6 +192,7 @@ mod tests {
     use tokio::sync::Semaphore;
 
     use super::{Cli, Command, ServeArgs};
+    use crate::store::WriterLimits;
 
     #[test]
     fn otlp_limits_reject_zero_at_the_cli_boundary() {
@@ -195,6 +206,8 @@ mod tests {
             "--max-otlp-structures",
             "--max-otlp-any-value-depth",
             "--max-otlp-value-bytes",
+            "--max-otlp-writer-records",
+            "--max-otlp-writer-bytes",
         ] {
             assert!(
                 Cli::try_parse_from(["ottyel", "serve", flag, "0"]).is_err(),
@@ -231,6 +244,16 @@ mod tests {
         assert_eq!(args.max_otlp_in_flight.get(), 4);
         assert_eq!(args.max_otlp_wire_bytes, args.max_otlp_decompressed_bytes);
         assert_eq!(args.otlp_request_timeout_ms.get(), 30_000);
+        assert_eq!(args.max_otlp_writer_records.get(), 40_000);
+        assert_eq!(args.max_otlp_writer_bytes.get(), 16 * 1024 * 1024);
+        assert_eq!(
+            args.max_otlp_writer_records.get(),
+            WriterLimits::default().max_primary_records()
+        );
+        assert_eq!(
+            args.max_otlp_writer_bytes.get(),
+            WriterLimits::default().max_canonical_bytes()
+        );
         assert_eq!(
             args.max_otlp_wire_bytes,
             ServeArgs::default().max_otlp_wire_bytes

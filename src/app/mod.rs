@@ -102,8 +102,15 @@ pub async fn run(cli: Cli) -> Result<()> {
 }
 
 async fn serve(args: ServeArgs) -> Result<()> {
-    let store = Store::open(&args.db_path, args.retention_hours, args.max_spans)?;
     let ingest_limits = crate::ingest::IngestLimits::try_from_args(&args)?;
+    let writer_limits =
+        crate::store::WriterLimits::new(args.max_otlp_writer_records, args.max_otlp_writer_bytes);
+    let store = Store::open_with_writer_limits(
+        &args.db_path,
+        args.retention_hours,
+        args.max_spans,
+        writer_limits,
+    )?;
     let query = QueryService::new(store.clone(), args.page_size);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 

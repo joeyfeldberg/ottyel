@@ -107,6 +107,7 @@ async fn serve_grpc_listener(
 
 fn store_status(err: anyhow::Error) -> Status {
     match err.downcast_ref::<StoreWriteError>() {
+        Some(StoreWriteError::TooLarge { .. }) => Status::resource_exhausted(err.to_string()),
         Some(
             StoreWriteError::Overloaded
             | StoreWriteError::Unavailable
@@ -141,6 +142,7 @@ async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
 #[cfg(test)]
 mod tests {
     use std::{
+        num::NonZeroUsize,
         sync::mpsc,
         task::Poll,
         thread,
@@ -169,7 +171,7 @@ mod tests {
     use tonic::{Code, codec::CompressionEncoding, transport::Channel};
     use tower::ServiceExt;
 
-    use crate::store::{Store, StoreWriteError};
+    use crate::store::{Store, StoreWriteError, WriterLimitDimension, WriterLimits};
 
     use super::{
         IngestLimits, IngestState, http as ingest_http, serve_grpc_listener, store_status,
@@ -199,6 +201,36 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn http_maps_writer_weight_rejection_to_code_8_without_writing() {
+        use http_body_util::BodyExt;
+
+        let now = now_nanos() as u64;
+        let tempdir = tempdir().unwrap();
+        let store = Store::open_with_writer_limits(
+            &tempdir.path().join("ottyel.db"),
+            24,
+            1000,
+            WriterLimits::new(NonZeroUsize::new(1).unwrap(), NonZeroUsize::new(1).unwrap()),
+        )
+        .unwrap();
+        let app = ingest_http::router(IngestState::new(store.clone(), IngestLimits::default()));
+        let response = app
+            .oneshot(
+                Request::post("/v1/traces")
+                    .header("content-type", "application/x-protobuf")
+                    .body(Body::from(trace_export_request(now).encode_to_vec()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(ingest_http::decode_rpc_status(&body).0, 8);
+        assert_eq!(store.counts(None).unwrap().0, 0);
+    }
+
+    #[tokio::test]
     async fn grpc_traces_ingest_through_otlp_service() {
         let now = now_nanos() as u64;
         let tempdir = tempdir().unwrap();
@@ -220,6 +252,34 @@ mod tests {
         server.await.unwrap().unwrap();
 
         assert_eq!(store.counts(None).unwrap().0, 1);
+    }
+
+    #[tokio::test]
+    async fn grpc_maps_writer_weight_rejection_to_resource_exhausted() {
+        let now = now_nanos() as u64;
+        let tempdir = tempdir().unwrap();
+        let store = Store::open_with_writer_limits(
+            &tempdir.path().join("ottyel.db"),
+            24,
+            1000,
+            WriterLimits::new(NonZeroUsize::new(1).unwrap(), NonZeroUsize::new(1).unwrap()),
+        )
+        .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_grpc_listener(
+            listener,
+            IngestState::new(store.clone(), IngestLimits::default()),
+            shutdown_rx,
+        ));
+        let mut client = connect_trace_client(&format!("http://{addr}")).await;
+
+        let error = client.export(trace_export_request(now)).await.unwrap_err();
+        assert_eq!(error.code(), Code::ResourceExhausted);
+        let _ = shutdown_tx.send(true);
+        server.await.unwrap().unwrap();
+        assert_eq!(store.counts(None).unwrap().0, 0);
     }
 
     #[tokio::test]
@@ -560,6 +620,22 @@ mod tests {
             store_status(anyhow!("sqlite operation failed")).code(),
             Code::Internal
         );
+    }
+
+    #[tokio::test]
+    async fn writer_request_limit_errors_are_permanent_resource_exhaustion() {
+        use http_body_util::BodyExt;
+
+        let error = StoreWriteError::TooLarge {
+            dimension: WriterLimitDimension::PrimaryRecords,
+            requested: 2,
+            limit: 1,
+        };
+        let response = ingest_http::store_error(anyhow!(error));
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(ingest_http::decode_rpc_status(&body).0, 8);
+        assert_eq!(store_status(anyhow!(error)).code(), Code::ResourceExhausted);
     }
 
     #[tokio::test(flavor = "current_thread")]

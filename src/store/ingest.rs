@@ -13,7 +13,7 @@ use crate::domain::{
 };
 
 use super::{
-    AsyncWriteReceipt, RetentionPolicy, Store,
+    AsyncWriteReceipt, PreparedIngest, RetentionPolicy, Store,
     helpers::{
         any_value_text, format_metric_summary, hex_bytes, log_severity, log_time_unix_nano,
         now_unix_nanos, number_value, resource_to_map, span_kind_name, status_code_name,
@@ -21,24 +21,38 @@ use super::{
 };
 
 impl Store {
-    /// Attempts immediate admission to the bounded writer queue, returning
-    /// [`super::StoreWriteError::Overloaded`] when full. Once admitted, this waits without a
-    /// completion deadline for the definitive writer acknowledgement or an
+    /// Attempts immediate admission to bounded writer capacity. A request larger than the total
+    /// capacity returns [`super::StoreWriteError::TooLarge`]; aggregate capacity or queue
+    /// exhaustion returns [`super::StoreWriteError::Overloaded`]. Once admitted, this waits
+    /// without a completion deadline for the definitive writer acknowledgement or an
     /// [`super::StoreWriteError::OutcomeUnknown`] failure.
     ///
     /// Queue and acknowledgement failures can be classified by downcasting the returned error to
     /// [`super::StoreWriteError`].
     pub fn ingest_traces(&self, request: ExportTraceServiceRequest) -> Result<usize> {
+        self.ingest_prepared_traces(PreparedIngest::prepare(request))
+    }
+
+    fn ingest_prepared_traces(
+        &self,
+        prepared: PreparedIngest<ExportTraceServiceRequest>,
+    ) -> Result<usize> {
         let (writer, retention) = self.write_access()?;
-        writer.execute(move |conn| Self::write_traces(conn, request, retention))
+        let (request, weight) = prepared.into_parts();
+        writer.execute_weighted(weight, move |conn| {
+            Self::write_traces(conn, request, retention)
+        })
     }
 
     pub(crate) fn try_ingest_traces(
         &self,
-        request: ExportTraceServiceRequest,
+        prepared: PreparedIngest<ExportTraceServiceRequest>,
     ) -> Result<AsyncWriteReceipt<usize>> {
         let (writer, retention) = self.write_access()?;
-        writer.try_execute_async(move |conn| Self::write_traces(conn, request, retention))
+        let (request, weight) = prepared.into_parts();
+        writer.try_execute_async_weighted(weight, move |conn| {
+            Self::write_traces(conn, request, retention)
+        })
     }
 
     fn write_traces(
@@ -174,24 +188,38 @@ impl Store {
         Ok(inserted)
     }
 
-    /// Attempts immediate admission to the bounded writer queue, returning
-    /// [`super::StoreWriteError::Overloaded`] when full. Once admitted, this waits without a
-    /// completion deadline for the definitive writer acknowledgement or an
+    /// Attempts immediate admission to bounded writer capacity. A request larger than the total
+    /// capacity returns [`super::StoreWriteError::TooLarge`]; aggregate capacity or queue
+    /// exhaustion returns [`super::StoreWriteError::Overloaded`]. Once admitted, this waits
+    /// without a completion deadline for the definitive writer acknowledgement or an
     /// [`super::StoreWriteError::OutcomeUnknown`] failure.
     ///
     /// Queue and acknowledgement failures can be classified by downcasting the returned error to
     /// [`super::StoreWriteError`].
     pub fn ingest_logs(&self, request: ExportLogsServiceRequest) -> Result<usize> {
+        self.ingest_prepared_logs(PreparedIngest::prepare(request))
+    }
+
+    fn ingest_prepared_logs(
+        &self,
+        prepared: PreparedIngest<ExportLogsServiceRequest>,
+    ) -> Result<usize> {
         let (writer, retention) = self.write_access()?;
-        writer.execute(move |conn| Self::write_logs(conn, request, retention))
+        let (request, weight) = prepared.into_parts();
+        writer.execute_weighted(weight, move |conn| {
+            Self::write_logs(conn, request, retention)
+        })
     }
 
     pub(crate) fn try_ingest_logs(
         &self,
-        request: ExportLogsServiceRequest,
+        prepared: PreparedIngest<ExportLogsServiceRequest>,
     ) -> Result<AsyncWriteReceipt<usize>> {
         let (writer, retention) = self.write_access()?;
-        writer.try_execute_async(move |conn| Self::write_logs(conn, request, retention))
+        let (request, weight) = prepared.into_parts();
+        writer.try_execute_async_weighted(weight, move |conn| {
+            Self::write_logs(conn, request, retention)
+        })
     }
 
     fn write_logs(
@@ -237,24 +265,38 @@ impl Store {
         Ok(inserted)
     }
 
-    /// Attempts immediate admission to the bounded writer queue, returning
-    /// [`super::StoreWriteError::Overloaded`] when full. Once admitted, this waits without a
-    /// completion deadline for the definitive writer acknowledgement or an
+    /// Attempts immediate admission to bounded writer capacity. A request larger than the total
+    /// capacity returns [`super::StoreWriteError::TooLarge`]; aggregate capacity or queue
+    /// exhaustion returns [`super::StoreWriteError::Overloaded`]. Once admitted, this waits
+    /// without a completion deadline for the definitive writer acknowledgement or an
     /// [`super::StoreWriteError::OutcomeUnknown`] failure.
     ///
     /// Queue and acknowledgement failures can be classified by downcasting the returned error to
     /// [`super::StoreWriteError`].
     pub fn ingest_metrics(&self, request: ExportMetricsServiceRequest) -> Result<usize> {
+        self.ingest_prepared_metrics(PreparedIngest::prepare(request))
+    }
+
+    fn ingest_prepared_metrics(
+        &self,
+        prepared: PreparedIngest<ExportMetricsServiceRequest>,
+    ) -> Result<usize> {
         let (writer, retention) = self.write_access()?;
-        writer.execute(move |conn| Self::write_metrics(conn, request, retention))
+        let (request, weight) = prepared.into_parts();
+        writer.execute_weighted(weight, move |conn| {
+            Self::write_metrics(conn, request, retention)
+        })
     }
 
     pub(crate) fn try_ingest_metrics(
         &self,
-        request: ExportMetricsServiceRequest,
+        prepared: PreparedIngest<ExportMetricsServiceRequest>,
     ) -> Result<AsyncWriteReceipt<usize>> {
         let (writer, retention) = self.write_access()?;
-        writer.try_execute_async(move |conn| Self::write_metrics(conn, request, retention))
+        let (request, weight) = prepared.into_parts();
+        writer.try_execute_async_weighted(weight, move |conn| {
+            Self::write_metrics(conn, request, retention)
+        })
     }
 
     fn write_metrics(

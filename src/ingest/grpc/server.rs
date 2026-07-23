@@ -31,7 +31,7 @@ use tonic::{
     server::{NamedService, UnaryService},
 };
 
-use crate::store::AsyncWriteReceipt;
+use crate::store::{AsyncWriteReceipt, MeasureIngest, PreparedIngest};
 
 use super::prepare_raw_request;
 use crate::ingest::{
@@ -39,7 +39,7 @@ use crate::ingest::{
 };
 
 pub(crate) trait Signal: Send + Sync + 'static {
-    type Request: Message + Default + ValidateOtlp + PreflightOtlp;
+    type Request: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp;
     type Response: Message + Default + Send + 'static;
 
     const NAME: &'static str;
@@ -47,7 +47,7 @@ pub(crate) trait Signal: Send + Sync + 'static {
 
     fn ingest(
         state: &IngestState,
-        request: Self::Request,
+        request: PreparedIngest<Self::Request>,
     ) -> anyhow::Result<AsyncWriteReceipt<usize>>;
 }
 
@@ -63,7 +63,7 @@ impl Signal for Traces {
 
     fn ingest(
         state: &IngestState,
-        request: Self::Request,
+        request: PreparedIngest<Self::Request>,
     ) -> anyhow::Result<AsyncWriteReceipt<usize>> {
         state.store.try_ingest_traces(request)
     }
@@ -77,7 +77,7 @@ impl Signal for Logs {
 
     fn ingest(
         state: &IngestState,
-        request: Self::Request,
+        request: PreparedIngest<Self::Request>,
     ) -> anyhow::Result<AsyncWriteReceipt<usize>> {
         state.store.try_ingest_logs(request)
     }
@@ -91,7 +91,7 @@ impl Signal for Metrics {
 
     fn ingest(
         state: &IngestState,
-        request: Self::Request,
+        request: PreparedIngest<Self::Request>,
     ) -> anyhow::Result<AsyncWriteReceipt<usize>> {
         state.store.try_ingest_metrics(request)
     }

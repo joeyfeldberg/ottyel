@@ -1,5 +1,6 @@
 mod helpers;
 mod ingest;
+mod ingest_weight;
 mod queries;
 mod reader_pool;
 mod schema;
@@ -8,11 +9,12 @@ mod writer;
 use std::{fs, path::Path};
 
 use anyhow::{Context, Result, bail};
+pub(crate) use ingest_weight::{MeasureIngest, PreparedIngest};
 use reader_pool::{ReaderLease, ReaderPool};
 use rusqlite::Connection;
 pub(crate) use writer::AsyncWriteReceipt;
-pub use writer::StoreWriteError;
 use writer::WriterOwner;
+pub use writer::{StoreWriteError, WriterLimitDimension, WriterLimits};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RetentionPolicy {
@@ -38,6 +40,16 @@ pub struct Store {
 impl Store {
     /// Opens or creates a filesystem-backed database with one writer and a bounded reader pool.
     pub fn open(path: &Path, retention_hours: u64, max_spans: usize) -> Result<Self> {
+        Self::open_with_writer_limits(path, retention_hours, max_spans, WriterLimits::default())
+    }
+
+    /// Opens or creates a database with explicit aggregate OTLP writer-admission limits.
+    pub fn open_with_writer_limits(
+        path: &Path,
+        retention_hours: u64,
+        max_spans: usize,
+        writer_limits: WriterLimits,
+    ) -> Result<Self> {
         validate_file_backed_path(path)?;
         if let Some(parent) = path
             .parent()
@@ -51,7 +63,7 @@ impl Store {
             .with_context(|| format!("failed to open sqlite db {}", path.display()))?;
         schema::initialize(&mut conn)
             .with_context(|| format!("failed to initialize sqlite db {}", path.display()))?;
-        let writer = WriterOwner::start(conn)
+        let writer = WriterOwner::start(conn, writer_limits)
             .with_context(|| format!("failed to start sqlite writer for {}", path.display()))?;
         let readers = ReaderPool::open(path).with_context(|| {
             format!("failed to initialize sqlite readers for {}", path.display())
