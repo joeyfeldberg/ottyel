@@ -36,3 +36,7 @@ tempfile = "3.21"
 [[bench]]
 name = "store_baseline"
 harness = false
+
+[[bench]]
+name = "ingest_field_work"
+harness = false
