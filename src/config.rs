@@ -7,6 +7,11 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use directories::ProjectDirs;
 use serde::{Deserialize, Serialize};
 
+// Under the other defaults, a canonical near-4 MiB trace built from allocation-light links can
+// approach 1.69 million units. Two million preserves about 18% headroom while stopping the
+// measured unknown-group workload after roughly one third of its 4 MiB body.
+const DEFAULT_MAX_OTLP_WORK_UNITS: usize = 2_000_000;
+
 #[derive(Debug, Clone, Parser)]
 #[command(
     name = "ottyel",
@@ -76,6 +81,12 @@ pub struct ServeArgs {
     /// Preflight and post-decode maximum envelopes, nested values, and structural items.
     #[arg(long, default_value_t = NonZeroUsize::new(250_000).unwrap())]
     pub max_otlp_structures: NonZeroUsize,
+    /// Preflight-only maximum protobuf field, message/group entry, and packed-element work units.
+    #[arg(
+        long,
+        default_value_t = NonZeroUsize::new(DEFAULT_MAX_OTLP_WORK_UNITS).unwrap()
+    )]
+    pub max_otlp_work_units: NonZeroUsize,
     /// Preflight and post-decode maximum nested AnyValue depth, including the root value.
     #[arg(long, default_value_t = NonZeroUsize::new(16).unwrap())]
     pub max_otlp_any_value_depth: NonZeroUsize,
@@ -109,6 +120,7 @@ impl Default for ServeArgs {
             max_otlp_records: NonZeroUsize::new(10_000).unwrap(),
             max_otlp_attributes: NonZeroUsize::new(100_000).unwrap(),
             max_otlp_structures: NonZeroUsize::new(250_000).unwrap(),
+            max_otlp_work_units: NonZeroUsize::new(DEFAULT_MAX_OTLP_WORK_UNITS).unwrap(),
             max_otlp_any_value_depth: NonZeroUsize::new(16).unwrap(),
             max_otlp_value_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
             max_otlp_writer_records: NonZeroUsize::new(40_000).unwrap(),
@@ -204,6 +216,7 @@ mod tests {
             "--max-otlp-records",
             "--max-otlp-attributes",
             "--max-otlp-structures",
+            "--max-otlp-work-units",
             "--max-otlp-any-value-depth",
             "--max-otlp-value-bytes",
             "--max-otlp-writer-records",
@@ -244,6 +257,7 @@ mod tests {
         assert_eq!(args.max_otlp_in_flight.get(), 4);
         assert_eq!(args.max_otlp_wire_bytes, args.max_otlp_decompressed_bytes);
         assert_eq!(args.otlp_request_timeout_ms.get(), 30_000);
+        assert_eq!(args.max_otlp_work_units.get(), 2_000_000);
         assert_eq!(args.max_otlp_writer_records.get(), 40_000);
         assert_eq!(args.max_otlp_writer_bytes.get(), 16 * 1024 * 1024);
         assert_eq!(
@@ -257,6 +271,10 @@ mod tests {
         assert_eq!(
             args.max_otlp_wire_bytes,
             ServeArgs::default().max_otlp_wire_bytes
+        );
+        assert_eq!(
+            args.max_otlp_work_units,
+            ServeArgs::default().max_otlp_work_units
         );
     }
 }

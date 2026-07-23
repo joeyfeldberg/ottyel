@@ -27,7 +27,8 @@ const MAX_CANONICAL_ENCODING_EXPANSION: usize = 2;
 /// transport and decompressed byte budgets. The gRPC decoder uses the smaller budget because Tonic
 /// applies one limit to both the compressed message and its decompressed form. Record, attribute,
 /// structure, depth, and dynamic-value budgets are checked against encoded fields before Prost
-/// allocates the request graph, then checked again against the decoded graph.
+/// allocates the request graph, then checked again against the decoded graph. The protobuf work
+/// budget is preflight-only because duplicate and unknown fields are discarded during decode.
 pub struct IngestLimits {
     pub(super) max_in_flight: usize,
     pub(super) max_wire_bytes: usize,
@@ -36,6 +37,7 @@ pub struct IngestLimits {
     pub(super) max_records: usize,
     pub(super) max_attributes: usize,
     pub(super) max_structures: usize,
+    pub(super) max_work_units: usize,
     pub(super) max_any_value_depth: usize,
     pub(super) max_value_bytes: usize,
 }
@@ -79,6 +81,7 @@ impl IngestLimits {
             max_records,
             max_attributes: args.max_otlp_attributes.get(),
             max_structures: args.max_otlp_structures.get(),
+            max_work_units: args.max_otlp_work_units.get(),
             max_any_value_depth: args.max_otlp_any_value_depth.get(),
             max_value_bytes: args.max_otlp_value_bytes.get(),
         })
@@ -864,6 +867,7 @@ mod tests {
             max_records: 1_000,
             max_attributes: 1_000,
             max_structures: 10_000,
+            max_work_units: 100_000,
             max_any_value_depth: 32,
             max_value_bytes: 1_000,
         }

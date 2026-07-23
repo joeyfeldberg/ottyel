@@ -48,8 +48,13 @@ fn main() -> Result<()> {
 
     let config = RunConfig::parse()?;
     let fixtures = fixtures::build_all()?;
-    let measurements = runner::run(&fixtures, &config)?;
-    let report = BenchmarkReport::build(&config, &fixtures, measurements);
+    let run = runner::run(&fixtures, &config)?;
+    let report = BenchmarkReport::build(
+        &config,
+        &fixtures,
+        run.configured_default_work_unit_limit,
+        run.measurements,
+    );
     report.write(&config.output)?;
     report.print_summary(&config.output);
     Ok(())

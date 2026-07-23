@@ -480,6 +480,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn grpc_work_budget_failure_is_resource_exhausted_and_atomic() {
+        use prost::bytes::Bytes;
+        use tonic::codegen::http::uri::PathAndQuery;
+
+        let tempdir = tempdir().unwrap();
+        let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+        let limits = IngestLimits {
+            max_work_units: 1,
+            ..IngestLimits::default()
+        };
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let (shutdown_tx, shutdown_rx) = tokio::sync::watch::channel(false);
+        let server = tokio::spawn(serve_grpc_listener(
+            listener,
+            IngestState::new(store.clone(), limits),
+            shutdown_rx,
+        ));
+        let channel = connect_channel(&format!("http://{addr}")).await;
+        let mut client = tonic::client::Grpc::new(channel);
+        client.ready().await.unwrap();
+        let error = client
+            .unary(
+                tonic::Request::new(Bytes::from_static(&[0x10, 0x00, 0x10, 0x00])),
+                PathAndQuery::from_static(
+                    "/opentelemetry.proto.collector.trace.v1.TraceService/Export",
+                ),
+                super::grpc::server::RawClientCodec,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), Code::ResourceExhausted);
+        assert!(error.message().contains("protobuf work unit"));
+        assert_eq!(store.counts(None).unwrap(), (0, 0, 0, 0, 0));
+
+        let _ = shutdown_tx.send(true);
+        server.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
     async fn grpc_unary_export_rejects_a_second_message_before_ingest() {
         use prost::bytes::Bytes;
         use tonic::codegen::http::uri::PathAndQuery;

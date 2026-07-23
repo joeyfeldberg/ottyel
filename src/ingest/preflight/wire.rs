@@ -1,4 +1,4 @@
-use super::MalformedProtobuf;
+use super::{MalformedProtobuf, PreflightError, WorkBudget};
 
 pub(super) const MAX_PROTOBUF_NESTING: usize = 100;
 
@@ -86,44 +86,54 @@ impl<'a> Cursor<'a> {
         field: u32,
         wire: WireType,
         depth: usize,
-    ) -> Result<(), MalformedProtobuf> {
+        work: &mut WorkBudget,
+    ) -> Result<(), PreflightError> {
         // Prost checks its recursion context before dispatching every unknown wire type,
         // including scalars at the deepest permitted known-message level.
         if depth >= MAX_PROTOBUF_NESTING {
-            return Err(MalformedProtobuf::new(
-                "protobuf nesting exceeds the decoder limit",
-            ));
+            return Err(
+                MalformedProtobuf::new("protobuf nesting exceeds the decoder limit").into(),
+            );
         }
         match wire {
-            WireType::Varint => self.varint().map(|_| ()),
-            WireType::Fixed64 => self.fixed64(),
-            WireType::LengthDelimited => self.length_delimited().map(|_| ()),
-            WireType::StartGroup => self.skip_group(field, depth + 1),
-            WireType::EndGroup => Err(MalformedProtobuf::new("protobuf has a stray end group")),
-            WireType::Fixed32 => self.fixed32(),
+            WireType::Varint => self.varint().map(|_| ()).map_err(Into::into),
+            WireType::Fixed64 => self.fixed64().map_err(Into::into),
+            WireType::LengthDelimited => self.length_delimited().map(|_| ()).map_err(Into::into),
+            WireType::StartGroup => {
+                work.charge(1)?;
+                self.skip_group(field, depth + 1, work)
+            }
+            WireType::EndGroup => {
+                Err(MalformedProtobuf::new("protobuf has a stray end group").into())
+            }
+            WireType::Fixed32 => self.fixed32().map_err(Into::into),
         }
     }
 
-    fn skip_group(&mut self, expected: u32, depth: usize) -> Result<(), MalformedProtobuf> {
+    fn skip_group(
+        &mut self,
+        expected: u32,
+        depth: usize,
+        work: &mut WorkBudget,
+    ) -> Result<(), PreflightError> {
         if depth > MAX_PROTOBUF_NESTING {
-            return Err(MalformedProtobuf::new(
-                "protobuf nesting exceeds the decoder limit",
-            ));
+            return Err(
+                MalformedProtobuf::new("protobuf nesting exceeds the decoder limit").into(),
+            );
         }
         while !self.is_empty() {
             let (field, wire) = self.key()?;
+            work.charge(1)?;
             if wire == WireType::EndGroup {
                 return if field == expected {
                     Ok(())
                 } else {
-                    Err(MalformedProtobuf::new(
-                        "protobuf group end tag does not match",
-                    ))
+                    Err(MalformedProtobuf::new("protobuf group end tag does not match").into())
                 };
             }
-            self.skip_unknown(field, wire, depth)?;
+            self.skip_unknown(field, wire, depth, work)?;
         }
-        Err(MalformedProtobuf::new("protobuf group is unterminated"))
+        Err(MalformedProtobuf::new("protobuf group is unterminated").into())
     }
 
     fn take_byte(&mut self) -> Result<u8, MalformedProtobuf> {
@@ -146,17 +156,18 @@ impl<'a> Cursor<'a> {
 
 #[cfg(test)]
 mod tests {
-    use super::Cursor;
+    use super::{Cursor, WorkBudget};
 
     #[test]
     fn unknown_groups_are_checked_without_allocating_a_stack() {
         let mut cursor = Cursor::new(&[0x0b, 0x13, 0x18, 0x01, 0x14, 0x0c]);
         let (field, wire) = cursor.key().unwrap();
-        cursor.skip_unknown(field, wire, 0).unwrap();
+        let mut work = WorkBudget::new(100);
+        cursor.skip_unknown(field, wire, 0, &mut work).unwrap();
         assert!(cursor.is_empty());
 
         let mut mismatched = Cursor::new(&[0x0b, 0x14]);
         let (field, wire) = mismatched.key().unwrap();
-        assert!(mismatched.skip_unknown(field, wire, 0).is_err());
+        assert!(mismatched.skip_unknown(field, wire, 0, &mut work).is_err());
     }
 }

@@ -58,6 +58,22 @@ struct Walker<'a> {
     records: usize,
     attributes: usize,
     structures: usize,
+    work: WorkBudget,
+}
+
+struct WorkBudget {
+    used: usize,
+    limit: usize,
+}
+
+impl WorkBudget {
+    fn new(limit: usize) -> Self {
+        Self { used: 0, limit }
+    }
+
+    fn charge(&mut self, count: usize) -> Result<(), PolicyError> {
+        add_budget(&mut self.used, count, self.limit, "protobuf work unit")
+    }
 }
 
 impl<'a> Walker<'a> {
@@ -67,6 +83,7 @@ impl<'a> Walker<'a> {
             records: 0,
             attributes: 0,
             structures: 0,
+            work: WorkBudget::new(limits.max_work_units),
         }
     }
 
@@ -89,8 +106,9 @@ impl<'a> Walker<'a> {
         let mut any_value_allocation_seen = false;
         while !cursor.is_empty() {
             let (tag, wire) = cursor.key()?;
+            self.work.charge(1)?;
             let Some(spec) = field(schema, tag) else {
-                cursor.skip_unknown(tag, wire, wire_depth)?;
+                cursor.skip_unknown(tag, wire, wire_depth, &mut self.work)?;
                 continue;
             };
             self.known(&mut cursor, wire, spec, any_depth, wire_depth)?;
@@ -154,20 +172,20 @@ impl<'a> Walker<'a> {
                     )
                     .into());
                 }
+                self.work.charge(1)?;
                 let child_depth = self.count_message(count, any_depth)?;
                 self.message(bytes, child, child_depth, wire_depth + 1)?;
             }
-            Field::RepeatedVarintStructure => {
-                let count = match wire {
-                    WireType::Varint => {
-                        cursor.varint()?;
-                        1
-                    }
-                    WireType::LengthDelimited => count_varints(cursor.length_delimited()?)?,
-                    _ => return Err(wrong_wire()),
-                };
-                self.structures(count)?;
-            }
+            Field::RepeatedVarintStructure => match wire {
+                WireType::Varint => {
+                    cursor.varint()?;
+                    self.structure()?;
+                }
+                WireType::LengthDelimited => {
+                    self.consume_packed_varints(cursor.length_delimited()?)?;
+                }
+                _ => return Err(wrong_wire()),
+            },
             Field::RepeatedFixed64Structure => {
                 let count = match wire {
                     WireType::Fixed64 => {
@@ -182,12 +200,24 @@ impl<'a> Walker<'a> {
                             )
                             .into());
                         }
-                        bytes.len() / 8
+                        let count = bytes.len() / 8;
+                        self.work.charge(count)?;
+                        count
                     }
                     _ => return Err(wrong_wire()),
                 };
                 self.structures(count)?;
             }
+        }
+        Ok(())
+    }
+
+    fn consume_packed_varints(&mut self, bytes: &[u8]) -> Result<(), PreflightError> {
+        let mut cursor = Cursor::new(bytes);
+        while !cursor.is_empty() {
+            cursor.varint()?;
+            self.work.charge(1)?;
+            self.structure()?;
         }
         Ok(())
     }
@@ -300,18 +330,6 @@ fn wrong_wire() -> PreflightError {
     MalformedProtobuf::new("known protobuf field has the wrong wire type").into()
 }
 
-fn count_varints(bytes: &[u8]) -> Result<usize, MalformedProtobuf> {
-    let mut cursor = Cursor::new(bytes);
-    let mut count = 0_usize;
-    while !cursor.is_empty() {
-        cursor.varint()?;
-        count = count
-            .checked_add(1)
-            .ok_or_else(|| MalformedProtobuf::new("packed field element count overflows"))?;
-    }
-    Ok(count)
-}
-
 fn add_budget(
     current: &mut usize,
     add: usize,
@@ -353,9 +371,219 @@ mod tests {
     use prost::Message;
 
     use super::{
-        PreflightError, PreflightOtlp, Schema, ValidateOtlp, Walker, schema, wire::WireType,
+        PolicyError, PreflightError, PreflightOtlp, Schema, ValidateOtlp, Walker, WorkBudget,
+        schema, wire::WireType,
     };
     use crate::ingest::IngestLimits;
+
+    #[test]
+    fn work_budget_counts_nested_message_and_unknown_group_entries_and_ends_globally() {
+        // TraceRequest.resource_spans entry (2), then an unknown group in ResourceSpans
+        // whose start field, group entry, and end field cost another 3.
+        let nested_message_group = [0x0a, 0x02, 0x23, 0x24];
+        let mut limits = permissive_limits();
+        limits.max_work_units = 5;
+        ExportTraceServiceRequest::preflight(&nested_message_group, &limits).unwrap();
+        limits.max_work_units = 4;
+        assert_work_budget(
+            ExportTraceServiceRequest::preflight(&nested_message_group, &limits),
+            4,
+        );
+
+        // Each nested group costs its start key, an entry, and its matching end key.
+        let nested_groups = [0x13, 0x1b, 0x1c, 0x14];
+        limits.max_work_units = 6;
+        ExportTraceServiceRequest::preflight(&nested_groups, &limits).unwrap();
+        limits.max_work_units = 5;
+        assert_work_budget(
+            ExportTraceServiceRequest::preflight(&nested_groups, &limits),
+            5,
+        );
+    }
+
+    #[test]
+    fn work_budget_counts_packed_elements_during_iteration() {
+        let unpacked_varints = [0x10, 0x01, 0x10, 0x02];
+        let packed_varints = [0x12, 0x02, 0x01, 0x02];
+        let mut limits = permissive_limits();
+        limits.max_work_units = 2;
+        Walker::new(&limits)
+            .message(&unpacked_varints, Schema::Buckets, 1, 0)
+            .unwrap();
+        assert_work_budget(
+            Walker::new(&limits).message(&packed_varints, Schema::Buckets, 1, 0),
+            2,
+        );
+        limits.max_work_units = 3;
+        Walker::new(&limits)
+            .message(&packed_varints, Schema::Buckets, 1, 0)
+            .unwrap();
+
+        let mut packed_fixed = vec![(6 << 3) | WireType::LengthDelimited as u8, 16];
+        packed_fixed.extend_from_slice(&1_u64.to_le_bytes());
+        packed_fixed.extend_from_slice(&2_u64.to_le_bytes());
+        limits.max_work_units = 2;
+        assert_work_budget(
+            Walker::new(&limits).message(&packed_fixed, Schema::HistogramPoint, 1, 0),
+            2,
+        );
+        limits.max_work_units = 3;
+        Walker::new(&limits)
+            .message(&packed_fixed, Schema::HistogramPoint, 1, 0)
+            .unwrap();
+    }
+
+    #[test]
+    fn work_budget_counts_duplicate_known_scalars_and_unknown_fields() {
+        let known_scalars = [0x30, 0x00, 0x30, 0x00];
+        let unknown_fields = [0x10, 0x00, 0x10, 0x00];
+        let mut limits = permissive_limits();
+        limits.max_work_units = 2;
+        Walker::new(&limits)
+            .message(&known_scalars, Schema::Span, 1, 0)
+            .unwrap();
+        ExportTraceServiceRequest::preflight(&unknown_fields, &limits).unwrap();
+
+        limits.max_work_units = 1;
+        assert_work_budget(
+            Walker::new(&limits).message(&known_scalars, Schema::Span, 1, 0),
+            1,
+        );
+        assert_work_budget(
+            ExportTraceServiceRequest::preflight(&unknown_fields, &limits),
+            1,
+        );
+    }
+
+    #[test]
+    fn work_budget_is_shared_by_all_signal_preflights_and_defaults_accept_canonical_requests() {
+        let duplicate_unknown_fields = [0x10, 0x00, 0x10, 0x00];
+        let mut limits = permissive_limits();
+        limits.max_work_units = 1;
+        assert_work_budget(
+            ExportTraceServiceRequest::preflight(&duplicate_unknown_fields, &limits),
+            1,
+        );
+        assert_work_budget(
+            ExportLogsServiceRequest::preflight(&duplicate_unknown_fields, &limits),
+            1,
+        );
+        assert_work_budget(
+            ExportMetricsServiceRequest::preflight(&duplicate_unknown_fields, &limits),
+            1,
+        );
+
+        let trace = ExportTraceServiceRequest {
+            resource_spans: vec![ResourceSpans {
+                scope_spans: vec![ScopeSpans {
+                    spans: vec![Span::default()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let logs = ExportLogsServiceRequest {
+            resource_logs: vec![ResourceLogs {
+                scope_logs: vec![ScopeLogs {
+                    log_records: vec![LogRecord::default()],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let metrics = ExportMetricsServiceRequest {
+            resource_metrics: vec![ResourceMetrics {
+                scope_metrics: vec![ScopeMetrics {
+                    metrics: vec![Metric {
+                        data: Some(metric::Data::Gauge(Gauge {
+                            data_points: vec![NumberDataPoint::default()],
+                        })),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }],
+        };
+        let defaults = IngestLimits::default();
+        ExportTraceServiceRequest::preflight(&trace.encode_to_vec(), &defaults).unwrap();
+        ExportLogsServiceRequest::preflight(&logs.encode_to_vec(), &defaults).unwrap();
+        ExportMetricsServiceRequest::preflight(&metrics.encode_to_vec(), &defaults).unwrap();
+    }
+
+    #[test]
+    fn work_budget_overflow_fails_closed() {
+        let mut budget = WorkBudget {
+            used: usize::MAX,
+            limit: usize::MAX,
+        };
+        assert!(matches!(
+            budget.charge(1),
+            Err(PolicyError::Budget {
+                budget: "protobuf work unit",
+                limit: usize::MAX,
+            })
+        ));
+    }
+
+    #[test]
+    fn default_work_budget_accepts_a_near_limit_canonical_link_encoding() {
+        const LINK_COUNT: usize = 249_997;
+        const FLAGGED_LINK_COUNT: usize = 188_865;
+        const EXPECTED_WORK_UNITS: usize = 1_688_853;
+        const MAX_REQUEST_BYTES: usize = 4 * 1024 * 1024;
+
+        let link_message = span::Link {
+            trace_id: vec![0],
+            span_id: vec![0],
+            trace_state: "x".into(),
+            dropped_attributes_count: 1,
+            ..Default::default()
+        };
+        let link = link_message.encode_to_vec();
+        assert_eq!(
+            link,
+            [
+                0x0a, 0x01, 0x00, 0x12, 0x01, 0x00, 0x1a, 0x01, b'x', 0x28, 0x01
+            ]
+        );
+        let flagged_link = span::Link {
+            flags: 1,
+            ..link_message
+        }
+        .encode_to_vec();
+        assert_eq!(
+            flagged_link,
+            [
+                0x0a, 0x01, 0x00, 0x12, 0x01, 0x00, 0x1a, 0x01, b'x', 0x28, 0x01, 0x35, 0x01, 0x00,
+                0x00, 0x00
+            ]
+        );
+
+        let mut span = Vec::with_capacity(MAX_REQUEST_BYTES);
+        for index in 0..LINK_COUNT {
+            let encoded = if index < FLAGGED_LINK_COUNT {
+                &flagged_link
+            } else {
+                &link
+            };
+            span.extend_from_slice(&[0x6a, encoded.len() as u8]);
+            span.extend_from_slice(encoded);
+        }
+        let scope_spans = wrap_message(2, span);
+        let resource_spans = wrap_message(2, scope_spans);
+        let request = wrap_message(1, resource_spans);
+        assert_eq!(request.len(), MAX_REQUEST_BYTES - 3);
+
+        let limits = IngestLimits::default();
+        let mut walker = Walker::new(&limits);
+        walker
+            .message(&request, Schema::TraceRequest, 1, 0)
+            .unwrap();
+        assert_eq!(walker.structures, limits.max_structures);
+        assert_eq!(walker.work.used, EXPECTED_WORK_UNITS);
+        assert!(walker.work.used < limits.max_work_units);
+    }
 
     #[test]
     fn canonical_trace_and_nested_any_value_boundaries_match_post_decode_validation() {
@@ -637,6 +865,34 @@ mod tests {
     }
 
     #[test]
+    fn packed_and_unpacked_varints_stop_at_the_same_structural_prefix() {
+        let unpacked = [0x10, 0x01, 0x10, 0x02, 0x10, 0x03, 0x80];
+        let packed = [0x12, 0x04, 0x01, 0x02, 0x03, 0x80];
+        let mut limits = permissive_limits();
+        limits.max_structures = 2;
+        limits.max_work_units = 100;
+
+        assert_structure_budget(
+            Walker::new(&limits).message(&unpacked, Schema::Buckets, 1, 0),
+            2,
+        );
+        assert_structure_budget(
+            Walker::new(&limits).message(&packed, Schema::Buckets, 1, 0),
+            2,
+        );
+
+        limits.max_structures = 3;
+        assert!(matches!(
+            Walker::new(&limits).message(&unpacked, Schema::Buckets, 1, 0),
+            Err(PreflightError::Malformed(_))
+        ));
+        assert!(matches!(
+            Walker::new(&limits).message(&packed, Schema::Buckets, 1, 0),
+            Err(PreflightError::Malformed(_))
+        ));
+    }
+
+    #[test]
     fn packed_and_unpacked_bucket_elements_have_identical_structure_cost() {
         let mut unpacked = Vec::new();
         for value in [1_u64, 2] {
@@ -826,8 +1082,29 @@ mod tests {
             max_records: 1_000,
             max_attributes: 1_000,
             max_structures: 10_000,
+            max_work_units: 100_000,
             max_any_value_depth: 32,
             max_value_bytes: 1_000,
         }
+    }
+
+    fn assert_work_budget(result: Result<(), PreflightError>, limit: usize) {
+        assert!(matches!(
+            result,
+            Err(PreflightError::Budget(PolicyError::Budget {
+                budget: "protobuf work unit",
+                limit: actual,
+            })) if actual == limit
+        ));
+    }
+
+    fn assert_structure_budget(result: Result<(), PreflightError>, limit: usize) {
+        assert!(matches!(
+            result,
+            Err(PreflightError::Budget(PolicyError::Budget {
+                budget: "structural element",
+                limit: actual,
+            })) if actual == limit
+        ));
     }
 }

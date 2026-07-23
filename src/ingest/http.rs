@@ -529,6 +529,32 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn protobuf_work_budget_failure_is_code_8_and_atomic() {
+        let tempdir = tempdir().unwrap();
+        let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
+        let limits = IngestLimits {
+            max_work_units: 1,
+            ..IngestLimits::default()
+        };
+        let app = router(IngestState::new(store.clone(), limits));
+
+        let response = app
+            .oneshot(protobuf_request(
+                "/v1/traces",
+                vec![0x10, 0x00, 0x10, 0x00],
+                None,
+            ))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let (code, message) = decode_rpc_status(&body);
+        assert_eq!(code, 8);
+        assert!(message.contains("protobuf work unit"));
+        assert_eq!(store.counts(None).unwrap(), (0, 0, 0, 0, 0));
+    }
+
+    #[tokio::test]
     async fn stalled_body_times_out_and_releases_shared_capacity() {
         let tempdir = tempdir().unwrap();
         let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1000).unwrap();
