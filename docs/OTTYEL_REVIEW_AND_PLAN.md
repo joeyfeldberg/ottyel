@@ -26,13 +26,13 @@ comparisons across incomparable work. At the reviewed revision, the receiver als
 serialized every ingest and query through one SQLite connection. The current store now
 uses a dedicated writer owner plus four WAL readers. OTLP requests also pass through one
 shared cross-transport admission gate with transport-byte limits, compression handling,
-schema-aware preallocation budgets, a decoded-graph parity check, and a request deadline.
-SQLite writer admission now also bounds aggregate queued and executing OTLP work by
-primary records and canonical protobuf bytes. Retention still runs after every export.
-Request graph amplification is bounded by the pinned-schema preflight, but exact heap
-bytes, protobuf field-work CPU, and accepted-work completion remain open; UI caches
-likewise mask remaining aggregate and retention cost under small loads without removing
-it.
+schema-aware preallocation and field-work budgets, a decoded-graph parity check, and a
+request deadline. SQLite writer admission now also bounds aggregate queued and executing
+OTLP work by primary records and canonical protobuf bytes. Retention still runs after
+every export. Request graph amplification and protobuf field dispatch are bounded by the
+pinned-schema preflight, but exact heap bytes and accepted-work completion remain open;
+UI caches likewise mask remaining aggregate and retention cost under small loads without
+removing it.
 
 The right product is not a terminal clone of Grafana, Jaeger, or a hosted LLM dashboard.
 Ottyel should be the fastest local answer to these questions:
@@ -106,8 +106,10 @@ slice completed on 2026-07-16 adds cross-transport request admission and protoco
 envelopes. The 2026-07-22 follow-up moves schema-aware accounting before Prost for the
 pinned OTLP 0.31.0 request schema and moves gRPC scanning/decoding off Tokio workers;
 the 2026-07-23 follow-up adds configurable writer admission across queued and executing
-work using exact primary-record counts and canonical Prost bytes. Per-request retention,
-global aggregate scans, and the monolithic all-tab snapshot remain.
+work using exact primary-record counts and canonical Prost bytes. A second 2026-07-23
+follow-up benchmarks near-limit field shapes and adds a measured, configurable preflight
+work-unit budget. Per-request retention, global aggregate scans, and the monolithic
+all-tab snapshot remain.
 
 ## Current Strengths To Preserve
 
@@ -118,6 +120,8 @@ global aggregate scans, and the monolithic all-tab snapshot remain.
   buffering or gRPC message decoding.
 - Allocation-free protobuf preflight rejects oversized request graphs before Prost on
   both transports; gRPC also rejects extra unary message frames atomically.
+- The same preflight applies one global field/message/packed-element work budget, so
+  tiny-field CPU amplification is rejected before Prost.
 - OTLP writer admission counts queued and executing work by primary records and canonical
   protobuf bytes, while retaining an independent fixed command bound.
 - Raw resource and record attributes are retained for the fields that are stored.
@@ -139,7 +143,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P0 | Metric streams are conflated and lossy | `src/store/ingest.rs`, `src/ui/details.rs` | Different attribute sets are charted together; histogram buckets, quantiles, temporality details, exemplars, unit, and description are lost |
 | P0 (partially resolved 2026-07-14) | Store ownership and async database work remain incomplete | `src/store/writer.rs`, `src/store/reader_pool.rs`, `src/ingest.rs` | One named thread now owns SQLite writes behind immediate 64-command admission, queries use four physical read-only connections, and all six OTLP handlers await async receipts; startup/migration, the initial TUI snapshot, reader checkout, completion, and shutdown still lack a fully bounded worker contract |
 | P0 | Retention runs after every export | `src/store/ingest.rs` | Sustained ingest pays repeated table scans and delete transactions even when nothing expires |
-| P0 (partially resolved 2026-07-23) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/ingest/`, `src/store/writer.rs` | One shared request gate covers both transports from pre-decode admission through commit; identity/gzip, byte limits, protobuf HTTP failures, schema-aware preallocation budgets plus postdecode parity, exact unary framing, client deadlines, configurable aggregate writer record/canonical-byte admission, and retry-correct capacity/lifecycle errors are covered. Field-work benchmarks, partial success, duplicate export policy, batching, retry hints, health, and graceful drain remain incomplete |
+| P0 (partially resolved 2026-07-23) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/ingest/`, `src/store/writer.rs` | One shared request gate covers both transports from pre-decode admission through commit; identity/gzip, byte limits, protobuf HTTP failures, schema-aware preallocation plus measured field-work budgets, postdecode parity, exact unary framing, client deadlines, configurable aggregate writer record/canonical-byte admission, and retry-correct capacity/lifecycle errors are covered. Partial success, duplicate export policy, batching, retry hints, health, and graceful drain remain incomplete |
 | P0 | SQLite identity is based on global `span_id` | `src/store/schema.rs` | The logical identity `(trace_id, span_id)` is not preserved; joins and upserts can corrupt colliding traces |
 | P0 (resolved 2026-07-13) | There was no schema migration mechanism | `src/store/schema.rs`, `src/store/schema/` | Ordered `user_version` migrations now preserve exact legacy v0 data, validate the frozen schema, and roll back DDL, version changes, and failed post-checks together; backup and recovery for the first non-trivial v2 migration remain open |
 | P0 | Sensitive AI content has no central policy | store, TUI, and MCP paths | Prompts, outputs, tool arguments, and raw attributes can be persisted and returned without masking or payload budgets |
@@ -192,7 +196,8 @@ Each admitted trace, log, or metric export now:
 
 1. acquires shared request capacity before body buffering or protobuf decoding;
 2. applies transport-byte limits and decompression, then scans allocation-relevant wire
-   fields before Prost builds the request graph;
+   fields and charges field/message/packed-element work before Prost builds the request
+   graph;
 3. validates the decoded graph and measures its exact primary records plus canonical
    Prost-encoded length on the blocking pool;
 4. atomically reserves writer record/byte capacity and command-queue admission, then
@@ -209,25 +214,33 @@ current-thread Tokio responsiveness. WAL regressions still prove reader and writ
 progress in both directions. OTLP tests cover identity and gzip for all signals, exact
 and over-limit envelopes, malformed payloads, preflight rejection without writes,
 duplicate allocation-bearing fields, packed metric arrays, recursion boundaries, extra
-gRPC frames, writer oversize mappings, capacity, request timeout, and retry
-classification.
+gRPC frames, exact work-unit boundaries, writer oversize mappings, capacity, request
+timeout, and retry classification.
 
-This is still not a byte-exact heap, CPU, or lifecycle bound. An allocation-free scanner
-now walks decompressed bytes before Prost and applies request-wide record, attribute,
-structure, AnyValue-depth, and individual-value budgets. HTTP scans after decompression;
-the custom gRPC codec transfers Tonic's capped decompressed buffer without copying and
-runs preflight plus Prost on the blocking pool. Canonical exporter encodings match the
-postdecode visitor. Replaced duplicate string, bytes, optional-message, and oneof
-occurrences are intentionally charged monotonically so discarded allocations cannot
-bypass admission. `opentelemetry-proto` is pinned to 0.31.0 because its schema table is a
-security boundary.
+This is still not a byte-exact heap or end-to-end CPU/lifecycle bound. An allocation-free
+scanner now walks decompressed bytes before Prost and applies request-wide record,
+attribute, structure, AnyValue-depth, individual-value, and protobuf work-unit budgets.
+HTTP scans after decompression; the custom gRPC codec transfers Tonic's capped
+decompressed buffer without copying and runs preflight plus Prost on the blocking pool.
+Canonical exporter encodings match the postdecode visitor. Replaced duplicate string,
+bytes, optional-message, and oneof occurrences are intentionally charged monotonically
+so discarded allocations cannot bypass admission. `opentelemetry-proto` is pinned to
+0.31.0 because its schema table and field-work accounting are security boundaries.
 
 The capped transport buffer, Prost capacity slack, and configured maximum accepted graph
 still consume memory. Canonical writer bytes are deterministic admission units, not an
-allocator-byte estimate. Unknown or scalar fields do not consume structural budget, so a
-near-limit request containing millions of tiny fields can force two linear wire passes;
-benchmark that case before deciding whether a separate field/work-unit limit is needed.
-A deadline response can also be outcome-unknown if accepted storage work commits after
+allocator-byte estimate. Unknown or scalar fields still do not consume structural
+budget, but every valid field key, nested-message or unknown-group entry, and packed
+primitive element consumes the independent preflight work budget. Two clean release
+reference runs made this necessary: the 4 MiB depth-100 group fixture had 33.613 ms and
+35.543 ms full-pipeline p95, crossing the predeclared 25 ms and eight-times-control gate
+twice. With the default 2,000,000-unit limit it rejects before Prost at 6.543 ms and
+6.463 ms p95. The default also accepts a 4 MiB-minus-three-byte canonical SpanLink wire
+shape at the structural limit using 1,688,853 units; its short IDs make it a current
+preflight-policy headroom check, not a record-validity claim. Full methodology and both
+before/after distributions are in `docs/performance.md`.
+
+A deadline response can still be outcome-unknown if accepted storage work commits after
 the client times out, which makes duplicate export handling mandatory. Reader checkout,
 store open/migration, the first terminal snapshot, and final owner join still lack
 bounded completion. Retention still scans after every export.
@@ -338,6 +351,8 @@ contract:
 - whole-request record, attribute, structure, AnyValue-depth, and individual-value limits
   reject allocation-relevant wire shapes before Prost, then run again on the decoded
   graph as a parity guard;
+- one configurable preflight-only work counter charges every field key, nested-message or
+  unknown-group entry, and packed primitive element across the entire request;
 - gRPC accepts exactly one unary export message and performs preflight plus Prost work on
   the blocking pool after Tonic's framing, gzip, and message-size checks;
 - decoded requests reserve configurable aggregate writer capacity by exact primary
@@ -347,11 +362,10 @@ contract:
 - client wait has a configurable deadline; accepted SQLite work continues and retains
   capacity until its outcome is known.
 
-The graph-allocation amplification gap is closed for the pinned 0.31.0 binary schema, but
-the word "bounded" remains qualified: limits constrain encoded bytes and allocation-
-relevant shape rather than exact allocator bytes, and there is not yet a separate field-
-work budget for worst-case tiny scalar or unknown fields. The remaining protocol contract
-must also:
+The graph-allocation and field-dispatch amplification gaps are closed for the pinned
+0.31.0 binary schema, but the word "bounded" remains qualified: limits constrain encoded
+bytes, allocation-relevant shape, and counted preflight work rather than exact allocator
+bytes or end-to-end CPU. The remaining protocol contract must also:
 
 - validate record invariants and return per-signal partial success for mixed-validity
   requests where the OTLP data model permits it;
@@ -648,8 +662,9 @@ Goal: behave predictably under malformed, compressed, concurrent, and excessive 
   protobuf-byte accounting across queued and executing work. Keep the 64-command queue
   as an independent bound; reject individually oversized work permanently and aggregate
   saturation retryably.
-- [ ] Benchmark near-limit scalar/unknown-field protobufs and add an independent
-  field/work-unit budget only if measured CPU cost requires it.
+- [x] Benchmark near-limit scalar/unknown-field protobufs on two clean release runs and,
+  after the predeclared gate triggered, add an independent 2,000,000-unit preflight
+  field/message/packed-element budget with accepted-boundary headroom coverage.
 - [ ] Coalesce adjacent batches within a small time/size budget without delaying low-rate
   local development traffic.
 - [x] Configure identity/gzip for every signal on both transports and enforce HTTP
@@ -969,8 +984,8 @@ Keep each pull request a vertical, reversible step with tests and measurements.
    provides shared pre-decode concurrency, transport-byte limits, pinned-schema
    preallocation budgets plus postdecode parity, identity/gzip, exact unary framing, a
    client response deadline, protocol error envelopes, and retry-correct capacity/lifecycle
-   failures. Configurable writer record/canonical-byte admission is also complete;
-   worst-case field-work measurement, batching, partial success, duplicate exports,
+   failures. Configurable writer record/canonical-byte admission and measured protobuf
+   field-work admission are also complete; batching, partial success, duplicate exports,
    health, and drain remain.
 6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled
    bounded whole-trace retention.
@@ -996,13 +1011,14 @@ Current documentation work:
 - [ ] Fix the crossed screenshot filenames/captions.
 - [ ] Document supported convention versions and the normalization provenance visible in
   the product.
-- [ ] Publish benchmark methodology and last-known results, not adjectives such as
+- [x] Publish benchmark methodology and last-known results, not adjectives such as
   "fast."
 
 ## Validation Performed For This Review
 
 - `cargo fmt -- --check`: passed.
-- `cargo test`: passed, 211 product tests plus 6 performance-harness support tests.
+- `cargo test`: passed, 220 product tests, 45 ingest-field-work harness support tests,
+  and 6 store-performance harness support tests.
 - `cargo clippy --all-targets --all-features -- -D warnings`: passed without lint
   suppressions.
 - `RUSTDOCFLAGS=-Dwarnings cargo doc --no-deps --all-features`: passed.
@@ -1017,13 +1033,13 @@ Current documentation work:
   submission, normal-error recovery, panic rollback/fail-closed behavior, weighted
   full-queue drain with dropped receipts, and self-thread teardown. Four request-weight
   tests cover empty, trace, log, every metric type, canonical-size parity, and valid wire
-  encodings that grow during canonical re-encoding. Forty-seven receiver and
-  receiver-policy tests cover both transports and all signals with identity/gzip, byte
-  and preallocation limits, malformed wire, packed arrays, recursion, extra unary
-  frames, protobuf HTTP errors, writer oversize, overload, retry classification, timeout,
-  permit lifetime, atomic rejection, and Tokio responsiveness. Configuration tests cover
-  zero, semaphore overflow, aligned defaults, per-request writer fit, canonical
-  re-encoding headroom, and programmatic-consumption validation.
+  encodings that grow during canonical re-encoding. Receiver and receiver-policy
+  regressions cover both transports and all signals with identity/gzip, byte,
+  preallocation, and work-unit limits, malformed wire, packed arrays, recursion, extra
+  unary frames, protobuf HTTP errors, writer oversize, overload, retry classification,
+  timeout, permit lifetime, atomic rejection, and Tokio responsiveness. Configuration
+  tests cover zero, semaphore overflow, aligned defaults, per-request writer fit,
+  canonical re-encoding headroom, and programmatic-consumption validation.
 - Same-machine smoke runs before and after the writer owner showed no broad regression:
   1,000-span acknowledgement p50/p95 moved from 15.929/21.627 ms to 15.136/21.254 ms;
   database and WAL sizes were unchanged. Setup moved from 120.3 ms to 151.0 ms, so this
@@ -1034,6 +1050,12 @@ Current documentation work:
   `f5d86de` to 15.393/23.996 ms in the implementation worktree. Setup moved from 120.5 ms
   to 135.6 ms; database and WAL sizes were unchanged. This remains diagnostic evidence,
   not a throughput gain or a passed reference budget.
+- Two clean same-machine `ingest_field_work` reference runs at `da66f11` triggered the
+  predeclared historical gate on the depth-100 group workload. Two clean runs at
+  `35f48ca` verified the default work budget rejects that workload before Prost at
+  6.543/6.463 ms full-pipeline p95 while accepting the 1,688,853-unit canonical-wire
+  headroom fixture at 45.698/44.903 ms p95. The schema-v1 decision gate is not applied to
+  these schema-v2 mitigation observations.
 - UI snapshots and both checked-in screenshots were inspected.
 - Store queries and retention were exercised against the directional synthetic database
   described above.

@@ -1,11 +1,11 @@
-# Performance Baseline
+# Performance Baselines
 
-Ottyel's store benchmark is a release-mode diagnostic harness, not a product claim.
-It records latency distributions for the current public `Store` and `QueryService`
-behavior and writes a stable JSON report for before/after comparisons.
+Ottyel's store and OTLP field-work benchmarks are release-mode diagnostic harnesses, not
+product claims. They record latency distributions and write versioned JSON reports for
+before/after comparisons.
 
-The implementation is under `benches/store_baseline.rs` and `benches/support/`.
-Run it with:
+The store implementation is under `benches/store_baseline.rs` and `benches/support/`.
+It measures the current public `Store` and `QueryService` behavior. Run it with:
 
 ```sh
 cargo bench --bench store_baseline -- --profile smoke \
@@ -142,7 +142,79 @@ variance increased. This diagnostic found no broad regression, but it is not a
 throughput claim or a substitute for the missing controlled-concurrency workload and
 reference-machine runs.
 
-## Report Schema
+## OTLP Protobuf Field-Work Benchmark
+
+`benches/ingest_field_work.rs` measures preflight, Prost decode, decoded-graph
+validation, and their full pipeline against deterministic trace-request wire fixtures at
+the 4 MiB request boundary. The benchmark source-includes the private production policy
+and preflight modules so measurements cannot silently drift from runtime behavior or
+require a wider public API.
+
+Run the smoke profile to verify fixture generation and report output:
+
+```sh
+cargo bench --bench ingest_field_work -- --profile smoke \
+  --output target/performance/ingest-field-work-smoke.json
+```
+
+Run the reference profile only on a named, stable machine:
+
+```sh
+cargo bench --bench ingest_field_work -- --profile reference \
+  --machine-label "replace-with-stable-machine-name" \
+  --cpu "replace-with-exact-cpu-model" \
+  --memory-gib 32 \
+  --output target/performance/ingest-field-work-reference.json
+```
+
+The fixtures cover one low-dispatch unknown blob, millions of short unknown varints,
+maximum-length unknown varints, repeated depth-100 unknown groups, duplicate known Span
+scalars, and a near-limit canonical SpanLink wire shape. Setup verifies every encoded
+size, decoded cardinality, declared work count, and expected default-policy outcome before
+timing. `preflight` and `full_pipeline` apply the production default policy.
+`prost_decode` and `postdecode_validate` deliberately run in isolation, even for a
+fixture that production preflight rejects, so their results are diagnostic rather than
+an admission outcome.
+
+The original report schema v1 decision rule required two consecutive clean release runs
+on the same designated machine. A work budget was warranted when any adversarial
+full-pipeline p95 exceeded 100 ms, or exceeded both 25 ms and eight times the blob-control
+p95. Both clean `da66f11` reference runs on `mac15-7-m3pro-12c` (Apple M3 Pro, 12 cores,
+18 GiB, Rust 1.96.0) crossed the conditional threshold for depth-100 groups. The
+schema-v2 report retains this as `historical_decision_gate`, marks it inapplicable to
+post-mitigation measurements, and reports current results under
+`mitigation_observations`.
+
+| Full-pipeline fixture | Baseline v1 p95, runs 1 / 2 | Work-budget v2 p95, runs 1 / 2 | Default v2 outcome |
+| --- | ---: | ---: | --- |
+| Unknown length-delimited blob | 42 ns / 42 ns | 42 ns / 42 ns | completed |
+| Unknown zero varints | 22.641 ms / 26.122 ms | 9.845 ms / 10.028 ms | budget rejected |
+| Unknown maximum-length varints | 5.216 ms / 5.233 ms | 5.576 ms / 5.602 ms | completed |
+| Unknown depth-100 groups | 33.613 ms / 35.543 ms | 6.543 ms / 6.463 ms | budget rejected |
+| Duplicate known Span scalars | 18.521 ms / 19.314 ms | 9.815 ms / 9.912 ms | budget rejected |
+| Near-limit canonical SpanLink wire shape | not in v1 | 45.698 ms / 44.903 ms | completed |
+
+The accepted maximum-length-varint path became 6.9% and 7.1% slower in the paired runs,
+which is the measured cost of per-key work accounting on this extreme input. The shorter
+post-mitigation times for rejected fixtures measure earlier termination, not faster
+complete decoding.
+
+The post-mitigation runs used clean `35f48ca` on the same machine. The default
+`--max-otlp-work-units 2000000` counter is global to one preflight scan and charges one
+unit for every valid field key, one for each known nested-message or unknown-group entry,
+and one for each packed primitive element. Varint value bytes are not charged separately
+because the decompressed-byte limit already bounds byte-linear work. A work-budget
+failure maps through the existing atomic oversized-request path before Prost.
+
+The accepted SpanLink control is 4 MiB minus three bytes, contains 249,997 links at the
+250,000-structure boundary, and consumes 1,688,853 work units. Its short IDs are accepted
+by the current receiver but are not proof of OTLP record validity; it exists only to
+demonstrate headroom for a canonical wire layout under the current preflight policy.
+Rejected measurements report a null p50 throughput because early rejection is not
+completed-input throughput. Preserve both complete JSON reports when changing the policy,
+fixtures, pinned protobuf schema, compiler, or machine.
+
+## Store Report Schema
 
 The pretty-printed JSON has a versioned, stable field layout. It records:
 
