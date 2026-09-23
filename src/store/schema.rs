@@ -1,4 +1,7 @@
+mod backup;
 mod v1;
+
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, TransactionBehavior};
@@ -23,16 +26,36 @@ pub(super) const MIGRATIONS: [Migration; 1] = [Migration {
 }];
 
 pub(super) fn initialize(conn: &mut Connection) -> Result<()> {
+    initialize_with_backup(conn, backup::before_migration)
+}
+
+type Backup = fn(&Connection, i64) -> Result<Option<PathBuf>>;
+
+fn initialize_with_backup(conn: &mut Connection, backup: Backup) -> Result<()> {
     let version = schema_version(conn)?;
     ensure_supported_version(version)?;
 
-    if version == 0 && has_user_schema(conn)? {
+    let holds_data = has_user_schema(conn)?;
+    if version == 0 && holds_data {
         v1::validate_strict(conn).context("unversioned database is incompatible with v1 schema")?;
     }
 
     if version < LATEST_SCHEMA_VERSION {
         check_integrity(conn, "before migration")?;
-        run_migrations(conn, version)?;
+        let copy = if holds_data {
+            backup(conn, version).context(
+                "could not copy the database before migrating it; the database was not changed",
+            )?
+        } else {
+            None
+        };
+        run_migrations(conn, version).with_context(|| match &copy {
+            Some(copy) => format!(
+                "schema migration failed and was rolled back; a pre-migration copy is at {}",
+                copy.display()
+            ),
+            None => "schema migration failed and was rolled back".to_string(),
+        })?;
     } else {
         v1::validate_strict(conn).context("version 1 database has an incompatible schema")?;
     }

@@ -522,3 +522,64 @@ fn unique_index_count(conn: &Connection, table: &str) -> i64 {
     )
     .unwrap()
 }
+
+#[test]
+fn migrating_a_database_with_data_first_writes_an_exact_copy() {
+    let tempdir = tempdir().unwrap();
+    let path = tempdir.path().join("ottyel.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(HISTORICAL_V0_SCHEMA).unwrap();
+    insert_legacy_rows(&conn);
+    let expected_rows = telemetry_snapshot(&conn);
+    drop(conn);
+    // An existing copy from an earlier attempt is never overwritten.
+    let earlier = tempdir.path().join("ottyel.db.v0-backup");
+    std::fs::write(&earlier, b"earlier copy").unwrap();
+
+    drop(Store::open(&path, 24, 1_000).unwrap());
+
+    assert_eq!(std::fs::read(&earlier).unwrap(), b"earlier copy");
+    let copy = Connection::open(tempdir.path().join("ottyel.db.v0-backup.1")).unwrap();
+    assert_eq!(schema_version(&copy).unwrap(), 0);
+    assert_eq!(telemetry_snapshot(&copy), expected_rows);
+    drop(copy);
+
+    // Reopening at the latest version migrates nothing and copies nothing.
+    drop(Store::open(&path, 24, 1_000).unwrap());
+    assert!(!tempdir.path().join("ottyel.db.v0-backup.2").exists());
+}
+
+#[test]
+fn a_fresh_database_is_not_copied() {
+    let tempdir = tempdir().unwrap();
+    drop(Store::open(&tempdir.path().join("ottyel.db"), 24, 1_000).unwrap());
+
+    let mut names: Vec<_> = std::fs::read_dir(tempdir.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    names.sort();
+    assert!(
+        names.iter().all(|name| !name.contains("backup")),
+        "{names:?}"
+    );
+}
+
+#[test]
+fn a_failed_copy_leaves_the_database_unmigrated() {
+    let tempdir = tempdir().unwrap();
+    let path = tempdir.path().join("ottyel.db");
+    let mut conn = Connection::open(&path).unwrap();
+    conn.execute_batch(HISTORICAL_V0_SCHEMA).unwrap();
+    insert_legacy_rows(&conn);
+    let expected_rows = telemetry_snapshot(&conn);
+
+    let error = super::initialize_with_backup(&mut conn, |_, _| bail!("disk full")).unwrap_err();
+
+    assert!(
+        format!("{error:#}").contains("the database was not changed: disk full"),
+        "{error:#}"
+    );
+    assert_eq!(schema_version(&conn).unwrap(), 0);
+    assert_eq!(telemetry_snapshot(&conn), expected_rows);
+}
