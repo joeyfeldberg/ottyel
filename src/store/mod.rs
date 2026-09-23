@@ -3,6 +3,7 @@ mod ingest;
 mod ingest_weight;
 mod queries;
 mod reader_pool;
+mod retention;
 mod schema;
 mod write_observer;
 mod writer;
@@ -29,10 +30,7 @@ pub(super) struct RetentionPolicy {
 
 #[derive(Debug, Clone)]
 enum StoreAccess {
-    ReadWrite {
-        writer: WriterOwner,
-        retention: RetentionPolicy,
-    },
+    ReadWrite { writer: WriterOwner },
     ReadOnly,
 }
 
@@ -68,20 +66,19 @@ impl Store {
             .with_context(|| format!("failed to open sqlite db {}", path.display()))?;
         schema::initialize(&mut conn)
             .with_context(|| format!("failed to initialize sqlite db {}", path.display()))?;
-        let writer = WriterOwner::start(conn, writer_limits)
+        let retention = RetentionPolicy {
+            hours: retention_hours,
+            maximum_spans: max_spans,
+        };
+        let finish_group = Box::new(move |conn: &Connection| retention::enforce(conn, retention));
+        let writer = WriterOwner::start(conn, writer_limits, finish_group)
             .with_context(|| format!("failed to start sqlite writer for {}", path.display()))?;
         let readers = ReaderPool::open(path).with_context(|| {
             format!("failed to initialize sqlite readers for {}", path.display())
         })?;
 
         Ok(Self {
-            access: StoreAccess::ReadWrite {
-                writer,
-                retention: RetentionPolicy {
-                    hours: retention_hours,
-                    maximum_spans: max_spans,
-                },
-            },
+            access: StoreAccess::ReadWrite { writer },
             readers,
         })
     }
@@ -105,9 +102,9 @@ impl Store {
         })
     }
 
-    fn write_access(&self) -> Result<(&WriterOwner, RetentionPolicy)> {
+    fn write_access(&self) -> Result<&WriterOwner> {
         match &self.access {
-            StoreAccess::ReadWrite { writer, retention } => Ok((writer, *retention)),
+            StoreAccess::ReadWrite { writer } => Ok(writer),
             StoreAccess::ReadOnly => bail!("cannot ingest telemetry through a read-only store"),
         }
     }
@@ -128,7 +125,7 @@ impl Store {
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
         match &self.access {
-            StoreAccess::ReadWrite { writer, .. } => writer.execute(operation),
+            StoreAccess::ReadWrite { writer } => writer.execute(operation),
             StoreAccess::ReadOnly => bail!("cannot write through a read-only store"),
         }
     }
@@ -151,10 +148,9 @@ impl Store {
     #[cfg(test)]
     fn shares_writer_with_for_test(&self, other: &Self) -> bool {
         match (&self.access, &other.access) {
-            (
-                StoreAccess::ReadWrite { writer: left, .. },
-                StoreAccess::ReadWrite { writer: right, .. },
-            ) => left.shares_owner_with(right),
+            (StoreAccess::ReadWrite { writer: left }, StoreAccess::ReadWrite { writer: right }) => {
+                left.shares_owner_with(right)
+            }
             (StoreAccess::ReadWrite { .. }, StoreAccess::ReadOnly)
             | (StoreAccess::ReadOnly, StoreAccess::ReadWrite { .. })
             | (StoreAccess::ReadOnly, StoreAccess::ReadOnly) => false,

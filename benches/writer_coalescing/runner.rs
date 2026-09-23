@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::{
     bench_config::RunConfig,
-    counters::{snapshot_delta, validate_baseline, validate_persisted_row_count},
+    counters::{snapshot_delta, validate_candidate, validate_persisted_row_count},
     data::{SeededStore, acknowledgement_request},
     measurement::{
         BurstMeasurement, CounterTotals, LowRateMeasurement, Measurements, RateDistribution,
@@ -182,7 +182,7 @@ fn run_burst(
 
     let after = store.writer_benchmark_snapshot()?;
     let counters = snapshot_delta(before, after)?;
-    validate_baseline(&counters, EXPORTS_PER_BURST as u64)?;
+    validate_candidate(&counters, EXPORTS_PER_BURST as u64)?;
     validate_persisted_row_count(span_count(database_path)?, expected_span_rows, "burst")?;
     let seconds = makespan.as_secs_f64().max(f64::MIN_POSITIVE);
     Ok(BurstSample {
@@ -226,7 +226,7 @@ fn run_low_rate(
 
     let after = store.writer_benchmark_snapshot()?;
     let counters = snapshot_delta(before, after)?;
-    validate_baseline(&counters, 1)?;
+    validate_candidate(&counters, 1)?;
     validate_persisted_row_count(
         span_count(database_path)?,
         expected_span_rows,

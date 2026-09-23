@@ -1,7 +1,10 @@
+mod group;
+
+#[cfg(any(test, feature = "benchmark-support"))]
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::{
     fmt,
     num::NonZeroUsize,
-    panic::{AssertUnwindSafe, catch_unwind},
     sync::{
         Arc, Mutex,
         mpsc::{self, SyncSender, TrySendError},
@@ -20,22 +23,53 @@ const WRITER_QUEUE_CAPACITY: usize = 64;
 const DEFAULT_MAX_PRIMARY_RECORDS: usize = 40_000;
 const DEFAULT_MAX_CANONICAL_BYTES: usize = 16 * 1024 * 1024;
 
+#[cfg(any(test, feature = "benchmark-support"))]
 type WriteOperation =
     Box<dyn FnOnce(&mut Connection, Option<WeightedReservation>) -> WorkerAction + Send + 'static>;
+type IngestWrite = Box<dyn FnOnce(&Connection) -> Result<usize> + Send + 'static>;
+type IngestReply = Box<dyn FnOnce(Result<usize>) + Send + 'static>;
+
+/// Work that runs once inside every coalesced OTLP transaction, after the last export's writes
+/// and before `COMMIT`. A failure rolls back the whole group.
+pub(super) type GroupFinish = Box<dyn FnMut(&Connection) -> Result<()> + Send + 'static>;
+
+/// One OTLP export that may share a SQLite transaction with adjacent exports.
+struct IngestOperation {
+    weight: IngestWeight,
+    write: IngestWrite,
+    reply: IngestReply,
+}
+
+enum Operation {
+    /// Arbitrary connection work that always runs alone. Only tests and the benchmark submit it.
+    #[cfg(any(test, feature = "benchmark-support"))]
+    Exclusive(WriteOperation),
+    Ingest(IngestOperation),
+}
 
 struct WriteJob {
-    operation: Option<WriteOperation>,
+    operation: Option<Operation>,
     reservation: Option<WeightedReservation>,
 }
 
 impl WriteJob {
-    fn run(mut self, connection: &mut Connection) -> WorkerAction {
+    fn into_parts(mut self) -> (Operation, Option<WeightedReservation>) {
         let operation = self
             .operation
             .take()
             .expect("writer job operation can only run once");
-        let reservation = self.reservation.take();
-        operation(connection, reservation)
+        (operation, self.reservation.take())
+    }
+
+    /// Splits out a coalescible export, or returns an exclusive job unchanged.
+    fn into_ingest(mut self) -> Result<(IngestOperation, Option<WeightedReservation>), Self> {
+        match self.operation.take() {
+            Some(Operation::Ingest(operation)) => Ok((operation, self.reservation.take())),
+            other => {
+                self.operation = other;
+                Err(self)
+            }
+        }
     }
 
     fn rollback_reservation(&mut self, admission: &mut AdmissionState) -> Option<SyncSender<Self>> {
@@ -158,6 +192,7 @@ pub(super) struct WriterOwner {
 struct WriterOwnerInner {
     admission: Arc<Mutex<AdmissionState>>,
     worker: Option<JoinHandle<()>>,
+    #[cfg(any(test, feature = "benchmark-support"))]
     observer: WriteObserver,
 }
 
@@ -170,8 +205,18 @@ struct AdmissionState {
 }
 
 impl WriterOwner {
-    pub(super) fn start(connection: Connection, limits: WriterLimits) -> Result<Self> {
-        Self::start_with_capacity_and_limits(connection, WRITER_QUEUE_CAPACITY, limits)
+    pub(super) fn start(
+        connection: Connection,
+        limits: WriterLimits,
+        finish_group: GroupFinish,
+    ) -> Result<Self> {
+        Self::start_with_finish(
+            connection,
+            WRITER_QUEUE_CAPACITY,
+            limits,
+            group::GroupLimits::PINNED,
+            finish_group,
+        )
     }
 
     #[cfg(test)]
@@ -179,18 +224,80 @@ impl WriterOwner {
         Self::start_with_capacity_and_limits(connection, capacity, WriterLimits::default())
     }
 
+    #[cfg(test)]
     fn start_with_capacity_and_limits(
         connection: Connection,
         capacity: usize,
         limits: WriterLimits,
     ) -> Result<Self> {
+        Self::start_with_finish(
+            connection,
+            capacity,
+            limits,
+            group::GroupLimits::PINNED,
+            Box::new(|_| Ok(())),
+        )
+    }
+
+    #[cfg(test)]
+    fn start_for_group_test(
+        connection: Connection,
+        group_limits: group::GroupLimits,
+        finish_group: GroupFinish,
+    ) -> Result<Self> {
+        Self::start_with_finish(
+            connection,
+            WRITER_QUEUE_CAPACITY,
+            WriterLimits::default(),
+            group_limits,
+            finish_group,
+        )
+    }
+
+    fn start_with_finish(
+        connection: Connection,
+        capacity: usize,
+        limits: WriterLimits,
+        group_limits: group::GroupLimits,
+        mut finish_group: GroupFinish,
+    ) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel::<WriteJob>(capacity);
+        let admission = Arc::new(Mutex::new(AdmissionState {
+            sender: Some(sender),
+            accepting: true,
+            limits,
+            primary_records: 0,
+            canonical_bytes: 0,
+        }));
+        let observer = WriteObserver::default();
+        let worker_admission = admission.clone();
+        let worker_observer = observer.clone();
         let worker = thread::Builder::new()
             .name("ottyel-sqlite-writer".to_string())
             .spawn(move || {
                 let mut connection = connection;
-                while let Ok(job) = receiver.recv() {
-                    match job.run(&mut connection) {
+                // A job pulled while collecting a group that could not join it runs next.
+                let mut pending = None;
+                while let Some(job) = pending.take().or_else(|| receiver.recv().ok()) {
+                    let action = match job.into_parts() {
+                        #[cfg(any(test, feature = "benchmark-support"))]
+                        (Operation::Exclusive(operation), reservation) => {
+                            operation(&mut connection, reservation)
+                        }
+                        (Operation::Ingest(first), reservation) => group::run(
+                            group::Context {
+                                connection: &mut connection,
+                                receiver: &receiver,
+                                pending: &mut pending,
+                                finish: &mut finish_group,
+                                observer: &worker_observer,
+                                limits: group_limits,
+                                admission: &worker_admission,
+                            },
+                            group::Member::new(first, reservation),
+                        ),
+                    };
+                    match action {
                         WorkerAction::Continue => {}
                         WorkerAction::Stop => break,
                     }
@@ -199,15 +306,10 @@ impl WriterOwner {
 
         Ok(Self {
             inner: Arc::new(WriterOwnerInner {
-                admission: Arc::new(Mutex::new(AdmissionState {
-                    sender: Some(sender),
-                    accepting: true,
-                    limits,
-                    primary_records: 0,
-                    canonical_bytes: 0,
-                })),
+                admission,
                 worker: Some(worker),
-                observer: WriteObserver::default(),
+                #[cfg(any(test, feature = "benchmark-support"))]
+                observer,
             }),
         })
     }
@@ -221,19 +323,63 @@ impl WriterOwner {
         self.execute_weighted(IngestWeight::ZERO, operation)
     }
 
+    #[cfg(test)]
     pub(super) fn execute_weighted<T, F>(&self, weight: IngestWeight, operation: F) -> Result<T>
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
         let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
-        self.try_send(weight, operation, move |result| {
-            let _ = reply_sender.send(result);
-        })?;
+        self.try_send(
+            weight,
+            self.exclusive(operation, move |result| {
+                let _ = reply_sender.send(result);
+            }),
+        )?;
 
         reply_receiver
             .recv()
             .map_err(|_| anyhow!(StoreWriteError::OutcomeUnknown))?
+    }
+
+    /// Admits one OTLP export whose writes may share a transaction with adjacent exports and
+    /// waits for its definitive acknowledgement.
+    pub(super) fn execute_ingest<F>(&self, weight: IngestWeight, write: F) -> Result<usize>
+    where
+        F: FnOnce(&Connection) -> Result<usize> + Send + 'static,
+    {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
+        self.try_send(
+            weight,
+            ingest_operation(weight, write, move |result| {
+                let _ = reply_sender.send(result);
+            }),
+        )?;
+
+        reply_receiver
+            .recv()
+            .map_err(|_| anyhow!(StoreWriteError::OutcomeUnknown))?
+    }
+
+    /// Admits one coalescible OTLP export and returns its asynchronous acknowledgement.
+    pub(super) fn try_execute_ingest_async<F>(
+        &self,
+        weight: IngestWeight,
+        write: F,
+    ) -> Result<AsyncWriteReceipt<usize>>
+    where
+        F: FnOnce(&Connection) -> Result<usize> + Send + 'static,
+    {
+        let (reply_sender, reply_receiver) = oneshot::channel();
+        self.try_send(
+            weight,
+            ingest_operation(weight, write, move |result| {
+                let _ = reply_sender.send(result);
+            }),
+        )?;
+        Ok(AsyncWriteReceipt {
+            receiver: reply_receiver,
+        })
     }
 
     #[cfg(any(test, feature = "benchmark-support"))]
@@ -245,6 +391,7 @@ impl WriterOwner {
         self.try_execute_async_weighted(IngestWeight::ZERO, operation)
     }
 
+    #[cfg(any(test, feature = "benchmark-support"))]
     pub(super) fn try_execute_async_weighted<T, F>(
         &self,
         weight: IngestWeight,
@@ -255,24 +402,37 @@ impl WriterOwner {
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     {
         let (reply_sender, reply_receiver) = oneshot::channel();
-        self.try_send(weight, operation, move |result| {
-            let _ = reply_sender.send(result);
-        })?;
+        self.try_send(
+            weight,
+            self.exclusive(operation, move |result| {
+                let _ = reply_sender.send(result);
+            }),
+        )?;
         Ok(AsyncWriteReceipt {
             receiver: reply_receiver,
         })
     }
 
+    #[cfg(any(test, feature = "benchmark-support"))]
     pub(super) fn observer(&self) -> WriteObserver {
         self.inner.observer.clone()
     }
 
-    fn try_send<T, F, S>(&self, weight: IngestWeight, operation: F, send_reply: S) -> Result<()>
+    #[cfg(any(test, feature = "benchmark-support"))]
+    fn exclusive<T, F, S>(&self, operation: F, send_reply: S) -> Operation
     where
         T: Send + 'static,
         F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
         S: FnOnce(Result<T>) + Send + 'static,
     {
+        Operation::Exclusive(wrap_exclusive(
+            operation,
+            send_reply,
+            self.inner.admission.clone(),
+        ))
+    }
+
+    fn try_send(&self, weight: IngestWeight, operation: Operation) -> Result<()> {
         let mut admission = self
             .inner
             .admission
@@ -290,12 +450,10 @@ impl WriterOwner {
             weight,
             armed: true,
         });
-        let job = wrap_job(
-            operation,
-            send_reply,
-            self.inner.admission.clone(),
+        let job = WriteJob {
+            operation: Some(operation),
             reservation,
-        );
+        };
         let result = admission
             .sender
             .as_ref()
@@ -471,42 +629,57 @@ impl Drop for WriterOwnerInner {
     }
 }
 
-fn wrap_job<T, F, S>(
+fn ingest_operation<F, S>(weight: IngestWeight, write: F, send_reply: S) -> Operation
+where
+    F: FnOnce(&Connection) -> Result<usize> + Send + 'static,
+    S: FnOnce(Result<usize>) + Send + 'static,
+{
+    Operation::Ingest(IngestOperation {
+        weight,
+        write: Box::new(write),
+        reply: Box::new(send_reply),
+    })
+}
+
+#[cfg(any(test, feature = "benchmark-support"))]
+fn wrap_exclusive<T, F, S>(
     operation: F,
     send_reply: S,
     admission: Arc<Mutex<AdmissionState>>,
-    reservation: Option<WeightedReservation>,
-) -> WriteJob
+) -> WriteOperation
 where
     T: Send + 'static,
     F: FnOnce(&mut Connection) -> Result<T> + Send + 'static,
     S: FnOnce(Result<T>) + Send + 'static,
 {
-    WriteJob {
-        operation: Some(Box::new(move |connection, reservation| {
-            // AssertUnwindSafe is valid because a panic closes admission and terminates the owner;
-            // the possibly tainted Connection is dropped instead of being reused.
-            match catch_unwind(AssertUnwindSafe(|| operation(connection))) {
-                Ok(result) => {
-                    drop(reservation);
-                    send_reply(result);
-                    WorkerAction::Continue
-                }
-                Err(_) => {
-                    let mut admission = admission
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner());
-                    admission.accepting = false;
-                    drop(admission.sender.take());
-                    drop(admission);
-                    drop(reservation);
-                    send_reply(Err(StoreWriteError::OutcomeUnknown.into()));
-                    WorkerAction::Stop
-                }
+    Box::new(move |connection, reservation| {
+        // AssertUnwindSafe is valid because a panic closes admission and terminates the owner;
+        // the possibly tainted Connection is dropped instead of being reused.
+        match catch_unwind(AssertUnwindSafe(|| operation(connection))) {
+            Ok(result) => {
+                drop(reservation);
+                send_reply(result);
+                WorkerAction::Continue
             }
-        })),
-        reservation,
-    }
+            Err(_) => {
+                close_admission(&admission);
+                drop(reservation);
+                send_reply(Err(StoreWriteError::OutcomeUnknown.into()));
+                WorkerAction::Stop
+            }
+        }
+    })
+}
+
+/// Stops admission after a panic so no later work reuses a possibly tainted connection.
+fn close_admission(admission: &Mutex<AdmissionState>) {
+    let mut admission = admission
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    admission.accepting = false;
+    let sender = admission.sender.take();
+    drop(admission);
+    drop(sender);
 }
 
 #[cfg(test)]

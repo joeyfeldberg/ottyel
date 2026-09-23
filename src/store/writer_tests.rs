@@ -96,11 +96,7 @@ fn one_owner_executes_cloned_submissions_in_fifo_order() {
 
 #[test]
 fn returned_operation_error_does_not_stop_the_owner() {
-    let owner = WriterOwner::start(
-        Connection::open_in_memory().unwrap(),
-        WriterLimits::default(),
-    )
-    .unwrap();
+    let owner = WriterOwner::start_with_capacity(Connection::open_in_memory().unwrap(), 8).unwrap();
 
     let error = owner
         .execute(|_| -> Result<()> { bail!("ordinary sqlite failure") })
@@ -225,11 +221,7 @@ fn final_drop_drains_a_full_queue_even_when_receipts_are_dropped() {
 
 #[test]
 fn dropping_the_last_owner_inside_its_worker_does_not_join_itself() {
-    let owner = WriterOwner::start(
-        Connection::open_in_memory().unwrap(),
-        WriterLimits::default(),
-    )
-    .unwrap();
+    let owner = WriterOwner::start_with_capacity(Connection::open_in_memory().unwrap(), 8).unwrap();
     let last_worker_owned_clone = owner.clone();
     let receipt = owner
         .try_execute_async(move |_| {

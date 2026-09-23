@@ -13,12 +13,11 @@ use crate::domain::{
 };
 
 use super::{
-    AsyncWriteReceipt, PreparedIngest, RetentionPolicy, Store,
+    AsyncWriteReceipt, PreparedIngest, Store,
     helpers::{
         any_value_text, format_metric_summary, hex_bytes, log_severity, log_time_unix_nano,
-        now_unix_nanos, number_value, resource_to_map, span_kind_name, status_code_name,
+        number_value, resource_to_map, span_kind_name, status_code_name,
     },
-    write_observer::WriteObserver,
 };
 
 impl Store {
@@ -38,35 +37,21 @@ impl Store {
         &self,
         prepared: PreparedIngest<ExportTraceServiceRequest>,
     ) -> Result<usize> {
-        let (writer, retention) = self.write_access()?;
+        let writer = self.write_access()?;
         let (request, weight) = prepared.into_parts();
-        let observer = writer.observer();
-        writer.execute_weighted(weight, move |conn| {
-            Self::write_traces(conn, request, retention, observer)
-        })
+        writer.execute_ingest(weight, move |conn| Self::write_traces(conn, request))
     }
 
     pub(crate) fn try_ingest_traces(
         &self,
         prepared: PreparedIngest<ExportTraceServiceRequest>,
     ) -> Result<AsyncWriteReceipt<usize>> {
-        let (writer, retention) = self.write_access()?;
+        let writer = self.write_access()?;
         let (request, weight) = prepared.into_parts();
-        let observer = writer.observer();
-        writer.try_execute_async_weighted(weight, move |conn| {
-            Self::write_traces(conn, request, retention, observer)
-        })
+        writer.try_execute_ingest_async(weight, move |conn| Self::write_traces(conn, request))
     }
 
-    fn write_traces(
-        conn: &mut Connection,
-        request: ExportTraceServiceRequest,
-        retention: RetentionPolicy,
-        observer: WriteObserver,
-    ) -> Result<usize> {
-        observer.group_started(1);
-        let tx = conn.transaction()?;
-        let ingest_transaction = observer.ingest_only_transaction();
+    fn write_traces(conn: &Connection, request: ExportTraceServiceRequest) -> Result<usize> {
         let mut inserted = 0usize;
 
         for resource_spans in request.resource_spans {
@@ -98,7 +83,7 @@ impl Store {
                         .transpose()
                         .map_err(|err| anyhow::anyhow!(err))?;
 
-                    tx.execute(
+                    conn.execute(
                         r#"
                         INSERT INTO spans (
                             trace_id, span_id, parent_span_id, service_name, span_name,
@@ -136,18 +121,18 @@ impl Store {
                         ],
                     )?;
 
-                    tx.execute(
+                    conn.execute(
                         "DELETE FROM span_events WHERE trace_id = ?1 AND span_id = ?2",
                         params![trace_id, span_id],
                     )?;
-                    tx.execute(
+                    conn.execute(
                         "DELETE FROM span_links WHERE trace_id = ?1 AND span_id = ?2",
                         params![trace_id, span_id],
                     )?;
 
                     for event in span.events {
                         let event_attrs = attributes_to_map(&event.attributes);
-                        tx.execute(
+                        conn.execute(
                             r#"
                             INSERT INTO span_events (
                                 trace_id, span_id, name, timestamp_unix_nano, attributes_json
@@ -165,7 +150,7 @@ impl Store {
 
                     for link in span.links {
                         let link_attrs = attributes_to_map(&link.attributes);
-                        tx.execute(
+                        conn.execute(
                             r#"
                             INSERT INTO span_links (
                                 trace_id, span_id, linked_trace_id, linked_span_id, trace_state, attributes_json
@@ -183,15 +168,12 @@ impl Store {
                     }
 
                     if let Some(llm) = llm {
-                        Self::insert_llm_row(&tx, &trace_id, &span_id, &service_name, &llm)?;
+                        Self::insert_llm_row(conn, &trace_id, &span_id, &service_name, &llm)?;
                     }
                 }
             }
         }
 
-        tx.commit()?;
-        ingest_transaction.committed();
-        Self::enforce_retention(conn, retention, &observer)?;
         Ok(inserted)
     }
 
@@ -211,35 +193,21 @@ impl Store {
         &self,
         prepared: PreparedIngest<ExportLogsServiceRequest>,
     ) -> Result<usize> {
-        let (writer, retention) = self.write_access()?;
+        let writer = self.write_access()?;
         let (request, weight) = prepared.into_parts();
-        let observer = writer.observer();
-        writer.execute_weighted(weight, move |conn| {
-            Self::write_logs(conn, request, retention, observer)
-        })
+        writer.execute_ingest(weight, move |conn| Self::write_logs(conn, request))
     }
 
     pub(crate) fn try_ingest_logs(
         &self,
         prepared: PreparedIngest<ExportLogsServiceRequest>,
     ) -> Result<AsyncWriteReceipt<usize>> {
-        let (writer, retention) = self.write_access()?;
+        let writer = self.write_access()?;
         let (request, weight) = prepared.into_parts();
-        let observer = writer.observer();
-        writer.try_execute_async_weighted(weight, move |conn| {
-            Self::write_logs(conn, request, retention, observer)
-        })
+        writer.try_execute_ingest_async(weight, move |conn| Self::write_logs(conn, request))
     }
 
-    fn write_logs(
-        conn: &mut Connection,
-        request: ExportLogsServiceRequest,
-        retention: RetentionPolicy,
-        observer: WriteObserver,
-    ) -> Result<usize> {
-        observer.group_started(1);
-        let tx = conn.transaction()?;
-        let ingest_transaction = observer.ingest_only_transaction();
+    fn write_logs(conn: &Connection, request: ExportLogsServiceRequest) -> Result<usize> {
         let mut inserted = 0usize;
 
         for resource_logs in request.resource_logs {
@@ -250,7 +218,7 @@ impl Store {
             for scope_logs in resource_logs.scope_logs {
                 for log in scope_logs.log_records {
                     inserted += 1;
-                    tx.execute(
+                    conn.execute(
                         r#"
                         INSERT INTO logs (
                             service_name, timestamp_unix_nano, severity, body, trace_id, span_id,
@@ -272,9 +240,6 @@ impl Store {
             }
         }
 
-        tx.commit()?;
-        ingest_transaction.committed();
-        Self::enforce_retention(conn, retention, &observer)?;
         Ok(inserted)
     }
 
@@ -294,35 +259,21 @@ impl Store {
         &self,
         prepared: PreparedIngest<ExportMetricsServiceRequest>,
     ) -> Result<usize> {
-        let (writer, retention) = self.write_access()?;
+        let writer = self.write_access()?;
         let (request, weight) = prepared.into_parts();
-        let observer = writer.observer();
-        writer.execute_weighted(weight, move |conn| {
-            Self::write_metrics(conn, request, retention, observer)
-        })
+        writer.execute_ingest(weight, move |conn| Self::write_metrics(conn, request))
     }
 
     pub(crate) fn try_ingest_metrics(
         &self,
         prepared: PreparedIngest<ExportMetricsServiceRequest>,
     ) -> Result<AsyncWriteReceipt<usize>> {
-        let (writer, retention) = self.write_access()?;
+        let writer = self.write_access()?;
         let (request, weight) = prepared.into_parts();
-        let observer = writer.observer();
-        writer.try_execute_async_weighted(weight, move |conn| {
-            Self::write_metrics(conn, request, retention, observer)
-        })
+        writer.try_execute_ingest_async(weight, move |conn| Self::write_metrics(conn, request))
     }
 
-    fn write_metrics(
-        conn: &mut Connection,
-        request: ExportMetricsServiceRequest,
-        retention: RetentionPolicy,
-        observer: WriteObserver,
-    ) -> Result<usize> {
-        observer.group_started(1);
-        let tx = conn.transaction()?;
-        let ingest_transaction = observer.ingest_only_transaction();
+    fn write_metrics(conn: &Connection, request: ExportMetricsServiceRequest) -> Result<usize> {
         let mut inserted = 0usize;
 
         for resource_metrics in request.resource_metrics {
@@ -333,25 +284,22 @@ impl Store {
             for scope_metrics in resource_metrics.scope_metrics {
                 for metric in scope_metrics.metrics {
                     inserted +=
-                        Self::insert_metric_rows(&tx, &service_name, &resource_json, metric)?;
+                        Self::insert_metric_rows(conn, &service_name, &resource_json, metric)?;
                 }
             }
         }
 
-        tx.commit()?;
-        ingest_transaction.committed();
-        Self::enforce_retention(conn, retention, &observer)?;
         Ok(inserted)
     }
 
     fn insert_llm_row(
-        tx: &rusqlite::Transaction<'_>,
+        conn: &Connection,
         trace_id: &str,
         span_id: &str,
         service_name: &str,
         llm: &LlmAttributes,
     ) -> Result<()> {
-        tx.execute(
+        conn.execute(
             r#"
             INSERT INTO llm_spans (
                 span_id, trace_id, service_name, provider, model, operation,
@@ -393,7 +341,7 @@ impl Store {
     }
 
     fn insert_metric_rows(
-        tx: &rusqlite::Transaction<'_>,
+        conn: &Connection,
         service_name: &str,
         resource_json: &str,
         metric: Metric,
@@ -404,7 +352,7 @@ impl Store {
             Some(metric::Data::Gauge(gauge)) => {
                 for point in gauge.data_points {
                     inserted += 1;
-                    tx.execute(
+                    conn.execute(
                         r#"
                         INSERT INTO metrics (
                             service_name, metric_name, instrument_kind, aggregation_temporality,
@@ -426,7 +374,7 @@ impl Store {
             Some(metric::Data::Sum(sum)) => {
                 for point in sum.data_points {
                     inserted += 1;
-                    tx.execute(
+                    conn.execute(
                         r#"
                         INSERT INTO metrics (
                             service_name, metric_name, instrument_kind, aggregation_temporality,
@@ -449,7 +397,7 @@ impl Store {
             Some(metric::Data::Histogram(histogram)) => {
                 for point in histogram.data_points {
                     inserted += 1;
-                    tx.execute(
+                    conn.execute(
                         r#"
                         INSERT INTO metrics (
                             service_name, metric_name, instrument_kind, aggregation_temporality,
@@ -472,7 +420,7 @@ impl Store {
             Some(metric::Data::Summary(summary)) => {
                 for point in summary.data_points {
                     inserted += 1;
-                    tx.execute(
+                    conn.execute(
                         r#"
                         INSERT INTO metrics (
                             service_name, metric_name, instrument_kind, aggregation_temporality,
@@ -494,7 +442,7 @@ impl Store {
             Some(metric::Data::ExponentialHistogram(histogram)) => {
                 for point in histogram.data_points {
                     inserted += 1;
-                    tx.execute(
+                    conn.execute(
                         r#"
                         INSERT INTO metrics (
                             service_name, metric_name, instrument_kind, aggregation_temporality,
@@ -517,130 +465,5 @@ impl Store {
             None => {}
         }
         Ok(inserted)
-    }
-
-    fn enforce_retention(
-        conn: &mut Connection,
-        retention: RetentionPolicy,
-        observer: &WriteObserver,
-    ) -> Result<()> {
-        let retention_observation = observer.retention();
-        let retention_nanos = i64::try_from(retention.hours)
-            .unwrap_or(i64::MAX)
-            .saturating_mul(60 * 60 * 1_000_000_000);
-        let threshold_nanos = now_unix_nanos().saturating_sub(retention_nanos);
-
-        let tx = conn.transaction()?;
-        let retention_transaction = observer.retention_only_transaction();
-        tx.execute(
-            "DELETE FROM logs WHERE timestamp_unix_nano < ?1",
-            [threshold_nanos],
-        )?;
-        tx.execute(
-            "DELETE FROM metrics WHERE timestamp_unix_nano < ?1",
-            [threshold_nanos],
-        )?;
-        let has_expired_spans: bool = tx.query_row(
-            r#"
-            SELECT EXISTS (
-                SELECT 1
-                FROM spans
-                WHERE end_time_unix_nano < ?1
-                LIMIT 1
-            )
-            "#,
-            [threshold_nanos],
-            |row| row.get(0),
-        )?;
-        if has_expired_spans {
-            tx.execute(
-                r#"
-                DELETE FROM spans
-                WHERE trace_id IN (
-                    SELECT trace_id
-                    FROM spans
-                    GROUP BY trace_id
-                    HAVING MAX(end_time_unix_nano) < ?1
-                )
-                "#,
-                [threshold_nanos],
-            )?;
-        }
-
-        let span_count: i64 = tx.query_row("SELECT COUNT(*) FROM spans", [], |row| row.get(0))?;
-        let max_spans = i64::try_from(retention.maximum_spans).unwrap_or(i64::MAX);
-        if span_count > max_spans {
-            let to_trim = span_count - max_spans;
-            tx.execute(
-                r#"
-                WITH trace_sizes AS (
-                    SELECT
-                        trace_id,
-                        COUNT(*) AS span_count,
-                        MAX(end_time_unix_nano) AS latest_end_time_unix_nano
-                    FROM spans
-                    GROUP BY trace_id
-                ),
-                ranked_traces AS (
-                    SELECT
-                        trace_id,
-                        SUM(span_count) OVER (
-                            ORDER BY latest_end_time_unix_nano ASC, trace_id ASC
-                            ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW
-                        ) - span_count AS spans_before
-                    FROM trace_sizes
-                )
-                DELETE FROM spans
-                WHERE trace_id IN (
-                    SELECT trace_id
-                    FROM ranked_traces
-                    WHERE spans_before < ?1
-                )
-                "#,
-                [to_trim],
-            )?;
-        }
-
-        tx.execute(
-            r#"
-            DELETE FROM span_events
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM spans
-                WHERE spans.trace_id = span_events.trace_id
-                  AND spans.span_id = span_events.span_id
-            )
-            "#,
-            [],
-        )?;
-        tx.execute(
-            r#"
-            DELETE FROM span_links
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM spans
-                WHERE spans.trace_id = span_links.trace_id
-                  AND spans.span_id = span_links.span_id
-            )
-            "#,
-            [],
-        )?;
-        tx.execute(
-            r#"
-            DELETE FROM llm_spans
-            WHERE NOT EXISTS (
-                SELECT 1
-                FROM spans
-                WHERE spans.trace_id = llm_spans.trace_id
-                  AND spans.span_id = llm_spans.span_id
-            )
-            "#,
-            [],
-        )?;
-
-        tx.commit()?;
-        retention_transaction.committed();
-        retention_observation.succeeded();
-        Ok(())
     }
 }

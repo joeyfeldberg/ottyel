@@ -156,15 +156,15 @@ impl BenchmarkReport {
             },
             sampling: config.profile.sampling(),
             current_policy: CurrentPolicy {
-                name: "one_export_per_transaction",
-                adjacent_collection: "disabled",
+                name: "opportunistic_adjacent_otlp",
+                adjacent_collection: "already_ready_try_recv_only",
                 intentional_wait_ns: 0,
-                maximum_exports_per_group: 1,
-                retention_boundary: "separate_post_ingest_transaction",
+                maximum_exports_per_group: 4,
+                retention_boundary: "inside_shared_ingest_transaction_before_commit",
             },
             candidate_policy: CandidatePolicy::pinned(),
             acknowledgement_semantics: AcknowledgementSemantics {
-                completion_acknowledges: "ingest COMMIT plus the current post-commit retention transaction and writer receipt delivery",
+                completion_acknowledges: "the shared ingest-plus-retention COMMIT and writer receipt delivery",
                 sqlite_journal_mode: "WAL",
                 sqlite_synchronous: "NORMAL",
                 power_loss_fsync_claim: false,
@@ -175,7 +175,7 @@ impl BenchmarkReport {
                 sqlite_transaction_totals: "total SQLite transaction counters equal the sum of the three transaction-kind counters and never double-count a shared commit",
                 transaction_not_committed: "the transaction guard ended without observing a successful COMMIT; this counter does not prove that rollback succeeded",
             },
-            predeclared_gate: PredeclaredGate::baseline(
+            predeclared_gate: PredeclaredGate::candidate(
                 structural_assertions_passed,
                 reference_eligibility,
             ),
@@ -200,7 +200,7 @@ impl BenchmarkReport {
 
     pub(crate) fn print_summary(&self, output: &Path) {
         println!(
-            "writer coalescing baseline: profile={:?} setup={:.3}s db={}B wal={}B",
+            "writer coalescing: profile={:?} setup={:.3}s db={}B wal={}B",
             self.profile,
             self.setup_duration_ns as f64 / 1_000_000_000.0,
             self.database_bytes,
@@ -291,13 +291,13 @@ impl ReferenceEligibility {
 }
 
 impl PredeclaredGate {
-    fn baseline(
+    fn candidate(
         structural_assertions_passed: bool,
         reference_eligibility: ReferenceEligibility,
     ) -> Self {
         Self {
             contract: GateContract::pinned(),
-            evaluation: "baseline_capture",
+            evaluation: "candidate_capture",
             required_clean_reference_runs: 2,
             comparison_requirements: "two consecutive clean release before/after comparisons on the same named machine, storage class, and Rust toolchain",
             structural_requirements: "per four-export burst baseline: ingest_only_committed=4, retention_only_committed=4, shared_ingest_retention_committed=0, sqlite_transactions_committed=8, retention_invocations=4; candidate: ingest_only_committed=0, retention_only_committed=0, shared_ingest_retention_committed=1, sqlite_transactions_committed=1, retention_invocations=1, group_size_4=1; all burst transaction not_committed counters=0, all receipts acknowledge 250 records, and exactly 1000 unique spans persist; candidate low-rate per export: group_size_1=1, ingest_only_committed=0, retention_only_committed=0, shared_ingest_retention_committed=1, sqlite_transactions_committed=1, retention_invocations=1, and every transaction not_committed counter=0",
@@ -312,7 +312,7 @@ impl PredeclaredGate {
             reference_eligibility,
             comparison: ComparisonEvaluation {
                 applicable_to_current_report: false,
-                inapplicability_reason: "a baseline capture contains no candidate measurement to compare",
+                inapplicability_reason: "one capture cannot compare itself; evaluate the gate across recorded baseline and candidate reports",
                 passed: None,
             },
         }
@@ -352,7 +352,7 @@ fn duration_nanos(duration: std::time::Duration) -> u64 {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn serialized_baseline_gate_shape_is_complete_and_comparison_is_inapplicable() {
+    fn serialized_candidate_gate_shape_is_complete_and_comparison_is_inapplicable() {
         let eligibility = super::ReferenceEligibility {
             profile_is_reference: false,
             optimized_release_build: true,
@@ -367,7 +367,7 @@ mod tests {
             complete_machine_identity: false,
             eligible: false,
         };
-        let gate = super::PredeclaredGate::baseline(true, eligibility);
+        let gate = super::PredeclaredGate::candidate(true, eligibility);
         assert_eq!(
             serde_json::to_value(gate).unwrap(),
             serde_json::json!({
@@ -394,7 +394,7 @@ mod tests {
                         "low_rate_allowed_increase_ns": "max(1000000, baseline_low_rate_ack_p95_ns * 0.10)"
                     }
                 },
-                "evaluation": "baseline_capture",
+                "evaluation": "candidate_capture",
                 "required_clean_reference_runs": 2,
                 "comparison_requirements": "two consecutive clean release before/after comparisons on the same named machine, storage class, and Rust toolchain",
                 "structural_requirements": "per four-export burst baseline: ingest_only_committed=4, retention_only_committed=4, shared_ingest_retention_committed=0, sqlite_transactions_committed=8, retention_invocations=4; candidate: ingest_only_committed=0, retention_only_committed=0, shared_ingest_retention_committed=1, sqlite_transactions_committed=1, retention_invocations=1, group_size_4=1; all burst transaction not_committed counters=0, all receipts acknowledge 250 records, and exactly 1000 unique spans persist; candidate low-rate per export: group_size_1=1, ingest_only_committed=0, retention_only_committed=0, shared_ingest_retention_committed=1, sqlite_transactions_committed=1, retention_invocations=1, and every transaction not_committed counter=0",
@@ -422,7 +422,7 @@ mod tests {
                 },
                 "comparison": {
                     "applicable_to_current_report": false,
-                    "inapplicability_reason": "a baseline capture contains no candidate measurement to compare",
+                    "inapplicability_reason": "one capture cannot compare itself; evaluate the gate across recorded baseline and candidate reports",
                     "passed": null
                 }
             })

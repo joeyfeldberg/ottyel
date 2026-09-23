@@ -3,42 +3,52 @@ use ottyel::store::benchmark_support::BenchmarkSnapshot;
 
 use crate::measurement::CounterTotals;
 
-pub(crate) fn validate_baseline(counters: &CounterTotals, exports: u64) -> Result<()> {
+/// Validates the pinned candidate contract: every sample's exports form exactly one group that
+/// commits once, in one shared ingest-retention transaction, with one retention invocation.
+pub(crate) fn validate_candidate(counters: &CounterTotals, exports: u64) -> Result<()> {
+    let expected_sizes = match exports {
+        1 => [1, 0, 0, 0, 0],
+        2 => [0, 1, 0, 0, 0],
+        3 => [0, 0, 1, 0, 0],
+        4 => [0, 0, 0, 1, 0],
+        _ => anyhow::bail!("the candidate policy groups at most four exports, not {exports}"),
+    };
     ensure!(
-        counters.groups_started == exports
+        counters.groups_started == 1
             && counters.exports_grouped == exports
-            && counters.group_size_1 == exports
-            && counters.group_size_2 == 0
-            && counters.group_size_3 == 0
-            && counters.group_size_4 == 0
-            && counters.group_size_5_or_more == 0,
-        "baseline group counters do not describe {exports} singleton exports: {counters:?}"
+            && [
+                counters.group_size_1,
+                counters.group_size_2,
+                counters.group_size_3,
+                counters.group_size_4,
+                counters.group_size_5_or_more,
+            ] == expected_sizes,
+        "candidate group counters do not describe one group of {exports}: {counters:?}"
     );
     ensure!(
-        counters.sqlite_transactions_started == exports * 2
-            && counters.sqlite_transactions_committed == exports * 2
+        counters.sqlite_transactions_started == 1
+            && counters.sqlite_transactions_committed == 1
             && counters.sqlite_transactions_not_committed == 0,
-        "baseline total SQLite transaction counters are invalid: {counters:?}"
+        "candidate total SQLite transaction counters are invalid: {counters:?}"
     );
     ensure!(
-        counters.ingest_only_transactions_started == exports
-            && counters.ingest_only_transactions_committed == exports
-            && counters.ingest_only_transactions_not_committed == 0,
-        "baseline ingest-only transaction counters are invalid: {counters:?}"
-    );
-    ensure!(
-        counters.retention_invocations == exports
-            && counters.retention_failures == 0
-            && counters.retention_only_transactions_started == exports
-            && counters.retention_only_transactions_committed == exports
-            && counters.retention_only_transactions_not_committed == 0,
-        "baseline retention-only transaction counters are invalid: {counters:?}"
-    );
-    ensure!(
-        counters.shared_ingest_retention_transactions_started == 0
-            && counters.shared_ingest_retention_transactions_committed == 0
+        counters.shared_ingest_retention_transactions_started == 1
+            && counters.shared_ingest_retention_transactions_committed == 1
             && counters.shared_ingest_retention_transactions_not_committed == 0,
-        "baseline unexpectedly used a shared ingest-retention transaction: {counters:?}"
+        "candidate shared ingest-retention transaction counters are invalid: {counters:?}"
+    );
+    ensure!(
+        counters.retention_invocations == 1 && counters.retention_failures == 0,
+        "candidate retention counters are invalid: {counters:?}"
+    );
+    ensure!(
+        counters.ingest_only_transactions_started == 0
+            && counters.ingest_only_transactions_committed == 0
+            && counters.ingest_only_transactions_not_committed == 0
+            && counters.retention_only_transactions_started == 0
+            && counters.retention_only_transactions_committed == 0
+            && counters.retention_only_transactions_not_committed == 0,
+        "candidate unexpectedly used a separate ingest or retention transaction: {counters:?}"
     );
     Ok(())
 }
@@ -177,66 +187,96 @@ mod tests {
     #[allow(dead_code)]
     fn valid() -> super::CounterTotals {
         super::CounterTotals {
-            groups_started: 4,
+            groups_started: 1,
             exports_grouped: 4,
-            group_size_1: 4,
-            sqlite_transactions_started: 8,
-            sqlite_transactions_committed: 8,
-            ingest_only_transactions_started: 4,
-            ingest_only_transactions_committed: 4,
-            retention_invocations: 4,
-            retention_only_transactions_started: 4,
-            retention_only_transactions_committed: 4,
+            group_size_4: 1,
+            sqlite_transactions_started: 1,
+            sqlite_transactions_committed: 1,
+            retention_invocations: 1,
+            shared_ingest_retention_transactions_started: 1,
+            shared_ingest_retention_transactions_committed: 1,
             ..super::CounterTotals::default()
         }
     }
 
     #[test]
-    fn baseline_contract_requires_singleton_transactions() {
-        let counters = valid();
-        super::validate_baseline(&counters, 4).unwrap();
+    fn candidate_contract_requires_one_shared_transaction_per_burst() {
+        super::validate_candidate(&valid(), 4).unwrap();
     }
 
     #[test]
-    fn baseline_contract_rejects_non_singleton_groups() {
-        let mut counters = valid();
-        counters.group_size_1 = 3;
-        counters.group_size_4 = 1;
-        assert!(super::validate_baseline(&counters, 4).is_err());
+    fn candidate_contract_accepts_a_low_rate_singleton() {
+        let singleton = super::CounterTotals {
+            exports_grouped: 1,
+            group_size_1: 1,
+            group_size_4: 0,
+            ..valid()
+        };
+        super::validate_candidate(&singleton, 1).unwrap();
     }
 
     #[test]
-    fn baseline_contract_rejects_missing_or_failed_retention() {
-        let mut missing = valid();
-        missing.retention_only_transactions_committed = 3;
-        assert!(super::validate_baseline(&missing, 4).is_err());
-
-        let mut failed = valid();
-        failed.retention_failures = 1;
-        assert!(super::validate_baseline(&failed, 4).is_err());
+    fn candidate_contract_rejects_split_groups() {
+        let split = super::CounterTotals {
+            groups_started: 2,
+            group_size_4: 0,
+            group_size_3: 1,
+            group_size_1: 1,
+            sqlite_transactions_started: 2,
+            sqlite_transactions_committed: 2,
+            shared_ingest_retention_transactions_started: 2,
+            shared_ingest_retention_transactions_committed: 2,
+            retention_invocations: 2,
+            ..valid()
+        };
+        assert!(super::validate_candidate(&split, 4).is_err());
     }
 
     #[test]
-    fn baseline_contract_rejects_transactions_not_observed_committed() {
-        let mut ingest = valid();
-        ingest.ingest_only_transactions_not_committed = 1;
-        assert!(super::validate_baseline(&ingest, 4).is_err());
+    fn candidate_contract_rejects_missing_or_failed_retention() {
+        let missing = super::CounterTotals {
+            retention_invocations: 0,
+            ..valid()
+        };
+        assert!(super::validate_candidate(&missing, 4).is_err());
 
-        let mut retention = valid();
-        retention.retention_only_transactions_not_committed = 1;
-        assert!(super::validate_baseline(&retention, 4).is_err());
-
-        let mut total = valid();
-        total.sqlite_transactions_not_committed = 1;
-        assert!(super::validate_baseline(&total, 4).is_err());
+        let failed = super::CounterTotals {
+            retention_failures: 1,
+            ..valid()
+        };
+        assert!(super::validate_candidate(&failed, 4).is_err());
     }
 
     #[test]
-    fn baseline_contract_rejects_shared_transactions() {
-        let mut counters = valid();
-        counters.shared_ingest_retention_transactions_started = 1;
-        counters.shared_ingest_retention_transactions_committed = 1;
-        assert!(super::validate_baseline(&counters, 4).is_err());
+    fn candidate_contract_rejects_transactions_not_observed_committed() {
+        let shared = super::CounterTotals {
+            shared_ingest_retention_transactions_not_committed: 1,
+            ..valid()
+        };
+        assert!(super::validate_candidate(&shared, 4).is_err());
+
+        let total = super::CounterTotals {
+            sqlite_transactions_not_committed: 1,
+            ..valid()
+        };
+        assert!(super::validate_candidate(&total, 4).is_err());
+    }
+
+    #[test]
+    fn candidate_contract_rejects_separate_ingest_or_retention_transactions() {
+        let ingest = super::CounterTotals {
+            ingest_only_transactions_started: 1,
+            ingest_only_transactions_committed: 1,
+            ..valid()
+        };
+        assert!(super::validate_candidate(&ingest, 4).is_err());
+
+        let retention = super::CounterTotals {
+            retention_only_transactions_started: 1,
+            retention_only_transactions_committed: 1,
+            ..valid()
+        };
+        assert!(super::validate_candidate(&retention, 4).is_err());
     }
 
     #[test]
