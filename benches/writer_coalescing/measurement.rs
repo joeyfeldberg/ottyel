@@ -20,14 +20,14 @@ pub(crate) struct BurstMeasurement {
     pub release_to_completion_ack: Distribution,
     pub records_per_second: RateDistribution,
     pub exports_per_second: RateDistribution,
-    pub retention_elapsed_per_burst: Distribution,
+    pub maintenance_elapsed_per_burst: Distribution,
     pub counters: CounterTotals,
 }
 
 #[derive(Debug, Serialize)]
 pub(crate) struct LowRateMeasurement {
     pub submission_attempt_to_completion_ack: Distribution,
-    pub retention_elapsed_per_export: Distribution,
+    pub maintenance_elapsed_per_export: Distribution,
     pub counters: CounterTotals,
 }
 
@@ -75,18 +75,15 @@ pub(crate) struct CounterTotals {
     pub sqlite_transactions_started: u64,
     pub sqlite_transactions_committed: u64,
     pub sqlite_transactions_not_committed: u64,
-    pub ingest_only_transactions_started: u64,
-    pub ingest_only_transactions_committed: u64,
-    pub ingest_only_transactions_not_committed: u64,
-    pub retention_invocations: u64,
-    pub retention_failures: u64,
-    pub retention_elapsed_ns: u64,
-    pub retention_only_transactions_started: u64,
-    pub retention_only_transactions_committed: u64,
-    pub retention_only_transactions_not_committed: u64,
-    pub shared_ingest_retention_transactions_started: u64,
-    pub shared_ingest_retention_transactions_committed: u64,
-    pub shared_ingest_retention_transactions_not_committed: u64,
+    pub ingest_group_transactions_started: u64,
+    pub ingest_group_transactions_committed: u64,
+    pub ingest_group_transactions_not_committed: u64,
+    pub maintenance_transactions_started: u64,
+    pub maintenance_transactions_committed: u64,
+    pub maintenance_transactions_not_committed: u64,
+    pub maintenance_units: u64,
+    pub maintenance_failures: u64,
+    pub maintenance_elapsed_ns: u64,
 }
 
 impl CounterTotals {
@@ -101,22 +98,16 @@ impl CounterTotals {
         self.sqlite_transactions_started += delta.sqlite_transactions_started;
         self.sqlite_transactions_committed += delta.sqlite_transactions_committed;
         self.sqlite_transactions_not_committed += delta.sqlite_transactions_not_committed;
-        self.ingest_only_transactions_started += delta.ingest_only_transactions_started;
-        self.ingest_only_transactions_committed += delta.ingest_only_transactions_committed;
-        self.ingest_only_transactions_not_committed += delta.ingest_only_transactions_not_committed;
-        self.retention_invocations += delta.retention_invocations;
-        self.retention_failures += delta.retention_failures;
-        self.retention_elapsed_ns += delta.retention_elapsed_ns;
-        self.retention_only_transactions_started += delta.retention_only_transactions_started;
-        self.retention_only_transactions_committed += delta.retention_only_transactions_committed;
-        self.retention_only_transactions_not_committed +=
-            delta.retention_only_transactions_not_committed;
-        self.shared_ingest_retention_transactions_started +=
-            delta.shared_ingest_retention_transactions_started;
-        self.shared_ingest_retention_transactions_committed +=
-            delta.shared_ingest_retention_transactions_committed;
-        self.shared_ingest_retention_transactions_not_committed +=
-            delta.shared_ingest_retention_transactions_not_committed;
+        self.ingest_group_transactions_started += delta.ingest_group_transactions_started;
+        self.ingest_group_transactions_committed += delta.ingest_group_transactions_committed;
+        self.ingest_group_transactions_not_committed +=
+            delta.ingest_group_transactions_not_committed;
+        self.maintenance_transactions_started += delta.maintenance_transactions_started;
+        self.maintenance_transactions_committed += delta.maintenance_transactions_committed;
+        self.maintenance_transactions_not_committed += delta.maintenance_transactions_not_committed;
+        self.maintenance_units += delta.maintenance_units;
+        self.maintenance_failures += delta.maintenance_failures;
+        self.maintenance_elapsed_ns += delta.maintenance_elapsed_ns;
     }
 }
 

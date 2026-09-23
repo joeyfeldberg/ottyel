@@ -1,4 +1,6 @@
 mod group;
+mod maintenance;
+mod worker;
 
 #[cfg(any(test, feature = "benchmark-support"))]
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -31,9 +33,7 @@ type WriteOperation =
 type IngestWrite = Box<dyn FnOnce(&Connection) -> Result<usize> + Send + 'static>;
 type IngestReply = Box<dyn FnOnce(Result<usize>) + Send + 'static>;
 
-/// Work that runs once inside every coalesced OTLP transaction, after the last export's writes
-/// and before `COMMIT`. A failure rolls back the whole group.
-pub(super) type GroupFinish = Box<dyn FnMut(&Connection) -> Result<()> + Send + 'static>;
+pub(in crate::store) use maintenance::Maintenance;
 
 /// One OTLP export that may share a SQLite transaction with adjacent exports.
 struct IngestOperation {
@@ -46,6 +46,9 @@ enum Operation {
     /// Arbitrary connection work that always runs alone. Only tests and the benchmark submit it.
     #[cfg(any(test, feature = "benchmark-support"))]
     Exclusive(WriteOperation),
+    /// Runs a complete maintenance pass now and reports its outcome.
+    #[cfg(any(test, feature = "benchmark-support"))]
+    FlushMaintenance(Box<dyn FnOnce(Result<()>) + Send + 'static>),
     Ingest(IngestOperation),
 }
 
@@ -150,6 +153,8 @@ pub struct WriterBacklog {
     pub canonical_bytes: usize,
     pub max_primary_records: usize,
     pub max_canonical_bytes: usize,
+    /// Failed maintenance units, such as retention, since the writer started.
+    pub maintenance_failures: u64,
 }
 
 /// The writer-admission budget exceeded by one OTLP request.
@@ -222,20 +227,22 @@ struct AdmissionState {
     limits: WriterLimits,
     primary_records: usize,
     canonical_bytes: usize,
+    maintenance_failures: u64,
+    last_maintenance_error: Option<String>,
 }
 
 impl WriterOwner {
     pub(super) fn start(
         connection: Connection,
         limits: WriterLimits,
-        finish_group: GroupFinish,
+        maintenance: Box<dyn Maintenance>,
     ) -> Result<Self> {
-        Self::start_with_finish(
+        Self::start_with(
             connection,
             WRITER_QUEUE_CAPACITY,
             limits,
             group::GroupLimits::PINNED,
-            finish_group,
+            maintenance,
         )
     }
 
@@ -250,12 +257,12 @@ impl WriterOwner {
         capacity: usize,
         limits: WriterLimits,
     ) -> Result<Self> {
-        Self::start_with_finish(
+        Self::start_with(
             connection,
             capacity,
             limits,
             group::GroupLimits::PINNED,
-            Box::new(|_| Ok(())),
+            Box::new(maintenance::NoMaintenance),
         )
     }
 
@@ -263,23 +270,23 @@ impl WriterOwner {
     fn start_for_group_test(
         connection: Connection,
         group_limits: group::GroupLimits,
-        finish_group: GroupFinish,
+        maintenance: Box<dyn Maintenance>,
     ) -> Result<Self> {
-        Self::start_with_finish(
+        Self::start_with(
             connection,
             WRITER_QUEUE_CAPACITY,
             WriterLimits::default(),
             group_limits,
-            finish_group,
+            maintenance,
         )
     }
 
-    fn start_with_finish(
+    fn start_with(
         connection: Connection,
         capacity: usize,
         limits: WriterLimits,
         group_limits: group::GroupLimits,
-        mut finish_group: GroupFinish,
+        maintenance: Box<dyn Maintenance>,
     ) -> Result<Self> {
         let (sender, receiver) = mpsc::sync_channel::<WriteJob>(capacity);
         let admission = Arc::new(Mutex::new(AdmissionState {
@@ -288,41 +295,21 @@ impl WriterOwner {
             limits,
             primary_records: 0,
             canonical_bytes: 0,
+            maintenance_failures: 0,
+            last_maintenance_error: None,
         }));
         let observer = WriteObserver::default();
-        let worker_admission = admission.clone();
-        let worker_observer = observer.clone();
+        let owner = worker::Worker {
+            connection,
+            receiver,
+            maintenance,
+            observer: observer.clone(),
+            admission: admission.clone(),
+            group_limits,
+        };
         let worker = thread::Builder::new()
             .name("ottyel-sqlite-writer".to_string())
-            .spawn(move || {
-                let mut connection = connection;
-                // A job pulled while collecting a group that could not join it runs next.
-                let mut pending = None;
-                while let Some(job) = pending.take().or_else(|| receiver.recv().ok()) {
-                    let action = match job.into_parts() {
-                        #[cfg(any(test, feature = "benchmark-support"))]
-                        (Operation::Exclusive(operation), reservation) => {
-                            operation(&mut connection, reservation)
-                        }
-                        (Operation::Ingest(first), reservation) => group::run(
-                            group::Context {
-                                connection: &mut connection,
-                                receiver: &receiver,
-                                pending: &mut pending,
-                                finish: &mut finish_group,
-                                observer: &worker_observer,
-                                limits: group_limits,
-                                admission: &worker_admission,
-                            },
-                            group::Member::new(first, reservation),
-                        ),
-                    };
-                    match action {
-                        WorkerAction::Continue => {}
-                        WorkerAction::Stop => break,
-                    }
-                }
-            })?;
+            .spawn(move || owner.run())?;
 
         Ok(Self {
             inner: Arc::new(WriterOwnerInner {
@@ -334,7 +321,22 @@ impl WriterOwner {
         })
     }
 
-    #[cfg(test)]
+    /// Runs one complete maintenance pass on the owner and waits for it.
+    #[cfg(any(test, feature = "benchmark-support"))]
+    pub(super) fn flush_maintenance(&self) -> Result<()> {
+        let (reply_sender, reply_receiver) = mpsc::sync_channel(1);
+        self.try_send(
+            IngestWeight::ZERO,
+            Operation::FlushMaintenance(Box::new(move |result| {
+                let _ = reply_sender.send(result);
+            })),
+        )?;
+        reply_receiver
+            .recv()
+            .map_err(|_| anyhow!(StoreWriteError::OutcomeUnknown))?
+    }
+
+    #[cfg(any(test, feature = "benchmark-support"))]
     pub(super) fn execute<T, F>(&self, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -343,7 +345,7 @@ impl WriterOwner {
         self.execute_weighted(IngestWeight::ZERO, operation)
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "benchmark-support"))]
     pub(super) fn execute_weighted<T, F>(&self, weight: IngestWeight, operation: F) -> Result<T>
     where
         T: Send + 'static,
@@ -517,6 +519,7 @@ impl WriterOwner {
             canonical_bytes: admission.canonical_bytes,
             max_primary_records: admission.limits.max_primary_records,
             max_canonical_bytes: admission.limits.max_canonical_bytes,
+            maintenance_failures: admission.maintenance_failures,
         }
     }
 
@@ -594,6 +597,11 @@ impl WriterOwner {
 }
 
 impl AdmissionState {
+    fn note_maintenance_failure(&mut self, error: &anyhow::Error) {
+        self.maintenance_failures = self.maintenance_failures.saturating_add(1);
+        self.last_maintenance_error = Some(format!("{error:#}"));
+    }
+
     fn reserve(&mut self, weight: IngestWeight) -> Result<()> {
         if weight.primary_records > self.limits.max_primary_records {
             return Err(StoreWriteError::TooLarge {

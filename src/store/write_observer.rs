@@ -20,6 +20,12 @@ pub(super) struct WriteObserver {
     counters: Arc<BenchmarkCounters>,
 }
 
+#[derive(Clone, Copy)]
+enum TransactionKind {
+    IngestGroup,
+    Maintenance,
+}
+
 impl WriteObserver {
     #[inline]
     pub(super) fn group_formed(&self, _exports: usize) {
@@ -36,11 +42,12 @@ impl WriteObserver {
         }
     }
 
+    /// Times one maintenance unit; dropping it without `succeeded` records a failure.
     #[inline]
-    pub(super) fn retention(&self) -> RetentionObservation<'_> {
+    pub(super) fn maintenance(&self) -> MaintenanceObservation<'_> {
         #[cfg(any(test, feature = "benchmark-support"))]
-        saturating_increment(&self.counters.retention_invocations);
-        RetentionObservation {
+        saturating_increment(&self.counters.maintenance_units);
+        MaintenanceObservation {
             #[cfg(not(any(test, feature = "benchmark-support")))]
             _observer: PhantomData,
             #[cfg(any(test, feature = "benchmark-support"))]
@@ -53,11 +60,21 @@ impl WriteObserver {
     }
 
     #[inline]
-    pub(super) fn shared_ingest_retention_transaction(&self) -> TransactionObservation<'_> {
+    pub(super) fn ingest_group_transaction(&self) -> TransactionObservation<'_> {
+        self.transaction(TransactionKind::IngestGroup)
+    }
+
+    #[inline]
+    pub(super) fn maintenance_transaction(&self) -> TransactionObservation<'_> {
+        self.transaction(TransactionKind::Maintenance)
+    }
+
+    #[inline]
+    fn transaction(&self, _kind: TransactionKind) -> TransactionObservation<'_> {
         #[cfg(any(test, feature = "benchmark-support"))]
         {
             saturating_increment(&self.counters.sqlite_transactions_started);
-            saturating_increment(&self.counters.shared_ingest_retention_transactions_started);
+            saturating_increment(&self.counters.by_kind(_kind).started);
         }
         TransactionObservation {
             #[cfg(not(any(test, feature = "benchmark-support")))]
@@ -65,44 +82,32 @@ impl WriteObserver {
             #[cfg(any(test, feature = "benchmark-support"))]
             observer: self,
             #[cfg(any(test, feature = "benchmark-support"))]
+            kind: _kind,
+            #[cfg(any(test, feature = "benchmark-support"))]
             committed: false,
         }
     }
 
     #[cfg(any(test, feature = "benchmark-support"))]
     pub(super) fn snapshot(&self) -> BenchmarkSnapshot {
+        let counters = &self.counters;
         BenchmarkSnapshot {
-            groups_started: load(&self.counters.groups_started),
-            exports_grouped: load(&self.counters.exports_grouped),
-            maximum_group_size: load(&self.counters.maximum_group_size),
-            group_size_counts: array::from_fn(|index| {
-                load(&self.counters.group_size_counts[index])
-            }),
-            sqlite_transactions_started: load(&self.counters.sqlite_transactions_started),
-            sqlite_transactions_committed: load(&self.counters.sqlite_transactions_committed),
-            sqlite_transactions_not_committed: load(
-                &self.counters.sqlite_transactions_not_committed,
-            ),
-            ingest_only_transactions_started: 0,
-            ingest_only_transactions_committed: 0,
-            ingest_only_transactions_not_committed: 0,
-            retention_invocations: load(&self.counters.retention_invocations),
-            retention_failures: load(&self.counters.retention_failures),
-            retention_elapsed_ns: load(&self.counters.retention_elapsed_ns),
-            retention_only_transactions_started: 0,
-            retention_only_transactions_committed: 0,
-            retention_only_transactions_not_committed: 0,
-            shared_ingest_retention_transactions_started: load(
-                &self.counters.shared_ingest_retention_transactions_started,
-            ),
-            shared_ingest_retention_transactions_committed: load(
-                &self.counters.shared_ingest_retention_transactions_committed,
-            ),
-            shared_ingest_retention_transactions_not_committed: load(
-                &self
-                    .counters
-                    .shared_ingest_retention_transactions_not_committed,
-            ),
+            groups_started: load(&counters.groups_started),
+            exports_grouped: load(&counters.exports_grouped),
+            maximum_group_size: load(&counters.maximum_group_size),
+            group_size_counts: array::from_fn(|index| load(&counters.group_size_counts[index])),
+            sqlite_transactions_started: load(&counters.sqlite_transactions_started),
+            sqlite_transactions_committed: load(&counters.sqlite_transactions_committed),
+            sqlite_transactions_not_committed: load(&counters.sqlite_transactions_not_committed),
+            ingest_group_transactions_started: load(&counters.ingest_group.started),
+            ingest_group_transactions_committed: load(&counters.ingest_group.committed),
+            ingest_group_transactions_not_committed: load(&counters.ingest_group.not_committed),
+            maintenance_transactions_started: load(&counters.maintenance.started),
+            maintenance_transactions_committed: load(&counters.maintenance.committed),
+            maintenance_transactions_not_committed: load(&counters.maintenance.not_committed),
+            maintenance_units: load(&counters.maintenance_units),
+            maintenance_failures: load(&counters.maintenance_failures),
+            maintenance_elapsed_ns: load(&counters.maintenance_elapsed_ns),
         }
     }
 }
@@ -113,6 +118,8 @@ pub(super) struct TransactionObservation<'a> {
     #[cfg(any(test, feature = "benchmark-support"))]
     observer: &'a WriteObserver,
     #[cfg(any(test, feature = "benchmark-support"))]
+    kind: TransactionKind,
+    #[cfg(any(test, feature = "benchmark-support"))]
     committed: bool,
 }
 
@@ -121,13 +128,9 @@ impl TransactionObservation<'_> {
     #[inline]
     pub(super) fn committed(mut self) {
         self.committed = true;
-        saturating_increment(&self.observer.counters.sqlite_transactions_committed);
-        saturating_increment(
-            &self
-                .observer
-                .counters
-                .shared_ingest_retention_transactions_committed,
-        );
+        let counters = &self.observer.counters;
+        saturating_increment(&counters.sqlite_transactions_committed);
+        saturating_increment(&counters.by_kind(self.kind).committed);
     }
 }
 
@@ -143,17 +146,13 @@ impl Drop for TransactionObservation<'_> {
         if self.committed {
             return;
         }
-        saturating_increment(&self.observer.counters.sqlite_transactions_not_committed);
-        saturating_increment(
-            &self
-                .observer
-                .counters
-                .shared_ingest_retention_transactions_not_committed,
-        );
+        let counters = &self.observer.counters;
+        saturating_increment(&counters.sqlite_transactions_not_committed);
+        saturating_increment(&counters.by_kind(self.kind).not_committed);
     }
 }
 
-pub(super) struct RetentionObservation<'a> {
+pub(super) struct MaintenanceObservation<'a> {
     #[cfg(not(any(test, feature = "benchmark-support")))]
     _observer: PhantomData<&'a WriteObserver>,
     #[cfg(any(test, feature = "benchmark-support"))]
@@ -165,7 +164,7 @@ pub(super) struct RetentionObservation<'a> {
 }
 
 #[cfg(any(test, feature = "benchmark-support"))]
-impl RetentionObservation<'_> {
+impl MaintenanceObservation<'_> {
     #[inline]
     pub(super) fn succeeded(mut self) {
         self.succeeded = true;
@@ -173,28 +172,26 @@ impl RetentionObservation<'_> {
 }
 
 #[cfg(not(any(test, feature = "benchmark-support")))]
-impl RetentionObservation<'_> {
+impl MaintenanceObservation<'_> {
     #[inline]
     pub(super) fn succeeded(self) {}
 }
 
 #[cfg(any(test, feature = "benchmark-support"))]
-impl Drop for RetentionObservation<'_> {
+impl Drop for MaintenanceObservation<'_> {
     fn drop(&mut self) {
         saturating_add(
-            &self.observer.counters.retention_elapsed_ns,
+            &self.observer.counters.maintenance_elapsed_ns,
             duration_nanos(self.started.elapsed()),
         );
         if !self.succeeded {
-            saturating_increment(&self.observer.counters.retention_failures);
+            saturating_increment(&self.observer.counters.maintenance_failures);
         }
     }
 }
 
-/// Cumulative writer observations.
-///
-/// Report schema v1 keeps the ingest-only and retention-only transaction fields. Coalesced
-/// writes never open those transaction kinds, so they always read zero.
+/// Cumulative writer observations. Every SQLite transaction is either one coalesced ingest
+/// group or one maintenance unit.
 #[cfg(any(test, feature = "benchmark-support"))]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct BenchmarkSnapshot {
@@ -205,18 +202,23 @@ pub struct BenchmarkSnapshot {
     pub sqlite_transactions_started: u64,
     pub sqlite_transactions_committed: u64,
     pub sqlite_transactions_not_committed: u64,
-    pub ingest_only_transactions_started: u64,
-    pub ingest_only_transactions_committed: u64,
-    pub ingest_only_transactions_not_committed: u64,
-    pub retention_invocations: u64,
-    pub retention_failures: u64,
-    pub retention_elapsed_ns: u64,
-    pub retention_only_transactions_started: u64,
-    pub retention_only_transactions_committed: u64,
-    pub retention_only_transactions_not_committed: u64,
-    pub shared_ingest_retention_transactions_started: u64,
-    pub shared_ingest_retention_transactions_committed: u64,
-    pub shared_ingest_retention_transactions_not_committed: u64,
+    pub ingest_group_transactions_started: u64,
+    pub ingest_group_transactions_committed: u64,
+    pub ingest_group_transactions_not_committed: u64,
+    pub maintenance_transactions_started: u64,
+    pub maintenance_transactions_committed: u64,
+    pub maintenance_transactions_not_committed: u64,
+    pub maintenance_units: u64,
+    pub maintenance_failures: u64,
+    pub maintenance_elapsed_ns: u64,
+}
+
+#[cfg(any(test, feature = "benchmark-support"))]
+#[derive(Default)]
+struct TransactionCounters {
+    started: AtomicU64,
+    committed: AtomicU64,
+    not_committed: AtomicU64,
 }
 
 #[cfg(any(test, feature = "benchmark-support"))]
@@ -229,12 +231,21 @@ struct BenchmarkCounters {
     sqlite_transactions_started: AtomicU64,
     sqlite_transactions_committed: AtomicU64,
     sqlite_transactions_not_committed: AtomicU64,
-    retention_invocations: AtomicU64,
-    retention_failures: AtomicU64,
-    retention_elapsed_ns: AtomicU64,
-    shared_ingest_retention_transactions_started: AtomicU64,
-    shared_ingest_retention_transactions_committed: AtomicU64,
-    shared_ingest_retention_transactions_not_committed: AtomicU64,
+    ingest_group: TransactionCounters,
+    maintenance: TransactionCounters,
+    maintenance_units: AtomicU64,
+    maintenance_failures: AtomicU64,
+    maintenance_elapsed_ns: AtomicU64,
+}
+
+#[cfg(any(test, feature = "benchmark-support"))]
+impl BenchmarkCounters {
+    fn by_kind(&self, kind: TransactionKind) -> &TransactionCounters {
+        match kind {
+            TransactionKind::IngestGroup => &self.ingest_group,
+            TransactionKind::Maintenance => &self.maintenance,
+        }
+    }
 }
 
 #[cfg(any(test, feature = "benchmark-support"))]

@@ -3,15 +3,15 @@ use ottyel::store::benchmark_support::BenchmarkSnapshot;
 
 use crate::measurement::CounterTotals;
 
-/// Validates the pinned candidate contract: every sample's exports form exactly one group that
-/// commits once, in one shared ingest-retention transaction, with one retention invocation.
-pub(crate) fn validate_candidate(counters: &CounterTotals, exports: u64) -> Result<()> {
+/// Validates one sample against the current writer: all `exports` form exactly one ingest group
+/// that commits once, and any maintenance units that interleave commit separately and succeed.
+pub(crate) fn validate_sample(counters: &CounterTotals, exports: u64) -> Result<()> {
     let expected_sizes = match exports {
         1 => [1, 0, 0, 0, 0],
         2 => [0, 1, 0, 0, 0],
         3 => [0, 0, 1, 0, 0],
         4 => [0, 0, 0, 1, 0],
-        _ => anyhow::bail!("the candidate policy groups at most four exports, not {exports}"),
+        _ => anyhow::bail!("the coalescing policy groups at most four exports, not {exports}"),
     };
     ensure!(
         counters.groups_started == 1
@@ -23,32 +23,27 @@ pub(crate) fn validate_candidate(counters: &CounterTotals, exports: u64) -> Resu
                 counters.group_size_4,
                 counters.group_size_5_or_more,
             ] == expected_sizes,
-        "candidate group counters do not describe one group of {exports}: {counters:?}"
+        "group counters do not describe one group of {exports}: {counters:?}"
     );
     ensure!(
-        counters.sqlite_transactions_started == 1
-            && counters.sqlite_transactions_committed == 1
+        counters.ingest_group_transactions_started == 1
+            && counters.ingest_group_transactions_committed == 1
+            && counters.ingest_group_transactions_not_committed == 0,
+        "ingest group transaction counters are invalid: {counters:?}"
+    );
+    ensure!(
+        counters.maintenance_failures == 0
+            && counters.maintenance_transactions_not_committed == 0
+            && counters.maintenance_transactions_started == counters.maintenance_units
+            && counters.maintenance_transactions_committed == counters.maintenance_units,
+        "maintenance counters are invalid: {counters:?}"
+    );
+    ensure!(
+        counters.sqlite_transactions_started == 1 + counters.maintenance_transactions_started
+            && counters.sqlite_transactions_committed
+                == 1 + counters.maintenance_transactions_committed
             && counters.sqlite_transactions_not_committed == 0,
-        "candidate total SQLite transaction counters are invalid: {counters:?}"
-    );
-    ensure!(
-        counters.shared_ingest_retention_transactions_started == 1
-            && counters.shared_ingest_retention_transactions_committed == 1
-            && counters.shared_ingest_retention_transactions_not_committed == 0,
-        "candidate shared ingest-retention transaction counters are invalid: {counters:?}"
-    );
-    ensure!(
-        counters.retention_invocations == 1 && counters.retention_failures == 0,
-        "candidate retention counters are invalid: {counters:?}"
-    );
-    ensure!(
-        counters.ingest_only_transactions_started == 0
-            && counters.ingest_only_transactions_committed == 0
-            && counters.ingest_only_transactions_not_committed == 0
-            && counters.retention_only_transactions_started == 0
-            && counters.retention_only_transactions_committed == 0
-            && counters.retention_only_transactions_not_committed == 0,
-        "candidate unexpectedly used a separate ingest or retention transaction: {counters:?}"
+        "total SQLite transaction counters are invalid: {counters:?}"
     );
     Ok(())
 }
@@ -69,154 +64,151 @@ pub(crate) fn snapshot_delta(
     before: BenchmarkSnapshot,
     after: BenchmarkSnapshot,
 ) -> Result<CounterTotals> {
+    let sub = |after: u64, before: u64, label: &str| {
+        after
+            .checked_sub(before)
+            .ok_or_else(|| anyhow::anyhow!("{label} counter moved backwards"))
+    };
     Ok(CounterTotals {
-        groups_started: subtract(after.groups_started, before.groups_started, "groups")?,
-        exports_grouped: subtract(after.exports_grouped, before.exports_grouped, "exports")?,
-        group_size_1: subtract(
+        groups_started: sub(after.groups_started, before.groups_started, "groups")?,
+        exports_grouped: sub(after.exports_grouped, before.exports_grouped, "exports")?,
+        group_size_1: sub(
             after.group_size_counts[0],
             before.group_size_counts[0],
-            "groups of one",
+            "size 1",
         )?,
-        group_size_2: subtract(
+        group_size_2: sub(
             after.group_size_counts[1],
             before.group_size_counts[1],
-            "groups of two",
+            "size 2",
         )?,
-        group_size_3: subtract(
+        group_size_3: sub(
             after.group_size_counts[2],
             before.group_size_counts[2],
-            "groups of three",
+            "size 3",
         )?,
-        group_size_4: subtract(
+        group_size_4: sub(
             after.group_size_counts[3],
             before.group_size_counts[3],
-            "groups of four",
+            "size 4",
         )?,
-        group_size_5_or_more: subtract(
+        group_size_5_or_more: sub(
             after.group_size_counts[4],
             before.group_size_counts[4],
-            "groups of five or more",
+            "size 5+",
         )?,
-        sqlite_transactions_started: subtract(
+        sqlite_transactions_started: sub(
             after.sqlite_transactions_started,
             before.sqlite_transactions_started,
-            "SQLite transactions started",
+            "SQLite started",
         )?,
-        sqlite_transactions_committed: subtract(
+        sqlite_transactions_committed: sub(
             after.sqlite_transactions_committed,
             before.sqlite_transactions_committed,
-            "SQLite transactions committed",
+            "SQLite committed",
         )?,
-        sqlite_transactions_not_committed: subtract(
+        sqlite_transactions_not_committed: sub(
             after.sqlite_transactions_not_committed,
             before.sqlite_transactions_not_committed,
-            "SQLite transactions not committed",
+            "SQLite not committed",
         )?,
-        ingest_only_transactions_started: subtract(
-            after.ingest_only_transactions_started,
-            before.ingest_only_transactions_started,
-            "ingest-only transactions started",
+        ingest_group_transactions_started: sub(
+            after.ingest_group_transactions_started,
+            before.ingest_group_transactions_started,
+            "ingest group started",
         )?,
-        ingest_only_transactions_committed: subtract(
-            after.ingest_only_transactions_committed,
-            before.ingest_only_transactions_committed,
-            "ingest-only transactions committed",
+        ingest_group_transactions_committed: sub(
+            after.ingest_group_transactions_committed,
+            before.ingest_group_transactions_committed,
+            "ingest group committed",
         )?,
-        ingest_only_transactions_not_committed: subtract(
-            after.ingest_only_transactions_not_committed,
-            before.ingest_only_transactions_not_committed,
-            "ingest-only transactions not committed",
+        ingest_group_transactions_not_committed: sub(
+            after.ingest_group_transactions_not_committed,
+            before.ingest_group_transactions_not_committed,
+            "ingest group not committed",
         )?,
-        retention_invocations: subtract(
-            after.retention_invocations,
-            before.retention_invocations,
-            "retention invocations",
+        maintenance_transactions_started: sub(
+            after.maintenance_transactions_started,
+            before.maintenance_transactions_started,
+            "maintenance started",
         )?,
-        retention_failures: subtract(
-            after.retention_failures,
-            before.retention_failures,
-            "retention failures",
+        maintenance_transactions_committed: sub(
+            after.maintenance_transactions_committed,
+            before.maintenance_transactions_committed,
+            "maintenance committed",
         )?,
-        retention_elapsed_ns: subtract(
-            after.retention_elapsed_ns,
-            before.retention_elapsed_ns,
-            "retention elapsed",
+        maintenance_transactions_not_committed: sub(
+            after.maintenance_transactions_not_committed,
+            before.maintenance_transactions_not_committed,
+            "maintenance not committed",
         )?,
-        retention_only_transactions_started: subtract(
-            after.retention_only_transactions_started,
-            before.retention_only_transactions_started,
-            "retention-only transactions started",
+        maintenance_units: sub(
+            after.maintenance_units,
+            before.maintenance_units,
+            "maintenance units",
         )?,
-        retention_only_transactions_committed: subtract(
-            after.retention_only_transactions_committed,
-            before.retention_only_transactions_committed,
-            "retention-only transactions committed",
+        maintenance_failures: sub(
+            after.maintenance_failures,
+            before.maintenance_failures,
+            "maintenance failures",
         )?,
-        retention_only_transactions_not_committed: subtract(
-            after.retention_only_transactions_not_committed,
-            before.retention_only_transactions_not_committed,
-            "retention-only transactions not committed",
-        )?,
-        shared_ingest_retention_transactions_started: subtract(
-            after.shared_ingest_retention_transactions_started,
-            before.shared_ingest_retention_transactions_started,
-            "shared ingest-retention transactions started",
-        )?,
-        shared_ingest_retention_transactions_committed: subtract(
-            after.shared_ingest_retention_transactions_committed,
-            before.shared_ingest_retention_transactions_committed,
-            "shared ingest-retention transactions committed",
-        )?,
-        shared_ingest_retention_transactions_not_committed: subtract(
-            after.shared_ingest_retention_transactions_not_committed,
-            before.shared_ingest_retention_transactions_not_committed,
-            "shared ingest-retention transactions not committed",
+        maintenance_elapsed_ns: sub(
+            after.maintenance_elapsed_ns,
+            before.maintenance_elapsed_ns,
+            "maintenance elapsed",
         )?,
     })
-}
-
-fn subtract(after: u64, before: u64, label: &str) -> Result<u64> {
-    after
-        .checked_sub(before)
-        .ok_or_else(|| anyhow::anyhow!("{label} counter moved backwards"))
 }
 
 #[cfg(test)]
 mod tests {
     // Cargo checks this harness-free benchmark with `cfg(test)` while omitting test bodies.
     #[allow(dead_code)]
-    fn valid() -> super::CounterTotals {
+    fn burst() -> super::CounterTotals {
         super::CounterTotals {
             groups_started: 1,
             exports_grouped: 4,
             group_size_4: 1,
             sqlite_transactions_started: 1,
             sqlite_transactions_committed: 1,
-            retention_invocations: 1,
-            shared_ingest_retention_transactions_started: 1,
-            shared_ingest_retention_transactions_committed: 1,
+            ingest_group_transactions_started: 1,
+            ingest_group_transactions_committed: 1,
             ..super::CounterTotals::default()
         }
     }
 
     #[test]
-    fn candidate_contract_requires_one_shared_transaction_per_burst() {
-        super::validate_candidate(&valid(), 4).unwrap();
+    fn one_group_with_no_maintenance_is_valid() {
+        super::validate_sample(&burst(), 4).unwrap();
     }
 
     #[test]
-    fn candidate_contract_accepts_a_low_rate_singleton() {
+    fn interleaved_maintenance_units_commit_separately() {
+        let counters = super::CounterTotals {
+            sqlite_transactions_started: 3,
+            sqlite_transactions_committed: 3,
+            maintenance_transactions_started: 2,
+            maintenance_transactions_committed: 2,
+            maintenance_units: 2,
+            maintenance_elapsed_ns: 1_000,
+            ..burst()
+        };
+        super::validate_sample(&counters, 4).unwrap();
+    }
+
+    #[test]
+    fn a_low_rate_singleton_is_one_group_of_one() {
         let singleton = super::CounterTotals {
             exports_grouped: 1,
             group_size_1: 1,
             group_size_4: 0,
-            ..valid()
+            ..burst()
         };
-        super::validate_candidate(&singleton, 1).unwrap();
+        super::validate_sample(&singleton, 1).unwrap();
     }
 
     #[test]
-    fn candidate_contract_rejects_split_groups() {
+    fn split_groups_are_rejected() {
         let split = super::CounterTotals {
             groups_started: 2,
             group_size_4: 0,
@@ -224,59 +216,42 @@ mod tests {
             group_size_1: 1,
             sqlite_transactions_started: 2,
             sqlite_transactions_committed: 2,
-            shared_ingest_retention_transactions_started: 2,
-            shared_ingest_retention_transactions_committed: 2,
-            retention_invocations: 2,
-            ..valid()
+            ingest_group_transactions_started: 2,
+            ingest_group_transactions_committed: 2,
+            ..burst()
         };
-        assert!(super::validate_candidate(&split, 4).is_err());
+        assert!(super::validate_sample(&split, 4).is_err());
     }
 
     #[test]
-    fn candidate_contract_rejects_missing_or_failed_retention() {
-        let missing = super::CounterTotals {
-            retention_invocations: 0,
-            ..valid()
-        };
-        assert!(super::validate_candidate(&missing, 4).is_err());
-
+    fn failed_or_uncommitted_maintenance_is_rejected() {
         let failed = super::CounterTotals {
-            retention_failures: 1,
-            ..valid()
+            maintenance_failures: 1,
+            ..burst()
         };
-        assert!(super::validate_candidate(&failed, 4).is_err());
-    }
+        assert!(super::validate_sample(&failed, 4).is_err());
 
-    #[test]
-    fn candidate_contract_rejects_transactions_not_observed_committed() {
-        let shared = super::CounterTotals {
-            shared_ingest_retention_transactions_not_committed: 1,
-            ..valid()
-        };
-        assert!(super::validate_candidate(&shared, 4).is_err());
-
-        let total = super::CounterTotals {
+        let uncommitted = super::CounterTotals {
+            sqlite_transactions_started: 2,
             sqlite_transactions_not_committed: 1,
-            ..valid()
+            maintenance_transactions_started: 1,
+            maintenance_transactions_not_committed: 1,
+            maintenance_units: 1,
+            ..burst()
         };
-        assert!(super::validate_candidate(&total, 4).is_err());
+        assert!(super::validate_sample(&uncommitted, 4).is_err());
     }
 
     #[test]
-    fn candidate_contract_rejects_separate_ingest_or_retention_transactions() {
-        let ingest = super::CounterTotals {
-            ingest_only_transactions_started: 1,
-            ingest_only_transactions_committed: 1,
-            ..valid()
+    fn an_uncommitted_ingest_group_is_rejected() {
+        let counters = super::CounterTotals {
+            ingest_group_transactions_committed: 0,
+            ingest_group_transactions_not_committed: 1,
+            sqlite_transactions_committed: 0,
+            sqlite_transactions_not_committed: 1,
+            ..burst()
         };
-        assert!(super::validate_candidate(&ingest, 4).is_err());
-
-        let retention = super::CounterTotals {
-            retention_only_transactions_started: 1,
-            retention_only_transactions_committed: 1,
-            ..valid()
-        };
-        assert!(super::validate_candidate(&retention, 4).is_err());
+        assert!(super::validate_sample(&counters, 4).is_err());
     }
 
     #[test]

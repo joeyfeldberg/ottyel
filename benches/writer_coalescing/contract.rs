@@ -1,19 +1,18 @@
 use serde::Serialize;
 
 pub(crate) const REPORT_SCHEMA_NAME: &str = "ottyel.writer_coalescing_benchmark";
-pub(crate) const REPORT_SCHEMA_VERSION: u32 = 1;
+pub(crate) const REPORT_SCHEMA_VERSION: u32 = 2;
 pub(crate) const FIXTURE_GENERATOR_NAME: &str = "ottyel.writer_coalescing.trace_fixture";
 pub(crate) const FIXTURE_GENERATOR_VERSION: u32 = 1;
-pub(crate) const CANDIDATE_POLICY_NAME: &str = "opportunistic_adjacent_otlp";
-pub(crate) const CANDIDATE_POLICY_VERSION: u32 = 1;
-pub(crate) const GATE_POLICY_NAME: &str = "writer_coalescing_acceptance";
-pub(crate) const GATE_POLICY_VERSION: u32 = 1;
 
-pub(crate) const CANDIDATE_MAX_EXPORTS: usize = 4;
-pub(crate) const CANDIDATE_MAX_PRIMARY_RECORDS: usize = 10_000;
-pub(crate) const CANDIDATE_MAX_CANONICAL_BYTES: usize = 4 * 1024 * 1024;
-pub(crate) const CANDIDATE_MAX_TRANSACTION_AGE_NS: u64 = 25_000_000;
-pub(crate) const CANDIDATE_INTENTIONAL_COLLECTION_WAIT_NS: u64 = 0;
+pub(crate) const COALESCING_MAX_EXPORTS: usize = 4;
+pub(crate) const COALESCING_MAX_PRIMARY_RECORDS: usize = 10_000;
+pub(crate) const COALESCING_MAX_CANONICAL_BYTES: usize = 4 * 1024 * 1024;
+pub(crate) const COALESCING_MAX_TRANSACTION_AGE_NS: u64 = 25_000_000;
+
+pub(crate) const RETENTION_PASS_INTERVAL_NS: u64 = 30_000_000_000;
+pub(crate) const RETENTION_ROWS_PER_UNIT: usize = 2_000;
+pub(crate) const RETENTION_TRACES_PER_UNIT: usize = 20;
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 pub(crate) struct VersionedName {
@@ -35,94 +34,106 @@ pub(crate) fn fixture_generator() -> VersionedName {
     }
 }
 
+/// The writer policies the measured binary runs.
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
-pub(crate) struct CandidatePolicy {
+pub(crate) struct WriterPolicies {
+    pub coalescing: CoalescingPolicy,
+    pub retention: RetentionPolicy,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+pub(crate) struct CoalescingPolicy {
     pub identity: VersionedName,
     pub maximum_exports_per_transaction: usize,
     pub maximum_primary_records_per_transaction: usize,
     pub maximum_canonical_bytes_per_transaction: usize,
     pub maximum_transaction_age_ns: u64,
-    pub transaction_age_check: &'static str,
     pub collection: &'static str,
     pub intentional_collection_wait_ns: u64,
-    pub retention_boundary: &'static str,
-    pub singleton_over_cap_behavior: &'static str,
-    pub boundary_behavior: &'static str,
 }
 
-impl CandidatePolicy {
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
+pub(crate) struct RetentionPolicy {
+    pub identity: VersionedName,
+    pub pass_interval_ns: u64,
+    pub rows_per_unit: usize,
+    pub traces_per_unit: usize,
+    pub early_pass_trigger: &'static str,
+    pub unit_boundary: &'static str,
+}
+
+impl WriterPolicies {
     pub(crate) fn pinned() -> Self {
         Self {
-            identity: VersionedName {
-                name: CANDIDATE_POLICY_NAME,
-                version: CANDIDATE_POLICY_VERSION,
+            coalescing: CoalescingPolicy {
+                identity: VersionedName {
+                    name: "opportunistic_adjacent_otlp",
+                    version: 1,
+                },
+                maximum_exports_per_transaction: COALESCING_MAX_EXPORTS,
+                maximum_primary_records_per_transaction: COALESCING_MAX_PRIMARY_RECORDS,
+                maximum_canonical_bytes_per_transaction: COALESCING_MAX_CANONICAL_BYTES,
+                maximum_transaction_age_ns: COALESCING_MAX_TRANSACTION_AGE_NS,
+                collection: "already_ready_try_recv_only",
+                intentional_collection_wait_ns: 0,
             },
-            maximum_exports_per_transaction: CANDIDATE_MAX_EXPORTS,
-            maximum_primary_records_per_transaction: CANDIDATE_MAX_PRIMARY_RECORDS,
-            maximum_canonical_bytes_per_transaction: CANDIDATE_MAX_CANONICAL_BYTES,
-            maximum_transaction_age_ns: CANDIDATE_MAX_TRANSACTION_AGE_NS,
-            transaction_age_check: "cooperative_between_jobs_only",
-            collection: "already_ready_try_recv_only",
-            intentional_collection_wait_ns: CANDIDATE_INTENTIONAL_COLLECTION_WAIT_NS,
-            retention_boundary: "inside_shared_ingest_transaction_before_commit",
-            singleton_over_cap_behavior: "execute_admitted_singleton_alone",
-            boundary_behavior: "inclusive_exact_export_record_byte_and_observed_age_boundaries_join",
+            retention: RetentionPolicy {
+                identity: VersionedName {
+                    name: "scheduled_bounded_retention",
+                    version: 1,
+                },
+                pass_interval_ns: RETENTION_PASS_INTERVAL_NS,
+                rows_per_unit: RETENTION_ROWS_PER_UNIT,
+                traces_per_unit: RETENTION_TRACES_PER_UNIT,
+                early_pass_trigger: "max(1000, max_spans / 10) committed primary records",
+                unit_boundary: "one_sqlite_transaction_per_unit_at_most_one_unit_per_writer_job",
+            },
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
-pub(crate) struct GateMetricPaths {
-    pub burst_sqlite_transactions_committed: &'static str,
-    pub burst_retention_invocations: &'static str,
-    pub burst_ack_p95_ns: &'static str,
-    pub low_rate_ack_p95_ns: &'static str,
-    pub burst_records_per_second_p50: &'static str,
-    pub burst_retention_elapsed_p50_ns: &'static str,
-}
-
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
-pub(crate) struct GateFormulas {
-    pub total_sqlite_commit_reduction_percent: &'static str,
-    pub retention_invocation_reduction_percent: &'static str,
-    pub median_records_per_second_ratio: &'static str,
-    pub median_retention_elapsed_reduction_percent: &'static str,
-    pub burst_ack_regression_percent: &'static str,
-    pub low_rate_allowed_increase_ns: &'static str,
+pub(crate) struct GateRequirement {
+    pub metric_path: &'static str,
+    pub requirement: &'static str,
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize)]
 pub(crate) struct GateContract {
     pub identity: VersionedName,
     pub applicability: &'static str,
-    pub metric_paths: GateMetricPaths,
-    pub formulas: GateFormulas,
+    pub requirements: [GateRequirement; 4],
+    pub structural_requirement: &'static str,
 }
 
 impl GateContract {
+    /// The retention gate predeclared in `docs/performance.md` before implementation.
     pub(crate) fn pinned() -> Self {
         Self {
             identity: VersionedName {
-                name: GATE_POLICY_NAME,
-                version: GATE_POLICY_VERSION,
+                name: "scheduled_retention_acceptance",
+                version: 1,
             },
-            applicability: "schema_v1_same_fixture_generator_clean_reference_before_after_only",
-            metric_paths: GateMetricPaths {
-                burst_sqlite_transactions_committed: "measurements.burst.counters.sqlite_transactions_committed",
-                burst_retention_invocations: "measurements.burst.counters.retention_invocations",
-                burst_ack_p95_ns: "measurements.burst.release_to_completion_ack.p95_ns",
-                low_rate_ack_p95_ns: "measurements.low_rate.submission_attempt_to_completion_ack.p95_ns",
-                burst_records_per_second_p50: "measurements.burst.records_per_second.p50",
-                burst_retention_elapsed_p50_ns: "measurements.burst.retention_elapsed_per_burst.p50_ns",
-            },
-            formulas: GateFormulas {
-                total_sqlite_commit_reduction_percent: "(baseline_total_sqlite_committed - candidate_total_sqlite_committed) / baseline_total_sqlite_committed * 100",
-                retention_invocation_reduction_percent: "(baseline_retention_invocations - candidate_retention_invocations) / baseline_retention_invocations * 100",
-                median_records_per_second_ratio: "candidate_burst_records_per_second_p50 / baseline_burst_records_per_second_p50",
-                median_retention_elapsed_reduction_percent: "(baseline_retention_elapsed_p50_ns - candidate_retention_elapsed_p50_ns) / baseline_retention_elapsed_p50_ns * 100",
-                burst_ack_regression_percent: "(candidate_burst_ack_p95_ns - baseline_burst_ack_p95_ns) / baseline_burst_ack_p95_ns * 100",
-                low_rate_allowed_increase_ns: "max(1000000, baseline_low_rate_ack_p95_ns * 0.10)",
-            },
+            applicability: "clean_reference_before_after_same_fixture_generator_report_schema_v1_or_v2",
+            requirements: [
+                GateRequirement {
+                    metric_path: "measurements.low_rate.submission_attempt_to_completion_ack.p50_ns",
+                    requirement: "candidate <= baseline * 0.10",
+                },
+                GateRequirement {
+                    metric_path: "measurements.low_rate.submission_attempt_to_completion_ack.p95_ns",
+                    requirement: "candidate <= baseline * 0.25",
+                },
+                GateRequirement {
+                    metric_path: "measurements.burst.release_to_completion_ack.p95_ns",
+                    requirement: "candidate <= baseline",
+                },
+                GateRequirement {
+                    metric_path: "measurements.burst.records_per_second.p50",
+                    requirement: "candidate >= baseline * 2",
+                },
+            ],
+            structural_requirement: "no ingest group transaction contains retention work; maintenance units commit in their own transactions",
         }
     }
 }
@@ -130,66 +141,79 @@ impl GateContract {
 #[cfg(test)]
 mod tests {
     #[test]
-    fn schema_generator_candidate_and_gate_contract_are_fully_pinned() {
-        assert_eq!(super::REPORT_SCHEMA_VERSION, 1);
-        assert_eq!(super::FIXTURE_GENERATOR_VERSION, 1);
+    fn schema_generator_policies_and_gate_are_fully_pinned() {
         assert_eq!(
             serde_json::to_value((
                 super::report_schema(),
                 super::fixture_generator(),
-                super::CandidatePolicy::pinned(),
+                super::WriterPolicies::pinned(),
                 super::GateContract::pinned(),
             ))
             .unwrap(),
             serde_json::json!([
+                {"name": "ottyel.writer_coalescing_benchmark", "version": 2},
+                {"name": "ottyel.writer_coalescing.trace_fixture", "version": 1},
                 {
-                    "name": "ottyel.writer_coalescing_benchmark",
-                    "version": 1
-                },
-                {
-                    "name": "ottyel.writer_coalescing.trace_fixture",
-                    "version": 1
-                },
-                {
-                    "identity": {
-                        "name": "opportunistic_adjacent_otlp",
-                        "version": 1
+                    "coalescing": {
+                        "identity": {"name": "opportunistic_adjacent_otlp", "version": 1},
+                        "maximum_exports_per_transaction": 4,
+                        "maximum_primary_records_per_transaction": 10000,
+                        "maximum_canonical_bytes_per_transaction": 4194304,
+                        "maximum_transaction_age_ns": 25000000,
+                        "collection": "already_ready_try_recv_only",
+                        "intentional_collection_wait_ns": 0
                     },
-                    "maximum_exports_per_transaction": 4,
-                    "maximum_primary_records_per_transaction": 10000,
-                    "maximum_canonical_bytes_per_transaction": 4194304,
-                    "maximum_transaction_age_ns": 25000000,
-                    "transaction_age_check": "cooperative_between_jobs_only",
-                    "collection": "already_ready_try_recv_only",
-                    "intentional_collection_wait_ns": 0,
-                    "retention_boundary": "inside_shared_ingest_transaction_before_commit",
-                    "singleton_over_cap_behavior": "execute_admitted_singleton_alone",
-                    "boundary_behavior": "inclusive_exact_export_record_byte_and_observed_age_boundaries_join"
-                },
-                {
-                    "identity": {
-                        "name": "writer_coalescing_acceptance",
-                        "version": 1
-                    },
-                    "applicability": "schema_v1_same_fixture_generator_clean_reference_before_after_only",
-                    "metric_paths": {
-                        "burst_sqlite_transactions_committed": "measurements.burst.counters.sqlite_transactions_committed",
-                        "burst_retention_invocations": "measurements.burst.counters.retention_invocations",
-                        "burst_ack_p95_ns": "measurements.burst.release_to_completion_ack.p95_ns",
-                        "low_rate_ack_p95_ns": "measurements.low_rate.submission_attempt_to_completion_ack.p95_ns",
-                        "burst_records_per_second_p50": "measurements.burst.records_per_second.p50",
-                        "burst_retention_elapsed_p50_ns": "measurements.burst.retention_elapsed_per_burst.p50_ns"
-                    },
-                    "formulas": {
-                        "total_sqlite_commit_reduction_percent": "(baseline_total_sqlite_committed - candidate_total_sqlite_committed) / baseline_total_sqlite_committed * 100",
-                        "retention_invocation_reduction_percent": "(baseline_retention_invocations - candidate_retention_invocations) / baseline_retention_invocations * 100",
-                        "median_records_per_second_ratio": "candidate_burst_records_per_second_p50 / baseline_burst_records_per_second_p50",
-                        "median_retention_elapsed_reduction_percent": "(baseline_retention_elapsed_p50_ns - candidate_retention_elapsed_p50_ns) / baseline_retention_elapsed_p50_ns * 100",
-                        "burst_ack_regression_percent": "(candidate_burst_ack_p95_ns - baseline_burst_ack_p95_ns) / baseline_burst_ack_p95_ns * 100",
-                        "low_rate_allowed_increase_ns": "max(1000000, baseline_low_rate_ack_p95_ns * 0.10)"
+                    "retention": {
+                        "identity": {"name": "scheduled_bounded_retention", "version": 1},
+                        "pass_interval_ns": 30000000000u64,
+                        "rows_per_unit": 2000,
+                        "traces_per_unit": 20,
+                        "early_pass_trigger": "max(1000, max_spans / 10) committed primary records",
+                        "unit_boundary": "one_sqlite_transaction_per_unit_at_most_one_unit_per_writer_job"
                     }
+                },
+                {
+                    "identity": {"name": "scheduled_retention_acceptance", "version": 1},
+                    "applicability": "clean_reference_before_after_same_fixture_generator_report_schema_v1_or_v2",
+                    "requirements": [
+                        {
+                            "metric_path": "measurements.low_rate.submission_attempt_to_completion_ack.p50_ns",
+                            "requirement": "candidate <= baseline * 0.10"
+                        },
+                        {
+                            "metric_path": "measurements.low_rate.submission_attempt_to_completion_ack.p95_ns",
+                            "requirement": "candidate <= baseline * 0.25"
+                        },
+                        {
+                            "metric_path": "measurements.burst.release_to_completion_ack.p95_ns",
+                            "requirement": "candidate <= baseline"
+                        },
+                        {
+                            "metric_path": "measurements.burst.records_per_second.p50",
+                            "requirement": "candidate >= baseline * 2"
+                        }
+                    ],
+                    "structural_requirement": "no ingest group transaction contains retention work; maintenance units commit in their own transactions"
                 }
             ])
+        );
+    }
+
+    #[test]
+    fn pinned_retention_policy_matches_the_library() {
+        let library = ottyel::store::benchmark_support::retention_policy();
+        let pinned = super::WriterPolicies::pinned().retention;
+        assert_eq!(
+            (
+                library.pass_interval.as_nanos() as u64,
+                library.rows_per_unit,
+                library.traces_per_unit
+            ),
+            (
+                pinned.pass_interval_ns,
+                pinned.rows_per_unit,
+                pinned.traces_per_unit
+            )
         );
     }
 }

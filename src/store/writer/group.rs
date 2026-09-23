@@ -1,9 +1,9 @@
 //! Opportunistic coalescing of adjacent OTLP exports into one SQLite transaction.
 //!
 //! The owner never waits for more work. After each export it takes only jobs that are already
-//! queued, stops at the first job that cannot join, and runs group finish work (retention) once
-//! before `COMMIT`. Each export writes inside its own savepoint, so an ordinary export failure
-//! rolls back only that export.
+//! queued and stops at the first job that cannot join. Each export writes inside its own
+//! savepoint, so an ordinary export failure rolls back only that export. Retention is not part
+//! of the group; the owner schedules it separately as maintenance.
 
 use std::{
     panic::{AssertUnwindSafe, catch_unwind},
@@ -15,7 +15,7 @@ use anyhow::{Result, anyhow};
 use rusqlite::Connection;
 
 use super::{
-    AdmissionState, GroupFinish, IngestOperation, IngestReply, IngestWrite, Operation,
+    AdmissionState, IngestOperation, IngestReply, IngestWrite, Maintenance, Operation,
     StoreWriteError, WeightedReservation, WorkerAction, WriteJob, close_admission,
 };
 use crate::store::{ingest_weight::IngestWeight, write_observer::WriteObserver};
@@ -45,7 +45,7 @@ pub(super) struct Context<'a> {
     pub(super) connection: &'a mut Connection,
     pub(super) receiver: &'a Receiver<WriteJob>,
     pub(super) pending: &'a mut Option<WriteJob>,
-    pub(super) finish: &'a mut GroupFinish,
+    pub(super) maintenance: &'a mut dyn Maintenance,
     pub(super) observer: &'a WriteObserver,
     pub(super) limits: GroupLimits,
     pub(super) admission: &'a Mutex<AdmissionState>,
@@ -79,7 +79,7 @@ pub(super) fn run(context: Context<'_>, first: Member) -> WorkerAction {
         connection,
         receiver,
         pending,
-        finish,
+        maintenance,
         observer,
         limits,
         admission,
@@ -92,7 +92,6 @@ pub(super) fn run(context: Context<'_>, first: Member) -> WorkerAction {
             connection,
             receiver,
             pending,
-            finish,
             observer,
             limits,
             &mut members,
@@ -109,6 +108,11 @@ pub(super) fn run(context: Context<'_>, first: Member) -> WorkerAction {
         .collect();
     match executed {
         Ok(Ok(())) => {
+            let committed = finished
+                .iter()
+                .filter_map(|(_, outcome)| outcome.as_ref()?.as_ref().ok())
+                .sum();
+            maintenance.ingested(committed);
             for (reply, outcome) in finished {
                 reply(outcome.expect("every committed group member has an outcome"));
             }
@@ -140,14 +144,13 @@ fn execute(
     connection: &mut Connection,
     receiver: &Receiver<WriteJob>,
     pending: &mut Option<WriteJob>,
-    finish: &mut GroupFinish,
     observer: &WriteObserver,
     limits: GroupLimits,
     members: &mut Vec<Member>,
 ) -> Result<()> {
     let started = Instant::now();
     let mut transaction = connection.transaction()?;
-    let observation = observer.shared_ingest_retention_transaction();
+    let observation = observer.ingest_group_transaction();
     let mut totals = IngestWeight::ZERO;
 
     loop {
@@ -178,9 +181,6 @@ fn execute(
     }
 
     observer.group_formed(members.len());
-    let retention = observer.retention();
-    finish(&transaction)?;
-    retention.succeeded();
     transaction.commit()?;
     observation.committed();
     Ok(())

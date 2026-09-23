@@ -49,6 +49,7 @@ impl IngestHealthTracker {
             rejected_records: totals.records_rejected,
             failed_requests: totals.failed_requests(),
             queued_records: sample.queued_records,
+            retention_failures: sample.maintenance_failures,
             last_failure,
         };
         self.previous = Some(sample);
@@ -115,6 +116,7 @@ mod tests {
                 rejected_records: 2,
                 failed_requests: 1,
                 queued_records: 7,
+                retention_failures: 0,
                 last_failure: Some(RecentIngestFailure {
                     label: "unavailable grpc/logs".to_string(),
                     age: Duration::from_secs(5),

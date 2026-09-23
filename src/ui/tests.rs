@@ -543,6 +543,7 @@ fn global_status_owns_service_and_time_key_hints() {
         rejected_records: 0,
         failed_requests: 0,
         queued_records: 0,
+        retention_failures: 0,
         last_failure: None,
     });
     assert!(global_status_text(&snapshot, &state).ends_with(" | ingest idle"));
@@ -556,6 +557,7 @@ fn ingest_health_text_shows_only_nonzero_signals() {
         rejected_records: 3,
         failed_requests: 2,
         queued_records: 250,
+        retention_failures: 1,
         last_failure: Some(RecentIngestFailure {
             label: "unavailable grpc/logs".to_string(),
             age: std::time::Duration::from_secs(4),
@@ -563,7 +565,7 @@ fn ingest_health_text_shows_only_nonzero_signals() {
     };
     assert_eq!(
         ingest_health_text(&busy),
-        "ingest 12.3k/s ack<=25ms queued=250 rejected=3 failed=2 last: unavailable grpc/logs 4s ago"
+        "ingest 12.3k/s ack<=25ms queued=250 rejected=3 failed=2 retention_failed=1 last: unavailable grpc/logs 4s ago"
     );
 
     let steady = IngestHealthView {
@@ -572,6 +574,7 @@ fn ingest_health_text_shows_only_nonzero_signals() {
         rejected_records: 0,
         failed_requests: 0,
         queued_records: 0,
+        retention_failures: 0,
         last_failure: None,
     };
     assert_eq!(ingest_health_text(&steady), "ingest 42/s ack<=5ms");

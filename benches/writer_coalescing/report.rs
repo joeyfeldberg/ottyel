@@ -9,7 +9,7 @@ use serde::Serialize;
 
 use crate::{
     bench_config::{RunConfig, Sampling, Scale},
-    contract::{CandidatePolicy, GateContract, VersionedName, fixture_generator, report_schema},
+    contract::{GateContract, VersionedName, WriterPolicies, fixture_generator, report_schema},
     data::SeededStore,
     measurement::Measurements,
     runner::{EXPORTS_PER_BURST, RECORDS_PER_BURST, RECORDS_PER_EXPORT},
@@ -23,8 +23,7 @@ pub(crate) struct BenchmarkReport {
     environment: Environment,
     fixture: Fixture,
     sampling: Sampling,
-    current_policy: CurrentPolicy,
-    candidate_policy: CandidatePolicy,
+    writer_policies: WriterPolicies,
     acknowledgement_semantics: AcknowledgementSemantics,
     counter_semantics: CounterSemantics,
     predeclared_gate: PredeclaredGate,
@@ -60,15 +59,6 @@ struct Fixture {
     timestamps_are_future_and_unexpired: bool,
     retention_may_trim: bool,
     request_preparation_timed: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct CurrentPolicy {
-    name: &'static str,
-    adjacent_collection: &'static str,
-    intentional_wait_ns: u64,
-    maximum_exports_per_group: usize,
-    retention_boundary: &'static str,
 }
 
 #[derive(Debug, Serialize)]
@@ -117,13 +107,6 @@ struct PredeclaredGate {
     required_clean_reference_runs: usize,
     comparison_requirements: &'static str,
     structural_requirements: &'static str,
-    required_total_sqlite_commit_reduction_percent: f64,
-    required_retention_invocation_reduction_percent: f64,
-    minimum_median_retention_elapsed_reduction_percent: f64,
-    minimum_median_records_per_second_ratio: f64,
-    maximum_burst_p95_ack_regression_percent: f64,
-    maximum_low_rate_p95_ack_regression_percent: f64,
-    maximum_low_rate_p95_ack_regression_floor_ns: u64,
     current_measurement_structural_assertions_passed: bool,
     reference_eligibility: ReferenceEligibility,
     comparison: ComparisonEvaluation,
@@ -155,24 +138,17 @@ impl BenchmarkReport {
                 request_preparation_timed: false,
             },
             sampling: config.profile.sampling(),
-            current_policy: CurrentPolicy {
-                name: "opportunistic_adjacent_otlp",
-                adjacent_collection: "already_ready_try_recv_only",
-                intentional_wait_ns: 0,
-                maximum_exports_per_group: 4,
-                retention_boundary: "inside_shared_ingest_transaction_before_commit",
-            },
-            candidate_policy: CandidatePolicy::pinned(),
+            writer_policies: WriterPolicies::pinned(),
             acknowledgement_semantics: AcknowledgementSemantics {
-                completion_acknowledges: "the shared ingest-plus-retention COMMIT and writer receipt delivery",
+                completion_acknowledges: "the ingest group COMMIT and writer receipt delivery; retention runs in separate maintenance transactions",
                 sqlite_journal_mode: "WAL",
                 sqlite_synchronous: "NORMAL",
                 power_loss_fsync_claim: false,
                 throughput_definition: "records or exports divided by writer-release-to-last-receipt burst makespan",
             },
             counter_semantics: CounterSemantics {
-                transaction_kinds: "ingest_only, retention_only, and shared_ingest_retention are mutually exclusive classifications for each SQLite transaction",
-                sqlite_transaction_totals: "total SQLite transaction counters equal the sum of the three transaction-kind counters and never double-count a shared commit",
+                transaction_kinds: "every SQLite transaction is exactly one ingest group or one maintenance unit",
+                sqlite_transaction_totals: "total SQLite transaction counters equal the ingest group plus maintenance counters",
                 transaction_not_committed: "the transaction guard ended without observing a successful COMMIT; this counter does not prove that rollback succeeded",
             },
             predeclared_gate: PredeclaredGate::candidate(
@@ -300,14 +276,7 @@ impl PredeclaredGate {
             evaluation: "candidate_capture",
             required_clean_reference_runs: 2,
             comparison_requirements: "two consecutive clean release before/after comparisons on the same named machine, storage class, and Rust toolchain",
-            structural_requirements: "per four-export burst baseline: ingest_only_committed=4, retention_only_committed=4, shared_ingest_retention_committed=0, sqlite_transactions_committed=8, retention_invocations=4; candidate: ingest_only_committed=0, retention_only_committed=0, shared_ingest_retention_committed=1, sqlite_transactions_committed=1, retention_invocations=1, group_size_4=1; all burst transaction not_committed counters=0, all receipts acknowledge 250 records, and exactly 1000 unique spans persist; candidate low-rate per export: group_size_1=1, ingest_only_committed=0, retention_only_committed=0, shared_ingest_retention_committed=1, sqlite_transactions_committed=1, retention_invocations=1, and every transaction not_committed counter=0",
-            required_total_sqlite_commit_reduction_percent: 87.5,
-            required_retention_invocation_reduction_percent: 75.0,
-            minimum_median_retention_elapsed_reduction_percent: 50.0,
-            minimum_median_records_per_second_ratio: 1.25,
-            maximum_burst_p95_ack_regression_percent: 5.0,
-            maximum_low_rate_p95_ack_regression_percent: 10.0,
-            maximum_low_rate_p95_ack_regression_floor_ns: 1_000_000,
+            structural_requirements: "per sample: one ingest group of all submitted exports commits exactly once; interleaved maintenance units commit in their own transactions with no failures; every transaction not_committed counter is 0; all receipts acknowledge every record; and persisted span rows match exactly",
             current_measurement_structural_assertions_passed: structural_assertions_passed,
             reference_eligibility,
             comparison: ComparisonEvaluation {
@@ -371,40 +340,11 @@ mod tests {
         assert_eq!(
             serde_json::to_value(gate).unwrap(),
             serde_json::json!({
-                "contract": {
-                    "identity": {
-                        "name": "writer_coalescing_acceptance",
-                        "version": 1
-                    },
-                    "applicability": "schema_v1_same_fixture_generator_clean_reference_before_after_only",
-                    "metric_paths": {
-                        "burst_sqlite_transactions_committed": "measurements.burst.counters.sqlite_transactions_committed",
-                        "burst_retention_invocations": "measurements.burst.counters.retention_invocations",
-                        "burst_ack_p95_ns": "measurements.burst.release_to_completion_ack.p95_ns",
-                        "low_rate_ack_p95_ns": "measurements.low_rate.submission_attempt_to_completion_ack.p95_ns",
-                        "burst_records_per_second_p50": "measurements.burst.records_per_second.p50",
-                        "burst_retention_elapsed_p50_ns": "measurements.burst.retention_elapsed_per_burst.p50_ns"
-                    },
-                    "formulas": {
-                        "total_sqlite_commit_reduction_percent": "(baseline_total_sqlite_committed - candidate_total_sqlite_committed) / baseline_total_sqlite_committed * 100",
-                        "retention_invocation_reduction_percent": "(baseline_retention_invocations - candidate_retention_invocations) / baseline_retention_invocations * 100",
-                        "median_records_per_second_ratio": "candidate_burst_records_per_second_p50 / baseline_burst_records_per_second_p50",
-                        "median_retention_elapsed_reduction_percent": "(baseline_retention_elapsed_p50_ns - candidate_retention_elapsed_p50_ns) / baseline_retention_elapsed_p50_ns * 100",
-                        "burst_ack_regression_percent": "(candidate_burst_ack_p95_ns - baseline_burst_ack_p95_ns) / baseline_burst_ack_p95_ns * 100",
-                        "low_rate_allowed_increase_ns": "max(1000000, baseline_low_rate_ack_p95_ns * 0.10)"
-                    }
-                },
+                "contract": serde_json::to_value(super::GateContract::pinned()).unwrap(),
                 "evaluation": "candidate_capture",
                 "required_clean_reference_runs": 2,
                 "comparison_requirements": "two consecutive clean release before/after comparisons on the same named machine, storage class, and Rust toolchain",
-                "structural_requirements": "per four-export burst baseline: ingest_only_committed=4, retention_only_committed=4, shared_ingest_retention_committed=0, sqlite_transactions_committed=8, retention_invocations=4; candidate: ingest_only_committed=0, retention_only_committed=0, shared_ingest_retention_committed=1, sqlite_transactions_committed=1, retention_invocations=1, group_size_4=1; all burst transaction not_committed counters=0, all receipts acknowledge 250 records, and exactly 1000 unique spans persist; candidate low-rate per export: group_size_1=1, ingest_only_committed=0, retention_only_committed=0, shared_ingest_retention_committed=1, sqlite_transactions_committed=1, retention_invocations=1, and every transaction not_committed counter=0",
-                "required_total_sqlite_commit_reduction_percent": 87.5,
-                "required_retention_invocation_reduction_percent": 75.0,
-                "minimum_median_retention_elapsed_reduction_percent": 50.0,
-                "minimum_median_records_per_second_ratio": 1.25,
-                "maximum_burst_p95_ack_regression_percent": 5.0,
-                "maximum_low_rate_p95_ack_regression_percent": 10.0,
-                "maximum_low_rate_p95_ack_regression_floor_ns": 1000000,
+                "structural_requirements": "per sample: one ingest group of all submitted exports commits exactly once; interleaved maintenance units commit in their own transactions with no failures; every transaction not_committed counter is 0; all receipts acknowledge every record; and persisted span rows match exactly",
                 "current_measurement_structural_assertions_passed": true,
                 "reference_eligibility": {
                     "profile_is_reference": false,

@@ -210,6 +210,9 @@ pub(crate) fn ingest_health_text(health: &IngestHealthView) -> String {
     if health.failed_requests > 0 {
         text.push_str(&format!(" failed={}", health.failed_requests));
     }
+    if health.retention_failures > 0 {
+        text.push_str(&format!(" retention_failed={}", health.retention_failures));
+    }
     if let Some(failure) = &health.last_failure {
         text.push_str(&format!(
             " last: {} {}s ago",

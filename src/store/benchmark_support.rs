@@ -17,6 +17,23 @@ pub use super::write_observer::BenchmarkSnapshot;
 
 const PARK_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// The library's scheduled-retention parameters, so the benchmark can pin them.
+#[doc(hidden)]
+pub struct RetentionParameters {
+    pub pass_interval: Duration,
+    pub rows_per_unit: usize,
+    pub traces_per_unit: usize,
+}
+
+#[doc(hidden)]
+pub fn retention_policy() -> RetentionParameters {
+    RetentionParameters {
+        pass_interval: super::retention::PASS_INTERVAL,
+        rows_per_unit: super::retention::ROWS_PER_UNIT,
+        traces_per_unit: super::retention::TRACES_PER_UNIT,
+    }
+}
+
 /// A trace request measured and ready for immediate writer admission.
 #[doc(hidden)]
 pub struct PreparedTraceExport {
@@ -113,8 +130,10 @@ impl Store {
     /// Returns a fixed-size snapshot of feature-gated writer observations.
     #[doc(hidden)]
     pub fn writer_benchmark_snapshot(&self) -> Result<BenchmarkSnapshot> {
+        // Snapshot on the owner thread so no maintenance unit is ever half-counted.
         let writer = self.write_access()?;
-        Ok(writer.observer().snapshot())
+        let observer = writer.observer();
+        writer.execute(move |_| Ok(observer.snapshot()))
     }
 }
 
@@ -139,12 +158,11 @@ mod tests {
         let prepared: [PreparedTraceExport; EXPORTS] = std::array::from_fn(|export| {
             Store::prepare_trace_export_for_benchmark(trace_request(export))
         });
-        let parked = store.park_writer_for_benchmark().unwrap();
         let before = store.writer_benchmark_snapshot().unwrap();
+        let parked = store.park_writer_for_benchmark().unwrap();
         let receipts =
             prepared.map(|request| store.try_ingest_traces_for_benchmark(request).unwrap());
 
-        assert_eq!(store.writer_benchmark_snapshot().unwrap(), before);
         parked.release().unwrap();
         let accepted = futures::executor::block_on(futures::future::join_all(
             receipts.into_iter().map(|receipt| receipt.wait()),
@@ -166,38 +184,39 @@ mod tests {
             0,
             "no group may exceed four exports"
         );
-        for (committed, expected) in [
-            (
-                after.shared_ingest_retention_transactions_committed
-                    - before.shared_ingest_retention_transactions_committed,
-                groups,
+        let delta = |after: u64, before: u64| after - before;
+        let ingest_groups = delta(
+            after.ingest_group_transactions_committed,
+            before.ingest_group_transactions_committed,
+        );
+        let maintenance = delta(
+            after.maintenance_transactions_committed,
+            before.maintenance_transactions_committed,
+        );
+        assert_eq!(ingest_groups, groups);
+        // Scheduled retention may run units between groups; each is its own transaction.
+        assert_eq!(
+            delta(
+                after.sqlite_transactions_committed,
+                before.sqlite_transactions_committed
             ),
-            (
-                after.sqlite_transactions_committed - before.sqlite_transactions_committed,
-                groups,
+            ingest_groups + maintenance
+        );
+        assert_eq!(
+            delta(after.maintenance_units, before.maintenance_units),
+            maintenance
+        );
+        assert_eq!(
+            delta(
+                after.sqlite_transactions_not_committed,
+                before.sqlite_transactions_not_committed
             ),
-            (
-                after.retention_invocations - before.retention_invocations,
-                groups,
-            ),
-            (
-                after.ingest_only_transactions_committed
-                    - before.ingest_only_transactions_committed,
-                0,
-            ),
-            (
-                after.retention_only_transactions_committed
-                    - before.retention_only_transactions_committed,
-                0,
-            ),
-            (
-                after.sqlite_transactions_not_committed - before.sqlite_transactions_not_committed,
-                0,
-            ),
-            (after.retention_failures - before.retention_failures, 0),
-        ] {
-            assert_eq!(committed, expected);
-        }
+            0
+        );
+        assert_eq!(
+            delta(after.maintenance_failures, before.maintenance_failures),
+            0
+        );
     }
 
     fn trace_request(export: usize) -> ExportTraceServiceRequest {

@@ -30,6 +30,7 @@ fn time_retention_keeps_complete_mixed_age_traces_and_old_events() {
             test_span(trace_byte, 0x22, Some(0x11), now - 30_000_000, now, false),
         ]))
         .unwrap();
+    store.run_retention_pass().unwrap();
 
     let trace_id = hex_id(trace_byte, 16);
     let detail = store.trace_detail(&trace_id).unwrap();
@@ -77,6 +78,7 @@ fn time_retention_deletes_wholly_expired_traces_and_dependents() {
             ),
         ]))
         .unwrap();
+    store.run_retention_pass().unwrap();
 
     assert!(
         store
@@ -136,6 +138,7 @@ fn max_span_retention_evicts_oldest_whole_trace_and_cleans_dependents() {
             ),
         ]))
         .unwrap();
+    store.run_retention_pass().unwrap();
 
     let old_trace_id = hex_id(old_trace_byte, 16);
     let new_trace_id = hex_id(new_trace_byte, 16);
@@ -183,6 +186,7 @@ fn retention_cleanup_correlates_dependents_by_trace_and_span() {
             false,
         )]))
         .unwrap();
+    store.run_retention_pass().unwrap();
 
     // The v1 schema keys spans globally by span_id. Until that migration lands,
     // retention must still remove projections left under the displaced trace ID.

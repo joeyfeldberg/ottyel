@@ -10,7 +10,7 @@ use rusqlite::{Connection, OpenFlags};
 
 use crate::{
     bench_config::RunConfig,
-    counters::{snapshot_delta, validate_candidate, validate_persisted_row_count},
+    counters::{snapshot_delta, validate_persisted_row_count, validate_sample},
     data::{SeededStore, acknowledgement_request},
     measurement::{
         BurstMeasurement, CounterTotals, LowRateMeasurement, Measurements, RateDistribution,
@@ -61,7 +61,7 @@ pub(crate) fn run(seeded: &SeededStore, config: &RunConfig) -> Result<Measuremen
         Vec::with_capacity(sampling.burst_samples * EXPORTS_PER_BURST);
     let mut record_rates = Vec::with_capacity(sampling.burst_samples);
     let mut export_rates = Vec::with_capacity(sampling.burst_samples);
-    let mut retention_per_burst = Vec::with_capacity(sampling.burst_samples);
+    let mut maintenance_per_burst = Vec::with_capacity(sampling.burst_samples);
     let mut burst_counters = CounterTotals::default();
 
     for _ in 0..sampling.burst_samples {
@@ -77,7 +77,7 @@ pub(crate) fn run(seeded: &SeededStore, config: &RunConfig) -> Result<Measuremen
         release_acknowledgements.extend(sample.release_ack_ns);
         record_rates.push(sample.records_per_second);
         export_rates.push(sample.exports_per_second);
-        retention_per_burst.push(sample.counters.retention_elapsed_ns);
+        maintenance_per_burst.push(sample.counters.maintenance_elapsed_ns);
         burst_counters.add(&sample.counters);
     }
 
@@ -93,7 +93,7 @@ pub(crate) fn run(seeded: &SeededStore, config: &RunConfig) -> Result<Measuremen
     }
 
     let mut low_rate_acknowledgements = Vec::with_capacity(sampling.low_rate_samples);
-    let mut low_rate_retention = Vec::with_capacity(sampling.low_rate_samples);
+    let mut low_rate_maintenance = Vec::with_capacity(sampling.low_rate_samples);
     let mut low_rate_counters = CounterTotals::default();
     for _ in 0..sampling.low_rate_samples {
         expected_span_rows += 1;
@@ -104,7 +104,7 @@ pub(crate) fn run(seeded: &SeededStore, config: &RunConfig) -> Result<Measuremen
             expected_span_rows,
         )?;
         low_rate_acknowledgements.push(sample.acknowledgement_ns);
-        low_rate_retention.push(sample.counters.retention_elapsed_ns);
+        low_rate_maintenance.push(sample.counters.maintenance_elapsed_ns);
         low_rate_counters.add(&sample.counters);
     }
 
@@ -123,14 +123,14 @@ pub(crate) fn run(seeded: &SeededStore, config: &RunConfig) -> Result<Measuremen
             release_to_completion_ack: Distribution::from_samples(release_acknowledgements)?,
             records_per_second: RateDistribution::from_samples(record_rates)?,
             exports_per_second: RateDistribution::from_samples(export_rates)?,
-            retention_elapsed_per_burst: Distribution::from_samples(retention_per_burst)?,
+            maintenance_elapsed_per_burst: Distribution::from_samples(maintenance_per_burst)?,
             counters: burst_counters,
         },
         low_rate: LowRateMeasurement {
             submission_attempt_to_completion_ack: Distribution::from_samples(
                 low_rate_acknowledgements,
             )?,
-            retention_elapsed_per_export: Distribution::from_samples(low_rate_retention)?,
+            maintenance_elapsed_per_export: Distribution::from_samples(low_rate_maintenance)?,
             counters: low_rate_counters,
         },
     })
@@ -150,8 +150,9 @@ fn run_burst(
             batch,
         ))
     });
-    let parked = store.park_writer_for_benchmark()?;
+    // The snapshot runs on the writer, so it must precede parking it.
     let before = store.writer_benchmark_snapshot()?;
+    let parked = store.park_writer_for_benchmark()?;
     let mut admitted = Vec::with_capacity(EXPORTS_PER_BURST);
     for request in prepared {
         let started = Instant::now();
@@ -182,7 +183,7 @@ fn run_burst(
 
     let after = store.writer_benchmark_snapshot()?;
     let counters = snapshot_delta(before, after)?;
-    validate_candidate(&counters, EXPORTS_PER_BURST as u64)?;
+    validate_sample(&counters, EXPORTS_PER_BURST as u64)?;
     validate_persisted_row_count(span_count(database_path)?, expected_span_rows, "burst")?;
     let seconds = makespan.as_secs_f64().max(f64::MIN_POSITIVE);
     Ok(BurstSample {
@@ -226,7 +227,7 @@ fn run_low_rate(
 
     let after = store.writer_benchmark_snapshot()?;
     let counters = snapshot_delta(before, after)?;
-    validate_candidate(&counters, 1)?;
+    validate_sample(&counters, 1)?;
     validate_persisted_row_count(
         span_count(database_path)?,
         expected_span_rows,

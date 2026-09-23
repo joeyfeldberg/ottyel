@@ -6,7 +6,7 @@ use opentelemetry_proto::tonic::{
     },
     metrics::v1::{Metric, metric},
 };
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::domain::{
     LlmAttributes, attributes_to_map, extract_llm_attributes, extract_service_name,
@@ -82,6 +82,21 @@ impl Store {
                         .map(serde_json::to_string)
                         .transpose()
                         .map_err(|err| anyhow::anyhow!(err))?;
+
+                    // v1 keys spans by span_id alone, so a span can move to another trace.
+                    // Remove projections left under the trace it leaves.
+                    let displaced: Option<String> = conn
+                        .prepare_cached("SELECT trace_id FROM spans WHERE span_id = ?1")?
+                        .query_row([&span_id], |row| row.get(0))
+                        .optional()?;
+                    if let Some(previous) = displaced.filter(|previous| *previous != trace_id) {
+                        for table in ["span_events", "span_links", "llm_spans"] {
+                            conn.prepare_cached(&format!(
+                                "DELETE FROM {table} WHERE trace_id = ?1 AND span_id = ?2"
+                            ))?
+                            .execute(params![previous, span_id])?;
+                        }
+                    }
 
                     conn.execute(
                         r#"

@@ -201,6 +201,8 @@ pub struct IngestHealthView {
     pub rejected_records: u64,
     pub failed_requests: u64,
     pub queued_records: usize,
+    /// Failed retention units since the store opened; nonzero means the database may grow.
+    pub retention_failures: u64,
     pub last_failure: Option<RecentIngestFailure>,
 }
 

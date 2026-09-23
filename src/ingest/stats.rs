@@ -353,6 +353,8 @@ pub struct IngestHealth {
     /// Primary records admitted to the writer but not yet acknowledged.
     pub queued_records: usize,
     pub max_queued_records: usize,
+    /// Failed writer maintenance units, such as retention, since the store opened.
+    pub maintenance_failures: u64,
 }
 
 impl IngestHealth {
@@ -389,6 +391,7 @@ impl IngestHealth {
             max_in_flight_requests: 4,
             queued_records,
             max_queued_records: 40_000,
+            maintenance_failures: 0,
         }
     }
 }
@@ -438,6 +441,7 @@ impl IngestProbe {
             max_in_flight_requests: self.max_in_flight,
             queued_records: backlog.map_or(0, |backlog| backlog.primary_records),
             max_queued_records: backlog.map_or(0, |backlog| backlog.max_primary_records),
+            maintenance_failures: backlog.map_or(0, |backlog| backlog.maintenance_failures),
         }
     }
 }

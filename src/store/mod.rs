@@ -70,8 +70,11 @@ impl Store {
             hours: retention_hours,
             maximum_spans: max_spans,
         };
-        let finish_group = Box::new(move |conn: &Connection| retention::enforce(conn, retention));
-        let writer = WriterOwner::start(conn, writer_limits, finish_group)
+        let maintenance = Box::new(retention::RetentionMaintenance::new(
+            retention,
+            std::time::Instant::now(),
+        ));
+        let writer = WriterOwner::start(conn, writer_limits, maintenance)
             .with_context(|| format!("failed to start sqlite writer for {}", path.display()))?;
         let readers = ReaderPool::open(path).with_context(|| {
             format!("failed to initialize sqlite readers for {}", path.display())
@@ -116,6 +119,14 @@ impl Store {
             StoreAccess::ReadWrite { writer } => Some(writer.close_and_drain(deadline)),
             StoreAccess::ReadOnly => None,
         }
+    }
+
+    /// Runs one complete retention pass on the writer and waits for it. Retention otherwise
+    /// runs on its own schedule, so tests and benchmarks use this to observe its effects.
+    #[cfg(any(test, feature = "benchmark-support"))]
+    #[doc(hidden)]
+    pub fn run_retention_pass(&self) -> Result<()> {
+        self.write_access()?.flush_maintenance()
     }
 
     /// Returns queued and executing OTLP writer weight, or `None` for a read-only store.

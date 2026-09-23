@@ -1,11 +1,11 @@
 use std::{
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, AtomicUsize, Ordering},
+        atomic::{AtomicUsize, Ordering},
         mpsc,
     },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use anyhow::{Result, bail};
@@ -15,7 +15,7 @@ use tempfile::{TempDir, tempdir};
 use super::GroupLimits;
 use crate::store::{
     ingest_weight::IngestWeight,
-    writer::{AsyncWriteReceipt, GroupFinish, StoreWriteError, WriterOwner},
+    writer::{AsyncWriteReceipt, Maintenance, StoreWriteError, WriterOwner},
 };
 
 const WAIT: Duration = Duration::from_secs(2);
@@ -28,36 +28,54 @@ struct Harness {
     _directory: TempDir,
     path: std::path::PathBuf,
     owner: WriterOwner,
-    finishes: Arc<AtomicUsize>,
+    ingested: Arc<AtomicUsize>,
+}
+
+/// Never due; only records how many committed records each group reports.
+struct CountingMaintenance {
+    ingested: Arc<AtomicUsize>,
+}
+
+impl Maintenance for CountingMaintenance {
+    fn ingested(&mut self, records: usize) {
+        self.ingested.fetch_add(records, Ordering::SeqCst);
+    }
+
+    fn due_in(&self, _now: Instant) -> Duration {
+        Duration::MAX
+    }
+
+    fn force_pass(&mut self, _now: Instant) {}
+
+    fn in_pass(&self) -> bool {
+        false
+    }
+
+    fn run_unit(&mut self, _transaction: &Connection, _now: Instant) -> Result<()> {
+        Ok(())
+    }
+
+    fn failed(&mut self, _now: Instant) {}
 }
 
 impl Harness {
     fn new(limits: GroupLimits) -> Self {
-        let finishes = Arc::new(AtomicUsize::new(0));
-        let counted = finishes.clone();
-        Self::with_finish(
-            limits,
-            Box::new(move |_| {
-                counted.fetch_add(1, Ordering::SeqCst);
-                Ok(())
-            }),
-            finishes,
-        )
-    }
-
-    fn with_finish(limits: GroupLimits, finish: GroupFinish, finishes: Arc<AtomicUsize>) -> Self {
         let directory = tempdir().unwrap();
         let path = directory.path().join("group.db");
         let connection = Connection::open(&path).unwrap();
         connection
             .execute("CREATE TABLE writes (export INTEGER NOT NULL)", [])
             .unwrap();
-        let owner = WriterOwner::start_for_group_test(connection, limits, finish).unwrap();
+        let ingested = Arc::new(AtomicUsize::new(0));
+        let maintenance = Box::new(CountingMaintenance {
+            ingested: ingested.clone(),
+        });
+        let owner = WriterOwner::start_for_group_test(connection, limits, maintenance).unwrap();
         Self {
             _directory: directory,
             path,
             owner,
-            finishes,
+            ingested,
         }
     }
 
@@ -136,14 +154,14 @@ fn accepted(results: Vec<Result<usize>>) -> Vec<usize> {
 }
 
 #[test]
-fn ready_exports_share_one_transaction_and_one_finish() {
+fn ready_exports_share_one_transaction() {
     let harness = Harness::new(UNHURRIED);
     let release = harness.park();
     let receipts = (0..4).map(|export| harness.submit(export, 1, 1)).collect();
     release.send(()).unwrap();
 
     assert_eq!(accepted(wait_all(receipts)), vec![1; 4]);
-    assert_eq!(harness.finishes.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.ingested.load(Ordering::SeqCst), 4);
     assert_eq!(harness.group_sizes(), [0, 0, 0, 1, 0]);
     assert_eq!(harness.persisted(), vec![0, 1, 2, 3]);
     assert_eq!(harness.owner.reserved_weight_for_test(), IngestWeight::ZERO);
@@ -153,7 +171,7 @@ fn ready_exports_share_one_transaction_and_one_finish() {
 fn a_lone_export_is_a_group_of_one_without_waiting() {
     let harness = Harness::new(GroupLimits::PINNED);
     assert_eq!(accepted(wait_all(vec![harness.submit(7, 1, 1)])), vec![1]);
-    assert_eq!(harness.finishes.load(Ordering::SeqCst), 1);
+    assert_eq!(harness.ingested.load(Ordering::SeqCst), 1);
     assert_eq!(harness.group_sizes(), [1, 0, 0, 0, 0]);
 }
 
@@ -165,7 +183,7 @@ fn export_cap_starts_a_new_group() {
     release.send(()).unwrap();
 
     assert_eq!(accepted(wait_all(receipts)), vec![1; 5]);
-    assert_eq!(harness.finishes.load(Ordering::SeqCst), 2);
+    assert_eq!(harness.ingested.load(Ordering::SeqCst), 5);
     assert_eq!(harness.group_sizes(), [1, 0, 0, 1, 0]);
     assert_eq!(harness.persisted(), vec![0, 1, 2, 3, 4]);
 }
@@ -282,48 +300,10 @@ fn a_failed_export_rolls_back_only_its_own_writes() {
             .collect::<Vec<_>>(),
         vec![Ok(1), Err("projection failed".to_string()), Ok(1)]
     );
-    assert_eq!(harness.finishes.load(Ordering::SeqCst), 1);
+    // Only the two committed exports count toward the retention trigger.
+    assert_eq!(harness.ingested.load(Ordering::SeqCst), 2);
     assert_eq!(harness.group_sizes(), [0, 0, 1, 0, 0]);
     assert_eq!(harness.persisted(), vec![0, 2]);
-}
-
-#[test]
-fn finish_failure_rolls_back_the_whole_group_and_the_owner_continues() {
-    let failed_once = Arc::new(AtomicBool::new(false));
-    let fail = failed_once.clone();
-    let harness = Harness::with_finish(
-        UNHURRIED,
-        Box::new(move |_| {
-            if !fail.swap(true, Ordering::SeqCst) {
-                bail!("retention failed");
-            }
-            Ok(())
-        }),
-        Arc::new(AtomicUsize::new(0)),
-    );
-    let release = harness.park();
-    let receipts = vec![
-        harness.submit(0, 1, 1),
-        harness.submit_with(1, 1, 1, |_| bail!("projection failed")),
-    ];
-    release.send(()).unwrap();
-
-    let errors: Vec<_> = wait_all(receipts)
-        .into_iter()
-        .map(|result| result.unwrap_err().to_string())
-        .collect();
-    assert_eq!(
-        errors,
-        vec![
-            "coalesced OTLP transaction rolled back: retention failed".to_string(),
-            "projection failed".to_string(),
-        ]
-    );
-    assert!(harness.persisted().is_empty());
-    assert_eq!(harness.owner.observer().snapshot().retention_failures, 1);
-
-    assert_eq!(accepted(wait_all(vec![harness.submit(2, 1, 1)])), vec![1]);
-    assert_eq!(harness.persisted(), vec![2]);
 }
 
 #[test]
@@ -344,7 +324,7 @@ fn a_panicking_export_fails_the_group_closed() {
         ));
     }
     assert!(harness.persisted().is_empty());
-    assert_eq!(harness.finishes.load(Ordering::SeqCst), 0);
+    assert_eq!(harness.ingested.load(Ordering::SeqCst), 0);
     let later = harness
         .owner
         .try_execute_ingest_async(weight(1, 1), |_| Ok(1))
