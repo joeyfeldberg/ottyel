@@ -1,24 +1,24 @@
-┌Ottyel────────────────────────────────────────────────────────────────────────┐
-│ [1] Overview   [2] Trace Explorer   [3] Logs   [4] Metrics   [5] LLM Inspecto│
-└──────────────────────────────────────────────────────────────────────────────┘
- theme=ember | [t]ime=24h | [s]ervice=all | panes traces=6 logs=4 metrics=5 llm=
-┌Trace Tree [focus]────────────────────────────────────────────────────────────┐
-│019e2d0a6fb┌Help: Trace Tree──────────────────────────────────────┐           │
-│service=che│global                                                │           │
-│           │  tab / shift-tab  switch panes                       │           │
-│▾ Checkout │  : / ctrl-p       open command palette               │━━    1.29s│
-│      Authe│  /                global search                      │··  150.0ms│
-│      Reser│  g                cycle theme                        │··  430.0ms│
-│      Recom│  w                cycle layout preset                │━·  500.0ms│
-│      Charg│  = / -            grow or shrink focused split       │━━   89.0ms│
-│           │  s                cycle service filter               │           │
-│           │  t                cycle time window                  │           │
-└───────────│  ?                open/close help                    │───────────┘
-┌Span Detail│  H                toggle contextual hints            │───────────┐
-│Checkout re│  mouse            click to focus/select, wheel to    │           │
-│ids        └──────────────────────────────────────────────────────┘           │
-│trace_id 019e2d0a6fb7e5337b121ed7562519cb                                     │
-│span_id root                                                                  │
-│parent_span_id <root>                                                         │
-└──────────────────────────────────────────────────────────────────────────────┘
- help: esc/?/enter close                                                        
+ ◆ ottyel   1 Overview  2 Traces  3 Logs  4 Metrics  5 LLM                      
+╭ ▸ Trace ─────────────────────────────────────────────────────────────────────╮
+│ Checkout request   ERROR                                                     │
+│ service checkout-api   duration 1.29s   spans 8   errors 1   trace 019e2d0a6 │
+│                                                                              │
+│ ▾ Checkout╭ ▸ Help: Trace Tree ──────────────────────────────────╮━    1.29s │
+│       Auth│ global                                               │─  150.0ms │
+│       Rese│   tab / shift-tab  switch panes                      │─  430.0ms │
+│       Reco│   : / ctrl-p       open command palette              │─  500.0ms │
+│       Char│   /                global search                     │━   89.0ms │
+│           │   g                cycle theme                       │           │
+│           │   w                cycle layout preset               │           │
+│           │   = / -            grow or shrink focused split      │           │
+│           │   s                cycle service filter              │           │
+╰───────────│   t                cycle time window                 │───────────╯
+╭ Span ─────│   ?                open/close help                   │───────────╮
+│ Checkout r│   H                toggle contextual hints           │           │
+│ checkout-a│   mouse            click to focus/select, wheel to   │           │
+│           ╰──────────────────────────────────────────────────────╯           │
+│ started    2023-11-14 22:13:20.000                                           │
+│ duration   1.29s                                                             │
+│ trace id   019e2d0a6fb7e5337b121ed7562519cb                                  │
+╰──────────────────────────────────────────────────────────────────────────────╯
+  HELP   esc close                                                              

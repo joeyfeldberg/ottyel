@@ -8,21 +8,45 @@ fn split_percent(percent: u16) -> [Constraint; 2] {
     ]
 }
 
-pub(crate) fn root_sections(root: Rect) -> [Rect; 4] {
+/// The one-row header, the body, and the one-row footer.
+pub(crate) fn root_sections(root: Rect) -> [Rect; 3] {
     let split = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Length(3),
             Constraint::Length(1),
             Constraint::Min(10),
             Constraint::Length(1),
         ])
         .split(root);
-    [split[0], split[1], split[2], split[3]]
+    [split[0], split[1], split[2]]
 }
 
 pub(crate) fn body_area(root: Rect) -> Rect {
-    root_sections(root)[2]
+    root_sections(root)[1]
+}
+
+/// The brand chip at the left of the header.
+pub(crate) const BRAND: &str = " ◆ ottyel ";
+
+/// The header column span of each tab, shared by rendering and mouse hit-testing.
+pub(crate) fn header_tabs(header: Rect) -> Vec<(super::Tab, u16, u16)> {
+    let mut x = header.x.saturating_add(BRAND.chars().count() as u16 + 1);
+    let right = header.x.saturating_add(header.width);
+    let mut tabs = Vec::new();
+    for (index, tab) in super::Tab::ALL.into_iter().enumerate() {
+        let width = tab_label(index, tab).chars().count() as u16;
+        let end = x.saturating_add(width);
+        if end > right {
+            break;
+        }
+        tabs.push((tab, x, end));
+        x = end;
+    }
+    tabs
+}
+
+pub(crate) fn tab_label(index: usize, tab: super::Tab) -> String {
+    format!(" {} {} ", index + 1, tab.label())
 }
 
 pub(crate) fn contains(area: Rect, column: u16, row: u16) -> bool {
@@ -116,8 +140,9 @@ pub(crate) fn detail_viewport_height(area: Rect) -> usize {
     area.height.saturating_sub(2) as usize
 }
 
+/// Inner text width: two border columns plus one column of padding on each side.
 pub(crate) fn detail_viewport_width(area: Rect) -> usize {
-    area.width.saturating_sub(2) as usize
+    area.width.saturating_sub(4) as usize
 }
 
 pub(crate) fn table_viewport_height(area: Rect) -> usize {

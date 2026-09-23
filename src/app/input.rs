@@ -306,10 +306,10 @@ pub(super) fn sync_selection(state: &mut UiState, snapshot: &DashboardSnapshot) 
     }
     state.selected_metric = state
         .selected_metric
-        .min(snapshot.metrics.len().saturating_sub(1));
+        .min(crate::ui::metric_series_count(snapshot).saturating_sub(1));
     state.metric_feed_scroll = state
         .metric_feed_scroll
-        .min(snapshot.metrics.len().saturating_sub(1));
+        .min(crate::ui::metric_series_count(snapshot).saturating_sub(1));
     state.selected_llm = state.selected_llm.min(snapshot.llm.len().saturating_sub(1));
     state.llm_feed_scroll = state
         .llm_feed_scroll
@@ -356,7 +356,7 @@ fn handle_left_click(
     state: &mut UiState,
     snapshot: &DashboardSnapshot,
 ) -> InputOutcome {
-    let [tabs_area, _, body, _] = crate::ui::geometry::root_sections(root);
+    let [tabs_area, body, _] = crate::ui::geometry::root_sections(root);
     if crate::ui::geometry::contains(tabs_area, column, row) {
         click_tab(column, tabs_area, state);
         return InputOutcome::None;
@@ -374,36 +374,12 @@ fn handle_left_click(
     }
 }
 
-fn click_tab(column: u16, tabs_area: Rect, state: &mut UiState) {
-    let inner_x = tabs_area.x.saturating_add(1);
-    let inner_right = tabs_area
-        .x
-        .saturating_add(tabs_area.width)
-        .saturating_sub(1);
-    if tabs_area.width <= 2 || column < inner_x || column >= inner_right {
-        return;
-    }
-
-    let mut x = inner_x;
-    for (index, tab) in Tab::ALL.iter().enumerate() {
-        let title_width = u16::try_from(tab.title().chars().count()).unwrap_or(u16::MAX);
-        let tab_start = x;
-        let tab_end = x
-            .saturating_add(1)
-            .saturating_add(title_width)
-            .saturating_add(1);
-        if column >= tab_start && column < tab_end {
-            state.active_tab = index;
-            break;
-        }
-
-        x = tab_end;
-        if index + 1 < Tab::ALL.len() {
-            x = x.saturating_add(1);
-        }
-        if x >= inner_right {
-            break;
-        }
+fn click_tab(column: u16, header: Rect, state: &mut UiState) {
+    if let Some((tab, _, _)) = crate::ui::geometry::header_tabs(header)
+        .into_iter()
+        .find(|(_, start, end)| column >= *start && column < *end)
+    {
+        state.active_tab = tab.index();
     }
 }
 
@@ -524,7 +500,7 @@ fn handle_metrics_click(
     if let Some(index) = table_row_at(
         feed_area,
         row,
-        snapshot.metrics.len(),
+        crate::ui::metric_series_count(snapshot),
         state.metric_feed_scroll,
     ) {
         state.selected_metric = index;
@@ -663,7 +639,7 @@ fn handle_metrics_scroll(
         state.metric_feed_follow_selected = false;
         state.metric_feed_scroll = crate::ui::geometry::scroll_window_offset(
             state.metric_feed_scroll,
-            snapshot.metrics.len(),
+            crate::ui::metric_series_count(snapshot),
             crate::ui::geometry::table_viewport_height(feed_area),
             delta,
         );
@@ -783,7 +759,11 @@ fn move_selection(delta: isize, state: &mut UiState, snapshot: &DashboardSnapsho
         Tab::Metrics => match state.metrics_focus {
             PaneFocus::Primary => {
                 let previous = state.selected_metric;
-                move_index(&mut state.selected_metric, snapshot.metrics.len(), delta);
+                move_index(
+                    &mut state.selected_metric,
+                    crate::ui::metric_series_count(snapshot),
+                    delta,
+                );
                 if state.selected_metric != previous {
                     state.metric_feed_follow_selected = true;
                     state.metric_detail_scroll = 0;
@@ -1355,7 +1335,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 4,
-                row: 6,
+                row: 3,
                 modifiers: KeyModifiers::empty(),
             },
             Rect::new(0, 0, 120, 40),
@@ -1416,7 +1396,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: 4,
-                row: 7,
+                row: 4,
                 modifiers: KeyModifiers::empty(),
             },
             Rect::new(0, 0, 120, 40),
@@ -1452,7 +1432,7 @@ mod tests {
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
                 column: metrics_column,
-                row: 1,
+                row: 0,
                 modifiers: KeyModifiers::empty(),
             },
             Rect::new(0, 0, 120, 40),
@@ -1464,21 +1444,12 @@ mod tests {
     }
 
     fn tab_click_column(tab: Tab, root: Rect) -> u16 {
-        let tabs_area = crate::ui::geometry::root_sections(root)[0];
-        let inner_x = tabs_area.x.saturating_add(1);
-        let mut x = inner_x;
-
-        for current in Tab::ALL {
-            let title_width = u16::try_from(current.title().chars().count()).unwrap_or(u16::MAX);
-            let tab_width = title_width.saturating_add(2);
-            if current == tab {
-                return x.saturating_add(tab_width / 2);
-            }
-
-            x = x.saturating_add(tab_width).saturating_add(1);
-        }
-
-        inner_x
+        let header = crate::ui::geometry::root_sections(root)[0];
+        let (_, start, end) = crate::ui::geometry::header_tabs(header)
+            .into_iter()
+            .find(|(candidate, _, _)| *candidate == tab)
+            .expect("every tab fits a test-sized header");
+        start + (end - start) / 2
     }
 
     #[test]
@@ -2285,8 +2256,8 @@ mod tests {
         handle_mouse(
             MouseEvent {
                 kind: MouseEventKind::Down(MouseButton::Left),
-                column: 1,
-                row: 8,
+                column: 2,
+                row: 5,
                 modifiers: KeyModifiers::empty(),
             },
             Rect::new(0, 0, 120, 40),

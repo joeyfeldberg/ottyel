@@ -136,7 +136,7 @@ fn snapshot_path(name: &str) -> std::path::PathBuf {
         .join(format!("{name}.snap"))
 }
 
-fn rendered_screen(width: u16, height: u16, mut state: UiState) -> String {
+fn rendered_buffer(width: u16, height: u16, mut state: UiState) -> Buffer {
     let snapshot = testing::dashboard_snapshot();
     let mut cache = RenderCache::default();
     let root = Rect::new(0, 0, width, height);
@@ -150,7 +150,113 @@ fn rendered_screen(width: u16, height: u16, mut state: UiState) -> String {
         .draw(|frame| render(frame, &snapshot, &state, &cache))
         .expect("test terminal should render");
 
-    buffer_text(terminal.backend().buffer())
+    terminal.backend().buffer().clone()
+}
+
+fn rendered_screen(width: u16, height: u16, state: UiState) -> String {
+    buffer_text(&rendered_buffer(width, height, state))
+}
+
+/// Writes every snapshot screen as colored HTML to `target/ui-preview` for visual review:
+/// `cargo test ui::snapshot_tests::write_color_previews -- --ignored`.
+#[test]
+#[ignore = "writes review artifacts; run explicitly"]
+fn write_color_previews() {
+    let screens = [
+        ("overview", Tab::Overview, 120, 40, UiState::default()),
+        ("traces", Tab::Traces, 120, 40, UiState::default()),
+        (
+            "trace_detail",
+            Tab::Traces,
+            120,
+            40,
+            UiState {
+                trace_view_mode: TraceViewMode::Detail,
+                trace_focus: TraceFocus::TraceTree,
+                selected_trace_span: 1,
+                ..UiState::default()
+            },
+        ),
+        (
+            "logs",
+            Tab::Logs,
+            120,
+            40,
+            UiState {
+                selected_log: 1,
+                ..UiState::default()
+            },
+        ),
+        ("metrics", Tab::Metrics, 120, 40, UiState::default()),
+        (
+            "llm",
+            Tab::Llm,
+            160,
+            45,
+            UiState {
+                llm_focus: LlmFocus::Detail,
+                ..UiState::default()
+            },
+        ),
+    ];
+    let directory = Path::new(env!("CARGO_MANIFEST_DIR")).join("target/ui-preview");
+    fs::create_dir_all(&directory).unwrap();
+    let mut index =
+        String::from("<html><body style='background:#111;color:#ccc;font-family:sans-serif'>");
+    for (name, tab, width, height, state) in screens {
+        let buffer = rendered_buffer(
+            width,
+            height,
+            UiState {
+                active_tab: tab.index(),
+                theme: Theme::Ember,
+                ..state
+            },
+        );
+        let screen = buffer_html(&buffer);
+        fs::write(
+            directory.join(format!("{name}.html")),
+            format!("<html><body style='margin:0;background:#100c0a'>{screen}</body></html>"),
+        )
+        .unwrap();
+        index.push_str(&format!("<h3>{name}</h3>{screen}"));
+    }
+    index.push_str("</body></html>");
+    fs::write(directory.join("index.html"), index).unwrap();
+}
+
+fn buffer_html(buffer: &Buffer) -> String {
+    use ratatui::style::{Color, Modifier};
+    let css = |color: Color, fallback: &str| match color {
+        Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
+        _ => fallback.to_string(),
+    };
+    let mut html = String::from(
+        "<pre style='font-family:Menlo,monospace;font-size:13px;line-height:1.25;display:inline-block;margin:0'>",
+    );
+    for row in buffer.content.chunks(buffer.area.width as usize) {
+        for cell in row {
+            let bold = if cell.modifier.contains(Modifier::BOLD) {
+                "font-weight:bold;"
+            } else {
+                ""
+            };
+            let symbol = match cell.symbol() {
+                "<" => "&lt;",
+                ">" => "&gt;",
+                "&" => "&amp;",
+                other => other,
+            };
+            html.push_str(&format!(
+                "<span style='color:{};background:{};{bold}'>{symbol}</span>",
+                css(cell.fg, "#ddd"),
+                css(cell.bg, "#100c0a")
+            ));
+        }
+        html.push('\n');
+    }
+    html.push_str("</pre>");
+    html
 }
 
 fn buffer_text(buffer: &Buffer) -> String {

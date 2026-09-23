@@ -1,11 +1,15 @@
 mod chrome;
 mod details;
+pub(crate) mod format;
 pub(crate) mod geometry;
+mod metrics;
 mod overview;
 mod panes;
 mod state;
+pub(crate) mod style;
 mod traces;
 
+pub use metrics::metric_series_count;
 pub use state::{
     IngestHealthView, LayoutPreset, LlmFocus, LlmSortMode, Palette, PaneFocus, RecentIngestFailure,
     Tab, TraceFocus, TraceViewMode, UiState,
@@ -16,13 +20,7 @@ pub(crate) use traces::{
     trace_tree_rows, trace_tree_total_lines, visible_trace_tree_len,
 };
 
-use ratatui::{
-    Frame,
-    layout::{Constraint, Direction, Layout, Rect},
-    prelude::{Modifier, Style},
-    text::{Line, Span},
-    widgets::{Block, Borders, Paragraph, Tabs},
-};
+use ratatui::{Frame, layout::Rect, prelude::Style, widgets::Block};
 
 use crate::domain::DashboardSnapshot;
 
@@ -60,53 +58,14 @@ pub fn render(
         root,
     );
 
-    let layout = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3),
-            Constraint::Length(1),
-            Constraint::Min(10),
-            Constraint::Length(1),
-        ])
-        .split(root);
-
-    let titles: Vec<Line<'_>> = Tab::ALL
-        .iter()
-        .map(|tab| {
-            Line::from(Span::styled(
-                tab.title(),
-                Style::default().fg(palette.foreground),
-            ))
-        })
-        .collect();
-    let tabs = Tabs::new(titles)
-        .select(state.active_tab)
-        .divider(" ")
-        .highlight_style(
-            Style::default()
-                .fg(palette.background)
-                .bg(palette.accent)
-                .add_modifier(Modifier::BOLD),
-        )
-        .block(
-            Block::default()
-                .borders(Borders::ALL)
-                .title("Ottyel")
-                .border_style(Style::default().fg(palette.accent)),
-        );
-    frame.render_widget(tabs, layout[0]);
-
-    frame.render_widget(
-        Paragraph::new(chrome::padded(chrome::global_status_text(snapshot, state)))
-            .style(Style::default().fg(palette.muted)),
-        layout[1],
-    );
+    let [header, body, footer] = geometry::root_sections(root);
+    chrome::render_header(frame, header, snapshot, state, palette);
 
     match Tab::ALL[state.active_tab] {
-        Tab::Overview => overview::render(frame, layout[2], snapshot, palette),
+        Tab::Overview => overview::render(frame, body, snapshot, palette),
         Tab::Traces => traces::render(
             frame,
-            layout[2],
+            body,
             snapshot,
             state,
             details::cached_trace_detail_lines(&cache.trace_detail),
@@ -114,7 +73,7 @@ pub fn render(
         ),
         Tab::Logs => panes::render_logs(
             frame,
-            layout[2],
+            body,
             snapshot,
             state,
             details::cached_log_detail_lines(&cache.log_detail),
@@ -122,7 +81,7 @@ pub fn render(
         ),
         Tab::Metrics => panes::render_metrics(
             frame,
-            layout[2],
+            body,
             snapshot,
             state,
             details::cached_metric_detail_lines(&cache.metric_detail),
@@ -130,7 +89,7 @@ pub fn render(
         ),
         Tab::Llm => panes::render_llm(
             frame,
-            layout[2],
+            body,
             snapshot,
             state,
             details::cached_llm_detail_lines(&cache.llm_detail),
@@ -138,11 +97,7 @@ pub fn render(
         ),
     }
 
-    frame.render_widget(
-        Paragraph::new(chrome::padded(chrome::footer_text(state)))
-            .style(Style::default().fg(palette.muted)),
-        layout[3],
-    );
+    chrome::render_footer(frame, footer, state, palette);
 
     if state.show_command_palette {
         chrome::render_command_palette(frame, root, state, palette);
@@ -213,15 +168,16 @@ pub fn sync_detail_scroll(
         );
     }
     let [metric_feed, metric_right] = geometry::metric_sections(body, state.metric_split_pct);
+    let metric_series = metrics::metric_series_count(snapshot);
     state.metric_feed_scroll = geometry::clamp_window_offset(
         state.metric_feed_scroll,
-        snapshot.metrics.len(),
+        metric_series,
         geometry::table_viewport_height(metric_feed),
     );
     if state.metric_feed_follow_selected {
         state.metric_feed_scroll = geometry::follow_selected_offset(
             state.metric_feed_scroll,
-            snapshot.metrics.len(),
+            metric_series,
             state.selected_metric,
             geometry::table_viewport_height(metric_feed),
         );

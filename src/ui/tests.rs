@@ -6,8 +6,8 @@ use serde_json::json;
 use crate::{
     config::Theme,
     domain::{
-        AttributeMap, DashboardSnapshot, LlmAttributes, LlmSummary, LogSummary, MetricSummary,
-        OverviewStats, SpanDetail,
+        AttributeMap, DashboardSnapshot, LlmAttributes, LlmSummary, LogSummary, OverviewStats,
+        SpanDetail,
     },
     query::TimeWindow,
 };
@@ -21,7 +21,7 @@ use super::{
     },
     details::{
         build_log_detail_lines, format_log_body, llm_detail_lines, llm_timeline_panel_lines,
-        metric_chart_values, wrapped_line_count,
+        wrapped_line_count,
     },
     geometry::trace_tree_scroll_offset,
     traces::{
@@ -294,9 +294,9 @@ fn waterfall_bar_uses_relative_trace_timing() {
         8,
     );
 
-    assert_eq!(bar.before, "··");
+    assert_eq!(bar.before, "──");
     assert_eq!(bar.active, "━━━━");
-    assert_eq!(bar.after, "··");
+    assert_eq!(bar.after, "──");
 }
 
 #[test]
@@ -494,7 +494,7 @@ fn help_title_and_footer_follow_active_pane() {
     };
 
     assert_eq!(help_title(&state), "Help: Logs Feed");
-    assert_eq!(footer_text(&state), "help: esc/?/enter close");
+    assert_eq!(footer_text(&state), "help: esc close");
 }
 
 #[test]
@@ -526,15 +526,15 @@ fn global_status_owns_service_and_time_key_hints() {
     };
 
     let status = global_status_text(&snapshot, &state);
-    assert!(status.contains("[s]ervice=all"));
-    assert!(status.contains("[t]ime=24h"));
-    assert!(!status.contains("search=none"));
-    assert!(!status.contains("search=-"));
+    assert_eq!(status, "24h · all services");
     assert!(!footer_text(&state).contains("s service"));
     assert!(!footer_text(&state).contains("t window"));
 
     state.search_query = "latency".to_string();
-    assert!(global_status_text(&snapshot, &state).contains("search=latency"));
+    assert_eq!(
+        global_status_text(&snapshot, &state),
+        "24h · all services · latency"
+    );
 
     assert!(!global_status_text(&snapshot, &state).contains("ingest"));
     state.ingest_health = Some(IngestHealthView {
@@ -546,7 +546,7 @@ fn global_status_owns_service_and_time_key_hints() {
         retention_failures: 0,
         last_failure: None,
     });
-    assert!(global_status_text(&snapshot, &state).ends_with(" | ingest idle"));
+    assert!(global_status_text(&snapshot, &state).ends_with(" · ingest idle"));
 }
 
 #[test]
@@ -662,19 +662,6 @@ fn trace_tree_scroll_offset_keeps_selected_line_visible() {
 }
 
 #[test]
-fn metric_chart_values_normalize_numeric_series() {
-    let values = metric_chart_values(&[
-        metric("latency", Some(10.0), 1),
-        metric("latency", Some(15.0), 2),
-        metric("latency", Some(20.0), 3),
-    ]);
-
-    assert_eq!(values.len(), 3);
-    assert!(values[0] < values[1]);
-    assert!(values[1] < values[2]);
-}
-
-#[test]
 fn format_log_body_pretty_prints_json() {
     let lines = format_log_body(r#"{"status":"ok","tokens":12}"#);
 
@@ -704,14 +691,13 @@ fn build_log_detail_lines_include_attributes() {
         .map(|line| line.to_string())
         .collect::<Vec<_>>();
 
-    assert!(lines.iter().any(|line| line.contains("resource")));
-    assert!(lines.iter().any(|line| line.contains("service.name = api")));
-    assert!(lines.iter().any(|line| line.contains("attributes")));
-    assert!(
-        lines
-            .iter()
-            .any(|line| line.contains("http.status_code = 200"))
-    );
+    assert!(lines.iter().any(|line| line == "Resource"));
+    assert!(lines.iter().any(|line| line == "service.name  api"));
+    assert!(lines.iter().any(|line| line == "Attributes"));
+    assert!(lines.iter().any(|line| line == "http.status_code  200"));
+    assert!(lines.iter().any(|line| line == "user.id           123"));
+    // A structured body's message field is the headline.
+    assert_eq!(lines[1], "done");
     assert!(
         lines
             .iter()
@@ -805,18 +791,16 @@ fn llm_detail_lines_show_prompt_output_and_tool_sections() {
     .collect::<Vec<_>>();
 
     assert!(rendered.iter().any(|line| line.contains("prompt")));
-    assert!(
-        rendered
-            .iter()
-            .any(|line| line.contains("prompt unit test"))
-    );
-    assert!(rendered.iter().any(|line| line.contains("service api")));
+    assert!(rendered[0].starts_with("unit test"));
+    assert!(rendered.iter().any(|line| line == "service       api"));
     assert!(
         rendered
             .iter()
             .any(|line| line.contains("\"prompt\": \"hello\""))
     );
-    assert!(rendered.iter().any(|line| line.contains("output")));
+    assert!(rendered.iter().any(|line| line == "Prompt"));
+    assert!(rendered.iter().any(|line| line == "Output"));
+    assert!(rendered.iter().any(|line| line == "Tool"));
     assert!(rendered.iter().any(|line| line.contains("world")));
     assert!(rendered.iter().any(|line| line.contains("lookup_customer")));
 }
@@ -1225,18 +1209,5 @@ fn span_with_parent(
         events: Vec::new(),
         links: Vec::new(),
         llm: None,
-    }
-}
-
-fn metric(metric_name: &str, value: Option<f64>, timestamp: i64) -> MetricSummary {
-    MetricSummary {
-        service_name: "api".to_string(),
-        metric_name: metric_name.to_string(),
-        instrument_kind: "gauge".to_string(),
-        timestamp_unix_nano: timestamp,
-        value,
-        summary: value
-            .map(|value| format!("gauge={value}"))
-            .unwrap_or_default(),
     }
 }

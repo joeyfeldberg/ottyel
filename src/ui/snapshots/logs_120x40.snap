@@ -1,27 +1,24 @@
-┌Ottyel────────────────────────────────────────────────────────────────────────────────────────────────────────────────┐
-│ [1] Overview   [2] Trace Explorer   [3] Logs   [4] Metrics   [5] LLM Inspector                                       │
-└──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┘
- theme=ember | [t]ime=24h | [s]ervice=all | panes traces=6 logs=4 metrics=5 llm=3                                       
-┌Logs Feed───────────────────────────────────────────────────────────┐┌Log Detail──────────────────────────────────────┐
-│service      level message                          trace           ││{"message":"payment                             │
-│checkout-api INFO  checkout started                 019e2d0a6fb7e53…││declined","reason":"card_check_failed"}         │
-│checkout-api ERROR {"message":"payment declined","r 019e2d0a6fb7e53…││service checkout-api                            │
-│catalog-wor… WARN  catalog lag above target                         ││severity ERROR                                  │
-│                                                                    ││timestamp 1700000001294000000                   │
-│                                                                    ││trace 019e2d0a6fb7e5337b121ed7562519cb          │
-│                                                                    ││span payment                                    │
+ ◆ ottyel   1 Overview  2 Traces  3 Logs  4 Metrics  5 LLM                                     t 24h   s all services   
+╭ ▸ Logs ─ 3 rows ───────────────────────────────────────────────────╮╭ Log ───────────────────────────────────────────╮
+│ time                service      level message                     ││  ERROR   2023-11-14 22:13:21.294               │
+│ 2023-11-14 22:13:20 checkout-api INFO  checkout started          ● ││ payment declined                               │
+│ 2023-11-14 22:13:21 checkout-api ERROR {"message":"payment decli ● ││                                                │
+│ 2023-11-14 22:13:11 catalog-wor… WARN  catalog lag above target    ││ service   checkout-api                         │
+│                                                                    ││ severity  ERROR                                │
+│                                                                    ││ trace     019e2d0a6fb7e5337b121ed7562519cb     │
+│                                                                    ││ span      payment                              │
 │                                                                    ││                                                │
-│                                                                    ││resource                                        │
-│                                                                    ││host.name = test-host                           │
+│                                                                    ││ Message                                        │
+│                                                                    ││ {                                              │
+│                                                                    ││   "message": "payment declined",               │
+│                                                                    ││   "reason": "card_check_failed"                │
+│                                                                    ││ }                                              │
 │                                                                    ││                                                │
-│                                                                    ││attributes                                      │
-│                                                                    ││component = fixture                             │
+│                                                                    ││ Attributes                                     │
+│                                                                    ││ component  fixture                             │
 │                                                                    ││                                                │
-│                                                                    ││message                                         │
-│                                                                    ││{                                               │
-│                                                                    ││  "message": "payment declined",                │
-│                                                                    ││  "reason": "card_check_failed"                 │
-│                                                                    ││}                                               │
+│                                                                    ││ Resource                                       │
+│                                                                    ││ host.name  test-host                           │
 │                                                                    ││                                                │
 │                                                                    ││                                                │
 │                                                                    ││                                                │
@@ -36,5 +33,8 @@
 │                                                                    ││                                                │
 │                                                                    ││                                                │
 │                                                                    ││                                                │
-└────────────────────────────────────────────────────────────────────┘└────────────────────────────────────────────────┘
- logs: j/k move | =/- resize | l/right detail | f tail | x log search | v severity | c correlation | : commands         
+│                                                                    ││                                                │
+│                                                                    ││                                                │
+│                                                                    ││                                                │
+╰────────────────────────────────────────────────────────────────────╯╰────────────────────────────────────────────────╯
+  LOGS   j/k move  l detail  f tail  x search  v severity  c correlation  ? help                                        

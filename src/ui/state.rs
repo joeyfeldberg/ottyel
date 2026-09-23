@@ -16,6 +16,13 @@ pub struct Palette {
     pub muted: Color,
     pub warning: Color,
     pub success: Color,
+    pub error: Color,
+    /// Raised background for the header and footer bars.
+    pub surface: Color,
+    /// Background of the selected row.
+    pub selection: Color,
+    /// Border of unfocused panels.
+    pub border: Color,
 }
 
 impl Palette {
@@ -28,6 +35,10 @@ impl Palette {
                 muted: Color::Rgb(139, 116, 98),
                 warning: Color::Rgb(255, 210, 74),
                 success: Color::Rgb(92, 214, 154),
+                error: Color::Rgb(255, 99, 88),
+                surface: Color::Rgb(31, 24, 20),
+                selection: Color::Rgb(62, 40, 27),
+                border: Color::Rgb(74, 58, 47),
             },
             Theme::Tidal => Self {
                 background: Color::Rgb(10, 18, 24),
@@ -36,6 +47,10 @@ impl Palette {
                 muted: Color::Rgb(108, 141, 153),
                 warning: Color::Rgb(255, 192, 92),
                 success: Color::Rgb(100, 230, 190),
+                error: Color::Rgb(255, 107, 107),
+                surface: Color::Rgb(17, 30, 39),
+                selection: Color::Rgb(21, 57, 76),
+                border: Color::Rgb(44, 68, 80),
             },
             Theme::Grove => Self {
                 background: Color::Rgb(11, 18, 13),
@@ -44,6 +59,10 @@ impl Palette {
                 muted: Color::Rgb(102, 132, 98),
                 warning: Color::Rgb(245, 194, 74),
                 success: Color::Rgb(108, 224, 178),
+                error: Color::Rgb(240, 110, 100),
+                surface: Color::Rgb(20, 31, 23),
+                selection: Color::Rgb(34, 62, 37),
+                border: Color::Rgb(49, 71, 51),
             },
             Theme::Paper => Self {
                 background: Color::Rgb(244, 236, 224),
@@ -52,6 +71,10 @@ impl Palette {
                 muted: Color::Rgb(136, 118, 98),
                 warning: Color::Rgb(184, 126, 28),
                 success: Color::Rgb(54, 138, 92),
+                error: Color::Rgb(184, 52, 40),
+                surface: Color::Rgb(232, 221, 205),
+                selection: Color::Rgb(222, 199, 174),
+                border: Color::Rgb(198, 182, 162),
             },
             Theme::Neon => Self {
                 background: Color::Rgb(8, 9, 18),
@@ -60,6 +83,10 @@ impl Palette {
                 muted: Color::Rgb(109, 120, 155),
                 warning: Color::Rgb(255, 202, 64),
                 success: Color::Rgb(86, 240, 196),
+                error: Color::Rgb(255, 84, 112),
+                surface: Color::Rgb(18, 20, 37),
+                selection: Color::Rgb(50, 24, 66),
+                border: Color::Rgb(46, 50, 82),
             },
         }
     }
@@ -88,13 +115,13 @@ impl Tab {
         Self::Llm,
     ];
 
-    pub fn title(self) -> &'static str {
+    pub fn label(self) -> &'static str {
         match self {
-            Self::Overview => "[1] Overview",
-            Self::Traces => "[2] Trace Explorer",
-            Self::Logs => "[3] Logs",
-            Self::Metrics => "[4] Metrics",
-            Self::Llm => "[5] LLM Inspector",
+            Self::Overview => "Overview",
+            Self::Traces => "Traces",
+            Self::Logs => "Logs",
+            Self::Metrics => "Metrics",
+            Self::Llm => "LLM",
         }
     }
 

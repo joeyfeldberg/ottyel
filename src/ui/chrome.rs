@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Alignment, Rect},
     prelude::{Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, Clear, Paragraph, Wrap},
+    widgets::{Block, Clear, Paragraph, Wrap},
 };
 
 use crate::{
@@ -12,10 +12,7 @@ use crate::{
     query::{LogCorrelationFilter, LogSeverityFilter},
 };
 
-use super::{
-    IngestHealthView, LlmFocus, Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState,
-    geometry,
-};
+use super::{IngestHealthView, LlmFocus, Palette, PaneFocus, Tab, TraceFocus, UiState, geometry};
 
 pub(crate) const COMMAND_PALETTE_VISIBLE_ROWS: usize = 8;
 
@@ -30,12 +27,7 @@ pub(crate) fn render_help_overlay(
     frame.render_widget(
         Paragraph::new(help_lines(state))
             .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title(help_title(state))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette.warning)),
-            )
+            .block(super::style::panel(help_title(state), true, palette))
             .style(Style::default().fg(palette.foreground))
             .alignment(Alignment::Left),
         popup,
@@ -63,12 +55,11 @@ pub(crate) fn render_context_help_overlay(
     frame.render_widget(
         Paragraph::new(context_help_lines(state))
             .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title(context_help_title(state))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(palette.accent)),
-            )
+            .block(super::style::panel(
+                context_help_title(state),
+                true,
+                palette,
+            ))
             .style(Style::default().fg(palette.foreground))
             .alignment(Alignment::Left),
         popup,
@@ -131,12 +122,9 @@ pub(crate) fn render_command_palette(
 
     frame.render_widget(Clear, popup);
     frame.render_widget(
-        Paragraph::new(lines).wrap(Wrap { trim: false }).block(
-            Block::default()
-                .title("Command Palette")
-                .borders(Borders::ALL)
-                .border_style(Style::default().fg(palette.accent)),
-        ),
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .block(super::style::panel("Command Palette", true, palette)),
         popup,
     );
 }
@@ -167,29 +155,124 @@ pub(crate) fn command_palette_window(
     (start, end)
 }
 
-pub(crate) fn global_status_text(snapshot: &DashboardSnapshot, state: &UiState) -> String {
+/// The header's right-side status as `(hotkey, value)` pairs.
+fn status_parts(snapshot: &DashboardSnapshot, state: &UiState) -> Vec<(&'static str, String)> {
     let mut parts = vec![
-        format!("theme={}", state.theme.label()),
-        format!("[t]ime={}", state.time_window.label()),
-        format!(
-            "[s]ervice={}",
-            current_service(snapshot, state).unwrap_or("all")
+        ("t", state.time_window.label().to_string()),
+        (
+            "s",
+            current_service(snapshot, state)
+                .map_or_else(|| "all services".to_string(), str::to_string),
         ),
     ];
     if state.search_mode || !state.search_query.is_empty() {
-        parts.push(format!("search={}", search_label(state)));
+        parts.push(("/", search_label(state)));
     }
-    parts.push(format!(
-        "panes traces={} logs={} metrics={} llm={}",
-        snapshot.overview.trace_count,
-        snapshot.overview.log_count,
-        snapshot.overview.metric_count,
-        snapshot.overview.llm_count,
-    ));
+    parts
+}
+
+/// The header status as plain text.
+#[cfg(test)]
+pub(crate) fn global_status_text(snapshot: &DashboardSnapshot, state: &UiState) -> String {
+    let mut parts: Vec<String> = status_parts(snapshot, state)
+        .into_iter()
+        .map(|(_, value)| value)
+        .collect();
     if let Some(health) = &state.ingest_health {
         parts.push(ingest_health_text(health));
     }
-    parts.join(" | ")
+    parts.join(" · ")
+}
+
+/// One header row: brand, numbered tabs, and right-aligned status.
+pub(crate) fn render_header(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &DashboardSnapshot,
+    state: &UiState,
+    palette: Palette,
+) {
+    frame.render_widget(
+        Block::default().style(Style::default().bg(palette.surface)),
+        area,
+    );
+    let mut left = vec![
+        Span::styled(
+            geometry::BRAND,
+            Style::default()
+                .fg(palette.background)
+                .bg(palette.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" "),
+    ];
+    for (index, tab) in Tab::ALL.into_iter().enumerate() {
+        let label = geometry::tab_label(index, tab);
+        left.push(if index == state.active_tab {
+            Span::styled(
+                label,
+                Style::default()
+                    .fg(palette.accent)
+                    .bg(palette.selection)
+                    .add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::styled(label, Style::default().fg(palette.muted))
+        });
+    }
+    let left_width: usize = left.iter().map(|span| span.content.chars().count()).sum();
+
+    let mut right = Vec::new();
+    for (key, value) in status_parts(snapshot, state) {
+        right.push(Span::styled(
+            format!("{key} "),
+            Style::default().fg(palette.muted),
+        ));
+        right.push(Span::styled(value, Style::default().fg(palette.foreground)));
+        right.push(Span::raw("   "));
+    }
+    if let Some(health) = &state.ingest_health {
+        right.push(Span::styled(
+            ingest_health_text(health),
+            Style::default().fg(ingest_health_color(health, palette)),
+        ));
+        right.push(Span::raw(" "));
+    }
+    let right_width: usize = right.iter().map(|span| span.content.chars().count()).sum();
+
+    frame.render_widget(
+        Paragraph::new(Line::from(left)).style(Style::default().bg(palette.surface)),
+        area,
+    );
+    if left_width + right_width < area.width as usize {
+        // Draw only over the status's own columns so the tabs keep their styling.
+        let width = right_width as u16;
+        frame.render_widget(
+            Paragraph::new(Line::from(right)).style(Style::default().bg(palette.surface)),
+            Rect::new(area.x + area.width - width, area.y, width, 1),
+        );
+    }
+}
+
+fn ingest_health_color(health: &IngestHealthView, palette: Palette) -> ratatui::prelude::Color {
+    if health.retention_failures > 0 || health.last_failure.is_some() {
+        palette.error
+    } else if health.rejected_records > 0 || health.queued_records > 0 {
+        palette.warning
+    } else if health.records_per_second >= 0.5 {
+        palette.success
+    } else {
+        palette.muted
+    }
+}
+
+/// One footer row of styled, contextual key hints.
+pub(crate) fn render_footer(frame: &mut Frame<'_>, area: Rect, state: &UiState, palette: Palette) {
+    frame.render_widget(
+        Paragraph::new(super::style::key_hints(&footer_text(state), palette))
+            .style(Style::default().bg(palette.surface)),
+        area,
+    );
 }
 
 pub(crate) fn ingest_health_text(health: &IngestHealthView) -> String {
@@ -233,72 +316,63 @@ fn compact_rate(rate: f64) -> String {
 
 pub(crate) fn footer_text(state: &UiState) -> String {
     if state.show_command_palette {
-        return "command palette: type to filter | enter run | j/k move | esc close".to_string();
+        return "palette: type filter | enter run | j/k move | esc close".to_string();
     }
     if state.show_help {
-        return "help: esc/?/enter close".to_string();
+        return "help: esc close".to_string();
     }
     if state.search_mode {
-        return "global search: type to filter | enter/esc close | backspace delete".to_string();
+        return "search: type filter | enter done | esc done | backspace delete".to_string();
     }
     if state.log_search_mode {
-        return "log search: type to filter logs | enter/esc close | backspace delete".to_string();
+        return "log search: type filter | enter done | esc done | backspace delete".to_string();
     }
 
+    let pinned = state.log_pinned_trace_id.is_some() || state.log_pinned_span_id.is_some();
     match Tab::ALL[state.active_tab] {
         Tab::Overview => {
-            "overview: tab switch panes | : commands | ? help | H hints | / global search"
-                .to_string()
+            "overview: 1-5 tabs | / search | t window | s service | : commands | ? help".to_string()
         }
         Tab::Traces => match state.trace_focus {
             TraceFocus::TraceList => {
-                "traces: j/k select trace | =/- resize | enter open | : commands | ? help | e errors".to_string()
+                "traces: j/k select | enter open | e next error | / search | : commands | ? help"
+                    .to_string()
             }
             TraceFocus::TraceTree => {
-                "trace tree: j/k move | =/- resize | l/right detail | L logs | esc list | : commands | ? help | e errors"
+                "trace: j/k move | l span detail | L logs | e next error | esc back | ? help"
                     .to_string()
             }
             TraceFocus::TraceDetail => {
-                "span detail: j/k scroll | =/- resize | h/left tree | L logs | esc list | : commands | ? help | e errors"
-                    .to_string()
+                "span: j/k scroll | h tree | L logs | esc back | ? help".to_string()
             }
         },
         Tab::Logs => {
-            if state.logs_focus == PaneFocus::Primary {
-                let mut text = "logs: j/k move | =/- resize | l/right detail | f tail | x log search | v severity | c correlation".to_string();
-                if state.log_pinned_trace_id.is_some() || state.log_pinned_span_id.is_some() {
-                    text.push_str(" | u clear pin");
-                }
-                text.push_str(" | : commands");
-                text
+            let mut text = if state.logs_focus == PaneFocus::Primary {
+                "logs: j/k move | l detail | f tail | x search | v severity | c correlation"
+                    .to_string()
             } else {
-                let mut text = "log detail: j/k scroll | =/- resize | esc/h/left feed".to_string();
-                if state.log_pinned_trace_id.is_some() || state.log_pinned_span_id.is_some() {
-                    text.push_str(" | u clear pin");
-                }
-                text.push_str(" | : commands");
-                text
+                "log: j/k scroll | h feed | esc back".to_string()
+            };
+            if pinned {
+                text.push_str(" | u unpin");
             }
+            text.push_str(" | ? help");
+            text
         }
         Tab::Metrics => {
             if state.metrics_focus == PaneFocus::Primary {
-                "metrics: j/k move | =/- resize | l/right detail | : commands".to_string()
+                "metrics: j/k select series | l detail | : commands | ? help".to_string()
             } else {
-                "metric detail: j/k scroll | =/- resize | esc/h/left feed | : commands".to_string()
+                "metric: j/k scroll | h series | esc back | ? help".to_string()
             }
         }
         Tab::Llm => match state.llm_focus {
-            LlmFocus::Feed => {
-                "llm: j/k move | =/- resize | l/right detail | : commands".to_string()
-            }
+            LlmFocus::Feed => "llm: j/k move | l detail | : commands | ? help".to_string(),
             LlmFocus::Detail => {
-                "model detail: j/k scroll | =/- resize | l/right timeline | i/o toggle blocks | esc feed | : commands"
+                "llm call: j/k scroll | l timeline | i prompt | o output | esc back | ? help"
                     .to_string()
             }
-            LlmFocus::Timeline => {
-                "timeline: j/k scroll | =/- resize | h/left model detail | esc feed | : commands"
-                    .to_string()
-            }
+            LlmFocus::Timeline => "timeline: j/k scroll | h call | esc back | ? help".to_string(),
         },
     }
 }
@@ -591,75 +665,44 @@ pub(crate) fn context_help_lines(state: &UiState) -> Vec<Line<'static>> {
     lines
 }
 
-pub(crate) fn log_feed_title(state: &UiState) -> String {
-    let mut parts = vec!["Logs Feed".to_string()];
+/// Active log filters, shown after the feed title.
+pub(crate) fn log_feed_context(state: &UiState, rows: usize) -> Vec<String> {
+    let mut parts = vec![format!("{rows} rows")];
     if state.log_tail {
-        parts.push("tail".to_string());
+        parts.push("tailing".to_string());
     }
     if state.log_severity_filter != LogSeverityFilter::All {
-        parts.push(format!("sev={}", state.log_severity_filter.label()));
+        parts.push(format!("severity {}", state.log_severity_filter.label()));
     }
     if state.log_correlation_filter != LogCorrelationFilter::All {
-        parts.push(format!("corr={}", state.log_correlation_filter.label()));
+        parts.push(state.log_correlation_filter.label().to_string());
     }
     if let Some(trace_id) = state.log_pinned_trace_id.as_deref() {
-        parts.push(format!("trace={}", truncate(trace_id, 12)));
+        parts.push(format!("trace {}", truncate(trace_id, 12)));
     }
     if let Some(span_id) = state.log_pinned_span_id.as_deref() {
-        parts.push(format!("span={}", truncate(span_id, 12)));
+        parts.push(format!("span {}", truncate(span_id, 12)));
     }
     if !state.log_search_query.is_empty() {
-        parts.push(format!("text={}", truncate(&state.log_search_query, 18)));
+        parts.push(format!("\"{}\"", truncate(&state.log_search_query, 18)));
     }
-
-    titled(parts)
+    parts
 }
 
-pub(crate) fn trace_list_title(state: &UiState) -> String {
-    let mut parts = vec!["Trace Explorer".to_string()];
+pub(crate) fn trace_list_context(state: &UiState, rows: usize) -> Vec<String> {
+    let mut parts = vec![format!("{rows} traces")];
     if state.errors_only {
-        parts.push("errors-only".to_string());
+        parts.push("errors only".to_string());
     }
-    if state.trace_view_mode == TraceViewMode::List {
-        parts.push("focus".to_string());
-        parts.push("enter=open".to_string());
-    }
-    titled(parts)
+    parts
 }
 
-pub(crate) fn trace_tree_title(state: &UiState) -> String {
-    let mut parts = vec!["Trace Tree".to_string()];
-    if state.trace_focus == TraceFocus::TraceTree {
-        parts.push("focus".to_string());
-    }
-    if !state.collapsed_trace_spans.is_empty() {
-        parts.push(format!("collapsed={}", state.collapsed_trace_spans.len()));
-    }
-    titled(parts)
-}
-
-pub(crate) fn trace_detail_title(state: &UiState) -> String {
-    detail_title("Span Detail", state.trace_focus == TraceFocus::TraceDetail)
-}
-
-pub(crate) fn detail_title(base: &str, focused: bool) -> String {
-    if focused {
-        format!("{base} [focus]")
+pub(crate) fn trace_tree_context(state: &UiState) -> Vec<String> {
+    if state.collapsed_trace_spans.is_empty() {
+        Vec::new()
     } else {
-        base.to_string()
+        vec![format!("{} collapsed", state.collapsed_trace_spans.len())]
     }
-}
-
-pub(crate) fn titled(mut parts: Vec<String>) -> String {
-    if parts.len() == 1 {
-        parts.remove(0)
-    } else {
-        format!("{} [{}]", parts.remove(0), parts.join(" | "))
-    }
-}
-
-pub(crate) fn padded(text: String) -> String {
-    format!(" {text} ")
 }
 
 fn current_service<'a>(snapshot: &'a DashboardSnapshot, state: &UiState) -> Option<&'a str> {

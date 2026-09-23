@@ -1,18 +1,17 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, FixedOffset, Utc};
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
     prelude::Style,
     text::{Line, Span},
-    widgets::{Block, Borders, Cell, Paragraph, Row, Table, Wrap},
+    widgets::{Cell, Paragraph, Row, Table, Wrap},
 };
 use serde_json::Value;
 
 use crate::domain::{DashboardSnapshot, SpanDetail, truncate};
 
-use super::{Palette, TraceFocus, TraceViewMode, UiState, chrome, geometry};
+use super::{Palette, TraceFocus, TraceViewMode, UiState, chrome, geometry, style};
 
 pub(crate) fn render(
     frame: &mut Frame<'_>,
@@ -22,6 +21,72 @@ pub(crate) fn render(
     trace_detail_lines: &[Line<'static>],
     palette: Palette,
 ) {
+    if state.trace_view_mode == TraceViewMode::List {
+        render_trace_list(frame, area, snapshot, state, palette);
+        return;
+    }
+
+    let [tree_area, detail_area] = geometry::trace_detail_sections(area, state.trace_split_pct);
+    let tree_rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
+    let window = trace_window(&snapshot.selected_trace);
+    let tree_line_width = geometry::detail_viewport_width(tree_area);
+    let tree_lines = snapshot
+        .traces
+        .get(state.selected_trace)
+        .map(|trace| {
+            trace_summary_lines(trace, palette)
+                .into_iter()
+                .chain(build_trace_tree_lines(
+                    &tree_rows,
+                    state.selected_trace_span,
+                    state.trace_focus == TraceFocus::TraceTree,
+                    window,
+                    tree_line_width,
+                    palette,
+                ))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| vec![style::muted("No trace selected yet.", palette).into()]);
+    frame.render_widget(
+        Paragraph::new(tree_lines)
+            .scroll((
+                u16::try_from(state.trace_tree_scroll).unwrap_or(u16::MAX),
+                0,
+            ))
+            .block(style::panel_with_context(
+                "Trace",
+                &chrome::trace_tree_context(state),
+                state.trace_focus == TraceFocus::TraceTree,
+                palette,
+            )),
+        tree_area,
+    );
+
+    frame.render_widget(
+        Paragraph::new(trace_detail_lines.to_vec())
+            .scroll((state.trace_detail_scroll, 0))
+            .wrap(Wrap { trim: false })
+            .block(style::panel(
+                "Span",
+                state.trace_focus == TraceFocus::TraceDetail,
+                palette,
+            )),
+        detail_area,
+    );
+}
+
+fn render_trace_list(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    snapshot: &DashboardSnapshot,
+    state: &UiState,
+    palette: Palette,
+) {
+    let slowest = snapshot
+        .traces
+        .iter()
+        .map(|trace| trace.duration_ms)
+        .fold(0.0_f64, f64::max);
     let rows: Vec<Row<'_>> = snapshot
         .traces
         .iter()
@@ -29,143 +94,148 @@ pub(crate) fn render(
         .skip(state.trace_list_scroll)
         .take(geometry::table_viewport_height(area))
         .map(|(idx, trace)| {
-            let style = if idx == state.selected_trace {
-                Style::default().fg(palette.background).bg(palette.accent)
+            let (dot, dot_color) = if trace.error_count > 0 {
+                ("●", palette.error)
             } else {
-                Style::default().fg(palette.foreground)
+                ("●", palette.success)
+            };
+            let errors = if trace.error_count > 0 {
+                style::colored(trace.error_count.to_string(), palette.error)
+            } else {
+                style::muted("0", palette)
+            };
+            let share = if slowest > 0.0 {
+                trace.duration_ms / slowest
+            } else {
+                0.0
             };
             Row::new(vec![
-                Cell::from(format_trace_timestamp(trace.started_at_unix_nano)),
-                Cell::from(truncate(&trace.service_name, 12)),
-                Cell::from(truncate(&simplify_wrapper_name(&trace.root_name), 24)),
-                Cell::from(trace.span_count.to_string()),
-                Cell::from(trace.error_count.to_string()),
-                Cell::from(format!("{:.1}", trace.duration_ms)),
+                Cell::from(style::colored(dot, dot_color)),
+                Cell::from(style::muted(
+                    format_trace_timestamp(trace.started_at_unix_nano),
+                    palette,
+                )),
+                Cell::from(style::colored(
+                    truncate(&trace.service_name, 16),
+                    palette.accent,
+                )),
+                Cell::from(truncate(&simplify_wrapper_name(&trace.root_name), 60)),
+                Cell::from(Line::from(trace.span_count.to_string()).right_aligned()),
+                Cell::from(Line::from(errors).right_aligned()),
+                Cell::from(Line::from(format_duration_compact(trace.duration_ms)).right_aligned()),
+                Cell::from(style::colored(
+                    style::bar(share, 10),
+                    if trace.error_count > 0 {
+                        palette.error
+                    } else {
+                        palette.accent
+                    },
+                )),
             ])
-            .style(style)
+            .style(style::row(idx == state.selected_trace, palette))
         })
         .collect();
     let table = Table::new(
         rows,
         [
+            Constraint::Length(1),
             Constraint::Length(19),
-            Constraint::Length(12),
+            Constraint::Length(16),
             Constraint::Min(20),
-            Constraint::Length(6),
-            Constraint::Length(6),
+            Constraint::Length(5),
+            Constraint::Length(4),
             Constraint::Length(8),
+            Constraint::Length(10),
         ],
     )
+    .column_spacing(2)
     .header(
-        Row::new(vec!["time", "service", "root", "spans", "errs", "ms"]).style(
-            Style::default()
-                .fg(palette.muted)
-                .add_modifier(ratatui::prelude::Modifier::BOLD),
-        ),
+        Row::new(vec![
+            Cell::from(""),
+            Cell::from("time"),
+            Cell::from("service"),
+            Cell::from("root span"),
+            Cell::from(Line::from("spans").right_aligned()),
+            Cell::from(Line::from("errs").right_aligned()),
+            Cell::from(Line::from("duration").right_aligned()),
+            Cell::from(""),
+        ])
+        .style(style::header_row(palette)),
     )
-    .block(
-        Block::default()
-            .title(chrome::trace_list_title(state))
-            .borders(Borders::ALL)
-            .border_style(
-                Style::default().fg(if state.trace_view_mode == TraceViewMode::List {
-                    palette.accent
-                } else {
-                    palette.muted
-                }),
-            ),
-    );
-    if state.trace_view_mode == TraceViewMode::List {
-        frame.render_widget(table, area);
-        return;
+    .block(style::panel_with_context(
+        "Traces",
+        &chrome::trace_list_context(state, snapshot.traces.len()),
+        true,
+        palette,
+    ));
+    frame.render_widget(table, area);
+    if snapshot.traces.is_empty() {
+        render_empty(
+            frame,
+            area,
+            "No traces yet",
+            "Point an OTLP exporter at http://127.0.0.1:4318 or grpc://127.0.0.1:4317.",
+            palette,
+        );
     }
-
-    let [tree_area, detail_area] = geometry::trace_detail_sections(area, state.trace_split_pct);
-    let tree_border = if state.trace_focus == TraceFocus::TraceTree {
-        palette.warning
-    } else {
-        palette.muted
-    };
-
-    let tree_rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
-    let window = trace_window(&snapshot.selected_trace);
-    let tree_line_width = tree_area.width.saturating_sub(2) as usize;
-    let tree_lines = snapshot
-        .traces
-        .get(state.selected_trace)
-        .map(|trace| {
-            vec![
-                Line::from(vec![
-                    Span::styled(
-                        truncate(&trace.trace_id, 18),
-                        Style::default().fg(palette.accent),
-                    ),
-                    Span::raw(" "),
-                    Span::styled(
-                        truncate(&trace.root_name, 30),
-                        Style::default().fg(palette.foreground),
-                    ),
-                ]),
-                Line::from(format!(
-                    "service={} duration={:.1}ms errors={}",
-                    trace.service_name, trace.duration_ms, trace.error_count
-                )),
-                Line::raw(""),
-            ]
-            .into_iter()
-            .chain(build_trace_tree_lines(
-                &tree_rows,
-                state.selected_trace_span,
-                state.trace_focus == TraceFocus::TraceTree,
-                window,
-                tree_line_width,
-                palette,
-            ))
-            .collect::<Vec<_>>()
-        })
-        .unwrap_or_else(|| vec![Line::raw("No trace selected yet.")]);
-    frame.render_widget(
-        Paragraph::new(tree_lines)
-            .scroll((
-                u16::try_from(state.trace_tree_scroll).unwrap_or(u16::MAX),
-                0,
-            ))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title(chrome::trace_tree_title(state))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(tree_border)),
-            ),
-        tree_area,
-    );
-
-    let detail_border = if state.trace_focus == TraceFocus::TraceDetail {
-        palette.accent
-    } else {
-        palette.muted
-    };
-    frame.render_widget(
-        Paragraph::new(trace_detail_lines.to_vec())
-            .scroll((state.trace_detail_scroll, 0))
-            .wrap(Wrap { trim: false })
-            .block(
-                Block::default()
-                    .title(chrome::trace_detail_title(state))
-                    .borders(Borders::ALL)
-                    .border_style(Style::default().fg(detail_border)),
-            ),
-        detail_area,
-    );
 }
 
-/// Converts to the machine's local zone. Tests use UTC so checked-in UI snapshots render the
-/// same on every machine and CI runner.
-fn display_zone(utc: DateTime<Utc>) -> DateTime<FixedOffset> {
-    #[cfg(not(test))]
-    return utc.with_timezone(&chrono::Local).fixed_offset();
-    #[cfg(test)]
-    return utc.fixed_offset();
+fn trace_summary_lines(
+    trace: &crate::domain::TraceSummary,
+    palette: Palette,
+) -> Vec<Line<'static>> {
+    let status = if trace.error_count > 0 {
+        style::badge("ERROR", palette.error, palette)
+    } else {
+        style::badge("OK", palette.success, palette)
+    };
+    vec![
+        Line::from(vec![
+            style::strong(simplify_wrapper_name(&trace.root_name), palette),
+            Span::raw("  "),
+            status,
+        ]),
+        Line::from(vec![
+            style::muted("service ", palette),
+            style::colored(trace.service_name.clone(), palette.accent),
+            style::muted("   duration ", palette),
+            style::plain(format_duration_compact(trace.duration_ms), palette),
+            style::muted("   spans ", palette),
+            style::plain(trace.span_count.to_string(), palette),
+            style::muted("   errors ", palette),
+            if trace.error_count > 0 {
+                style::colored(trace.error_count.to_string(), palette.error)
+            } else {
+                style::plain("0", palette)
+            },
+            style::muted("   trace ", palette),
+            style::muted(trace.trace_id.clone(), palette),
+        ]),
+        Line::raw(""),
+    ]
+}
+
+/// A centered hint drawn inside an empty panel.
+pub(crate) fn render_empty(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    title: &str,
+    hint: &str,
+    palette: Palette,
+) {
+    let inner = area.inner(ratatui::layout::Margin::new(2, 1));
+    if inner.height < 4 {
+        return;
+    }
+    let top = inner.y + inner.height / 2 - 1;
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(style::strong(title.to_string(), palette)).centered(),
+            Line::from(style::muted(hint.to_string(), palette)).centered(),
+        ])
+        .wrap(Wrap { trim: true }),
+        Rect::new(inner.x, top, inner.width, 3),
+    );
 }
 
 pub(crate) fn format_trace_timestamp(started_at_unix_nano: i64) -> String {
@@ -173,19 +243,7 @@ pub(crate) fn format_trace_timestamp(started_at_unix_nano: i64) -> String {
 }
 
 pub(crate) fn format_machine_local_time(unix_nano: i64) -> String {
-    let seconds = unix_nano.div_euclid(1_000_000_000);
-    let nanos = unix_nano.rem_euclid(1_000_000_000) as u32;
-    match DateTime::<Utc>::from_timestamp(seconds, nanos) {
-        Some(utc) => {
-            let local = display_zone(utc);
-            if local.date_naive() == display_zone(Utc::now()).date_naive() {
-                local.format("%H:%M:%S").to_string()
-            } else {
-                local.format("%Y-%m-%d %H:%M:%S").to_string()
-            }
-        }
-        None => "invalid-time".to_string(),
-    }
+    super::format::local_time(unix_nano)
 }
 
 pub(crate) fn trace_tree_rows(
@@ -334,9 +392,10 @@ pub(crate) fn trace_tree_hit(
         .saturating_sub(3);
     let rows = trace_tree_rows(&snapshot.selected_trace, &state.collapsed_trace_spans);
     let tree_row = rows.get(tree_index)?;
+    // One border column plus one column of panel padding precede the tree text.
     let disclosure_end = area
         .x
-        .saturating_add(1)
+        .saturating_add(2)
         .saturating_add(u16::try_from(tree_row.depth.saturating_mul(2) + 2).unwrap_or(u16::MAX));
     let clicked_disclosure = tree_row.has_children && column < disclosure_end;
     Some((tree_index, clicked_disclosure))
@@ -423,25 +482,18 @@ fn build_trace_tree_lines(
         return vec![Line::raw("No spans recorded for this trace.")];
     }
 
-    let timeline_width = if line_width >= 72 {
-        18
-    } else if line_width >= 56 {
-        14
-    } else {
-        10
-    };
+    let timeline_width = (line_width * 3 / 10).clamp(10, 48);
     let duration_width = 8;
 
     rows.iter()
         .enumerate()
         .map(|(index, row)| {
             let selection_style = if index == selected_index {
-                let color = if tree_focused {
-                    palette.warning
+                Style::default().bg(if tree_focused {
+                    palette.selection
                 } else {
-                    palette.muted
-                };
-                Style::default().fg(palette.background).bg(color)
+                    palette.surface
+                })
             } else {
                 Style::default()
             };
@@ -452,9 +504,10 @@ fn build_trace_tree_lines(
             let mut badges = trace_row_badges(&row.span);
             if row.is_critical {
                 badges.push(TraceRowBadge {
-                    label: "Hot Path".to_string(),
+                    label: "hot path".to_string(),
                 });
             }
+            let selected = index == selected_index;
             let name_style = if is_low_signal_wrapper_span(&row.span) {
                 let mut style = Style::default().fg(palette.muted).patch(selection_style);
                 if row.is_critical {
@@ -469,6 +522,11 @@ fn build_trace_tree_lines(
                     style = style.add_modifier(ratatui::prelude::Modifier::BOLD);
                 }
                 style
+            };
+            let name_style = if selected {
+                name_style.add_modifier(ratatui::prelude::Modifier::BOLD)
+            } else {
+                name_style
             };
             let badge_width = badges
                 .iter()
@@ -489,22 +547,26 @@ fn build_trace_tree_lines(
             let spacer = " ".repeat(line_width.saturating_sub(rendered_width));
             let timeline = waterfall_bar(trace_window, row, timeline_width);
 
-            Line::from(vec![
+            let mut spans = vec![
                 Span::styled(
                     prefix,
                     Style::default().fg(palette.muted).patch(selection_style),
                 ),
                 Span::styled(name, name_style),
-                render_badges(&badges, selection_style),
+            ];
+            spans.extend(render_badges(&badges, selection_style, palette));
+            spans.extend([
                 Span::styled(spacer, selection_style),
                 Span::styled(
                     timeline.before,
-                    Style::default().fg(palette.muted).patch(selection_style),
+                    Style::default().fg(palette.border).patch(selection_style),
                 ),
                 Span::styled(
                     timeline.active,
                     Style::default()
-                        .fg(if row.is_critical {
+                        .fg(if row.span.status_code == "STATUS_CODE_ERROR" {
+                            palette.error
+                        } else if row.is_critical {
                             palette.warning
                         } else {
                             palette.accent
@@ -513,7 +575,7 @@ fn build_trace_tree_lines(
                 ),
                 Span::styled(
                     timeline.after,
-                    Style::default().fg(palette.muted).patch(selection_style),
+                    Style::default().fg(palette.border).patch(selection_style),
                 ),
                 Span::raw(" "),
                 Span::styled(
@@ -522,7 +584,8 @@ fn build_trace_tree_lines(
                         .fg(palette.foreground)
                         .patch(selection_style),
                 ),
-            ])
+            ]);
+            Line::from(spans)
         })
         .collect()
 }
@@ -532,12 +595,26 @@ pub(crate) struct TraceRowBadge {
     pub(crate) label: String,
 }
 
-fn render_badges(badges: &[TraceRowBadge], selection_style: Style) -> Span<'static> {
-    let rendered = badges
+fn render_badges(
+    badges: &[TraceRowBadge],
+    selection_style: Style,
+    palette: Palette,
+) -> Vec<Span<'static>> {
+    badges
         .iter()
-        .map(|badge| format!(" [{}]", badge.label))
-        .collect::<String>();
-    Span::styled(rendered, selection_style)
+        .map(|badge| {
+            let color = match badge.label.as_str() {
+                "ERR" => palette.error,
+                "hot path" => palette.warning,
+                label if label.starts_with("LLM") => palette.accent,
+                _ => palette.success,
+            };
+            Span::styled(
+                format!(" [{}]", badge.label),
+                Style::default().fg(color).patch(selection_style),
+            )
+        })
+        .collect()
 }
 
 pub(crate) fn trace_row_display_name(span: &SpanDetail) -> String {
@@ -854,18 +931,12 @@ pub(crate) fn waterfall_bar(
     right = right.clamp(left.saturating_add(1), width);
 
     WaterfallBar {
-        before: "·".repeat(left),
+        before: "─".repeat(left),
         active: "━".repeat(right.saturating_sub(left)),
-        after: "·".repeat(width.saturating_sub(right)),
+        after: "─".repeat(width.saturating_sub(right)),
     }
 }
 
 pub(crate) fn format_duration_compact(duration_ms: f64) -> String {
-    if duration_ms >= 60_000.0 {
-        format!("{:.1}m", duration_ms / 60_000.0)
-    } else if duration_ms >= 1_000.0 {
-        format!("{:.2}s", duration_ms / 1_000.0)
-    } else {
-        format!("{duration_ms:.1}ms")
-    }
+    super::format::duration(duration_ms)
 }
