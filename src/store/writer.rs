@@ -14,7 +14,7 @@ use futures::channel::oneshot;
 use rusqlite::Connection;
 use thiserror::Error;
 
-use super::ingest_weight::IngestWeight;
+use super::{ingest_weight::IngestWeight, write_observer::WriteObserver};
 
 const WRITER_QUEUE_CAPACITY: usize = 64;
 const DEFAULT_MAX_PRIMARY_RECORDS: usize = 40_000;
@@ -158,6 +158,7 @@ pub(super) struct WriterOwner {
 struct WriterOwnerInner {
     admission: Arc<Mutex<AdmissionState>>,
     worker: Option<JoinHandle<()>>,
+    observer: WriteObserver,
 }
 
 struct AdmissionState {
@@ -206,6 +207,7 @@ impl WriterOwner {
                     canonical_bytes: 0,
                 })),
                 worker: Some(worker),
+                observer: WriteObserver::default(),
             }),
         })
     }
@@ -234,7 +236,7 @@ impl WriterOwner {
             .map_err(|_| anyhow!(StoreWriteError::OutcomeUnknown))?
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "benchmark-support"))]
     pub(super) fn try_execute_async<T, F>(&self, operation: F) -> Result<AsyncWriteReceipt<T>>
     where
         T: Send + 'static,
@@ -259,6 +261,10 @@ impl WriterOwner {
         Ok(AsyncWriteReceipt {
             receiver: reply_receiver,
         })
+    }
+
+    pub(super) fn observer(&self) -> WriteObserver {
+        self.inner.observer.clone()
     }
 
     fn try_send<T, F, S>(&self, weight: IngestWeight, operation: F, send_reply: S) -> Result<()>

@@ -18,6 +18,6 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Clippy
-        run: cargo clippy --all-targets -- -D warnings
+        run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Run tests
-        run: cargo test --verbose
+        run: cargo test --all-features --verbose

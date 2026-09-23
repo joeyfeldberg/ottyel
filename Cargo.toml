@@ -8,6 +8,9 @@ readme = "README.md"
 keywords = ["opentelemetry", "otel", "tui", "observability", "llm"]
 categories = ["command-line-utilities", "development-tools"]
 
+[features]
+benchmark-support = []
+
 [dependencies]
 anyhow = "1.0"
 axum = "0.8"
@@ -40,3 +43,8 @@ harness = false
 [[bench]]
 name = "ingest_field_work"
 harness = false
+
+[[bench]]
+name = "writer_coalescing"
+harness = false
+required-features = ["benchmark-support"]

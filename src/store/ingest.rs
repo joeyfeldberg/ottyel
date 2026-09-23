@@ -18,6 +18,7 @@ use super::{
         any_value_text, format_metric_summary, hex_bytes, log_severity, log_time_unix_nano,
         now_unix_nanos, number_value, resource_to_map, span_kind_name, status_code_name,
     },
+    write_observer::WriteObserver,
 };
 
 impl Store {
@@ -39,8 +40,9 @@ impl Store {
     ) -> Result<usize> {
         let (writer, retention) = self.write_access()?;
         let (request, weight) = prepared.into_parts();
+        let observer = writer.observer();
         writer.execute_weighted(weight, move |conn| {
-            Self::write_traces(conn, request, retention)
+            Self::write_traces(conn, request, retention, observer)
         })
     }
 
@@ -50,8 +52,9 @@ impl Store {
     ) -> Result<AsyncWriteReceipt<usize>> {
         let (writer, retention) = self.write_access()?;
         let (request, weight) = prepared.into_parts();
+        let observer = writer.observer();
         writer.try_execute_async_weighted(weight, move |conn| {
-            Self::write_traces(conn, request, retention)
+            Self::write_traces(conn, request, retention, observer)
         })
     }
 
@@ -59,8 +62,11 @@ impl Store {
         conn: &mut Connection,
         request: ExportTraceServiceRequest,
         retention: RetentionPolicy,
+        observer: WriteObserver,
     ) -> Result<usize> {
+        observer.group_started(1);
         let tx = conn.transaction()?;
+        let ingest_transaction = observer.ingest_only_transaction();
         let mut inserted = 0usize;
 
         for resource_spans in request.resource_spans {
@@ -184,7 +190,8 @@ impl Store {
         }
 
         tx.commit()?;
-        Self::enforce_retention(conn, retention)?;
+        ingest_transaction.committed();
+        Self::enforce_retention(conn, retention, &observer)?;
         Ok(inserted)
     }
 
@@ -206,8 +213,9 @@ impl Store {
     ) -> Result<usize> {
         let (writer, retention) = self.write_access()?;
         let (request, weight) = prepared.into_parts();
+        let observer = writer.observer();
         writer.execute_weighted(weight, move |conn| {
-            Self::write_logs(conn, request, retention)
+            Self::write_logs(conn, request, retention, observer)
         })
     }
 
@@ -217,8 +225,9 @@ impl Store {
     ) -> Result<AsyncWriteReceipt<usize>> {
         let (writer, retention) = self.write_access()?;
         let (request, weight) = prepared.into_parts();
+        let observer = writer.observer();
         writer.try_execute_async_weighted(weight, move |conn| {
-            Self::write_logs(conn, request, retention)
+            Self::write_logs(conn, request, retention, observer)
         })
     }
 
@@ -226,8 +235,11 @@ impl Store {
         conn: &mut Connection,
         request: ExportLogsServiceRequest,
         retention: RetentionPolicy,
+        observer: WriteObserver,
     ) -> Result<usize> {
+        observer.group_started(1);
         let tx = conn.transaction()?;
+        let ingest_transaction = observer.ingest_only_transaction();
         let mut inserted = 0usize;
 
         for resource_logs in request.resource_logs {
@@ -261,7 +273,8 @@ impl Store {
         }
 
         tx.commit()?;
-        Self::enforce_retention(conn, retention)?;
+        ingest_transaction.committed();
+        Self::enforce_retention(conn, retention, &observer)?;
         Ok(inserted)
     }
 
@@ -283,8 +296,9 @@ impl Store {
     ) -> Result<usize> {
         let (writer, retention) = self.write_access()?;
         let (request, weight) = prepared.into_parts();
+        let observer = writer.observer();
         writer.execute_weighted(weight, move |conn| {
-            Self::write_metrics(conn, request, retention)
+            Self::write_metrics(conn, request, retention, observer)
         })
     }
 
@@ -294,8 +308,9 @@ impl Store {
     ) -> Result<AsyncWriteReceipt<usize>> {
         let (writer, retention) = self.write_access()?;
         let (request, weight) = prepared.into_parts();
+        let observer = writer.observer();
         writer.try_execute_async_weighted(weight, move |conn| {
-            Self::write_metrics(conn, request, retention)
+            Self::write_metrics(conn, request, retention, observer)
         })
     }
 
@@ -303,8 +318,11 @@ impl Store {
         conn: &mut Connection,
         request: ExportMetricsServiceRequest,
         retention: RetentionPolicy,
+        observer: WriteObserver,
     ) -> Result<usize> {
+        observer.group_started(1);
         let tx = conn.transaction()?;
+        let ingest_transaction = observer.ingest_only_transaction();
         let mut inserted = 0usize;
 
         for resource_metrics in request.resource_metrics {
@@ -321,7 +339,8 @@ impl Store {
         }
 
         tx.commit()?;
-        Self::enforce_retention(conn, retention)?;
+        ingest_transaction.committed();
+        Self::enforce_retention(conn, retention, &observer)?;
         Ok(inserted)
     }
 
@@ -500,13 +519,19 @@ impl Store {
         Ok(inserted)
     }
 
-    fn enforce_retention(conn: &mut Connection, retention: RetentionPolicy) -> Result<()> {
+    fn enforce_retention(
+        conn: &mut Connection,
+        retention: RetentionPolicy,
+        observer: &WriteObserver,
+    ) -> Result<()> {
+        let retention_observation = observer.retention();
         let retention_nanos = i64::try_from(retention.hours)
             .unwrap_or(i64::MAX)
             .saturating_mul(60 * 60 * 1_000_000_000);
         let threshold_nanos = now_unix_nanos().saturating_sub(retention_nanos);
 
         let tx = conn.transaction()?;
+        let retention_transaction = observer.retention_only_transaction();
         tx.execute(
             "DELETE FROM logs WHERE timestamp_unix_nano < ?1",
             [threshold_nanos],
@@ -614,6 +639,8 @@ impl Store {
         )?;
 
         tx.commit()?;
+        retention_transaction.committed();
+        retention_observation.succeeded();
         Ok(())
     }
 }

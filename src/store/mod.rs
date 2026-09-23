@@ -4,7 +4,12 @@ mod ingest_weight;
 mod queries;
 mod reader_pool;
 mod schema;
+mod write_observer;
 mod writer;
+
+#[cfg(feature = "benchmark-support")]
+#[doc(hidden)]
+pub mod benchmark_support;
 
 use std::{fs, path::Path};
 
