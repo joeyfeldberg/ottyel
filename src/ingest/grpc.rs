@@ -15,6 +15,7 @@ use super::{
     IngestLimits,
     policy::ValidateOtlp,
     preflight::{PreflightError, PreflightOtlp},
+    records::{RecordReport, ScreenRecords},
 };
 use crate::store::{MeasureIngest, PreparedIngest};
 
@@ -39,9 +40,16 @@ pub(super) fn admission_interceptor(admission: Arc<Semaphore>) -> impl Intercept
 pub(super) async fn prepare_raw_request<T>(
     request: Request<Bytes>,
     limits: Arc<IngestLimits>,
-) -> Result<(Request<PreparedIngest<T>>, OwnedSemaphorePermit), Status>
+) -> Result<
+    (
+        Request<PreparedIngest<T>>,
+        RecordReport,
+        OwnedSemaphorePermit,
+    ),
+    Status,
+>
 where
-    T: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp,
+    T: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp + ScreenRecords,
 {
     let (metadata, mut extensions, message) = request.into_parts();
     let permit = extensions
@@ -54,13 +62,15 @@ where
             PreflightError::Malformed(error) => Status::invalid_argument(error.to_string()),
             PreflightError::Budget(error) => Status::resource_exhausted(error.to_string()),
         })?;
-        let message = T::decode(message)
+        let mut message = T::decode(message)
             .map_err(|_| Status::invalid_argument("request body is not valid OTLP protobuf"))?;
         message
             .validate(&limits)
             .map_err(|err| Status::resource_exhausted(err.to_string()))?;
+        let report = message.screen();
         Ok((
             Request::from_parts(metadata, extensions, PreparedIngest::prepare(message)),
+            report,
             permit,
         ))
     })

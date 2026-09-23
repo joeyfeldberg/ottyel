@@ -144,7 +144,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P0 | Metric streams are conflated and lossy | `src/store/ingest.rs`, `src/ui/details.rs` | Different attribute sets are charted together; histogram buckets, quantiles, temporality details, exemplars, unit, and description are lost |
 | P0 (partially resolved 2026-07-14) | Store ownership and async database work remain incomplete | `src/store/writer.rs`, `src/store/reader_pool.rs`, `src/ingest.rs` | One named thread now owns SQLite writes behind immediate 64-command admission, queries use four physical read-only connections, and all six OTLP handlers await async receipts; startup/migration, the initial TUI snapshot, reader checkout, completion, and shutdown still lack a fully bounded worker contract |
 | P0 | Retention runs after every export | `src/store/ingest.rs` | Sustained ingest pays repeated table scans and delete transactions even when nothing expires |
-| P0 (partially resolved 2026-07-23) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/ingest/`, `src/store/writer.rs` | One shared request gate covers both transports from pre-decode admission through commit; identity/gzip, byte limits, protobuf HTTP failures, schema-aware preallocation plus measured field-work budgets, postdecode parity, exact unary framing, client deadlines, configurable aggregate writer record/canonical-byte admission, and retry-correct capacity/lifecycle errors are covered. Partial success, duplicate export policy, batching, retry hints, health, and graceful drain remain incomplete |
+| P0 (partially resolved 2026-09-23) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/ingest/`, `src/store/writer.rs` | One shared request gate covers both transports from pre-decode admission through commit; identity/gzip, byte limits, protobuf HTTP failures, schema-aware preallocation plus measured field-work budgets, postdecode parity, exact unary framing, client deadlines, configurable aggregate writer record/canonical-byte admission, and retry-correct capacity/lifecycle errors are covered, and adjacent exports coalesce into one writer transaction. Record-level screening now rejects invalid spans and metric points and returns OTLP partial success. Duplicate export policy, retry hints, health, and graceful drain remain incomplete |
 | P0 | SQLite identity is based on global `span_id` | `src/store/schema.rs` | The logical identity `(trace_id, span_id)` is not preserved; joins and upserts can corrupt colliding traces |
 | P0 (resolved 2026-07-13) | There was no schema migration mechanism | `src/store/schema.rs`, `src/store/schema/` | Ordered `user_version` migrations now preserve exact legacy v0 data, validate the frozen schema, and roll back DDL, version changes, and failed post-checks together; backup and recovery for the first non-trivial v2 migration remain open |
 | P0 | Sensitive AI content has no central policy | store, TUI, and MCP paths | Prompts, outputs, tool arguments, and raw attributes can be persisted and returned without masking or payload budgets |
@@ -276,7 +276,9 @@ design.
 ### 3. Trace And Log Fidelity
 
 The store drops span trace state, flags, status message, dropped counts, scope identity,
-and schema URLs. It also does not validate zero or incorrectly sized trace/span IDs.
+and schema URLs. Since 2026-09-23, ingest rejects spans whose trace or span ID is zero or
+incorrectly sized. It clears invalid log trace and span IDs rather than storing broken
+associations, and it reports both through OTLP partial success.
 Duration is computed by converting epoch nanoseconds to `f64` before subtraction.
 
 For logs, the v1 schema keeps only one derived timestamp. Since 2026-07-11, ingest uses
@@ -368,15 +370,19 @@ contract:
 - invalid or individually oversized requests are non-retryable, while aggregate
   capacity, timeout, and writer lifecycle failures use retryable HTTP/gRPC statuses;
 - client wait has a configurable deadline; accepted SQLite work continues and retains
-  capacity until its outcome is known.
+  capacity until its outcome is known;
+- after the request-wide policy, per-record screening rejects spans with invalid trace,
+  span, or parent IDs, metric points with an empty metric name, and histogram points whose
+  bucket counts do not match their bounds. It normalizes all-zero parents, invalid links,
+  and invalid log IDs with warnings. The writer weight is measured after screening, and
+  HTTP and gRPC return `partial_success` with the rejected count and reasons. It stays
+  unset on a clean export, as OTLP requires.
 
 The graph-allocation and field-dispatch amplification gaps are closed for the pinned
 0.31.0 binary schema, but the word "bounded" remains qualified: limits constrain encoded
 bytes, allocation-relevant shape, and counted preflight work rather than exact allocator
 bytes or end-to-end CPU. The remaining protocol contract must also:
 
-- validate record invariants and return per-signal partial success for mixed-validity
-  requests where the OTLP data model permits it;
 - define retransmission and duplicate handling for deadline-unknown outcomes;
 - add retry hints and consistent transient SQLite classification;
 - expose accepted, committed, rejected, duplicate, dropped, queued, and latency health by
@@ -656,10 +662,11 @@ Acceptance:
 
 Goal: behave predictably under malformed, compressed, concurrent, and excessive input.
 
-- [ ] Introduce `IngestBatch` and `IngestReport { accepted, rejected, warnings }` per
-  signal.
-- [ ] Decode and validate IDs, timestamps, record counts, and required invariants before
-  projection; reject bad records without losing valid siblings when possible.
+- [x] Introduce a per-signal record report of rejected counts and warnings. It is
+  `RecordReport` in `src/ingest/records.rs`; accepted counts remain the writer receipt.
+- [x] Validate IDs and required invariants before projection, and reject bad records
+  without losing valid siblings. An end time before the start time is reported as a
+  warning; storing invalid-time flags remains Phase 3 work.
 - [x] Add one configurable cross-transport request gate before HTTP body read or gRPC
   decode, retain capacity through commit acknowledgement, time out stalled intake, and
   bound client wait without cancelling accepted SQLite work.
@@ -680,7 +687,7 @@ Goal: behave predictably under malformed, compressed, concurrent, and excessive 
   wire/decompressed limits plus Tonic's documented single gRPC message limit.
 - [x] Validate HTTP binary content types and encode binary OTLP success and
   `google.rpc.Status` failure bodies correctly.
-- [ ] Add partial-success bodies and rejected-record counts after record-level validation
+- [x] Add partial-success bodies and rejected-record counts after record-level validation
   exists.
 - [x] Map malformed/oversized envelopes, request capacity, timeout, writer lifecycle, and
   internal failures to retry-correct HTTP and gRPC statuses.
@@ -994,8 +1001,8 @@ Keep each pull request a vertical, reversible step with tests and measurements.
    preallocation budgets plus postdecode parity, identity/gzip, exact unary framing, a
    client response deadline, protocol error envelopes, and retry-correct capacity/lifecycle
    failures. Configurable writer record/canonical-byte admission and measured protobuf
-   field-work admission and opportunistic writer coalescing are also complete; partial
-   success, duplicate exports, health, and drain remain.
+   field-work admission, opportunistic writer coalescing, and record-level partial
+   success are also complete; duplicate exports, health, and drain remain.
 6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled
    bounded whole-trace retention.
 7. [ ] Ship faithful metric streams/points and targeted metric series queries.

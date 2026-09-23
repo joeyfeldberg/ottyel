@@ -35,11 +35,17 @@ use crate::store::{AsyncWriteReceipt, MeasureIngest, PreparedIngest};
 
 use super::prepare_raw_request;
 use crate::ingest::{
-    IngestState, policy::ValidateOtlp, preflight::PreflightOtlp, store_status, wait_for_write,
+    IngestState, policy::ValidateOtlp, preflight::PreflightOtlp, records::ScreenRecords,
+    store_status, wait_for_write,
 };
 
 pub(crate) trait Signal: Send + Sync + 'static {
-    type Request: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp;
+    type Request: Message
+        + Default
+        + MeasureIngest
+        + ValidateOtlp
+        + PreflightOtlp
+        + ScreenRecords<Response = Self::Response>;
     type Response: Message + Default + Send + 'static;
 
     const NAME: &'static str;
@@ -172,13 +178,13 @@ impl<S: Signal> UnaryService<Bytes> for ExportService<S> {
     fn call(&mut self, request: Request<Bytes>) -> Self::Future {
         let state = self.state.clone();
         Box::pin(async move {
-            let (request, permit) =
+            let (request, report, permit) =
                 prepare_raw_request::<S::Request>(request, state.limits.clone()).await?;
             let receipt = S::ingest(&state, request.into_inner()).map_err(store_status)?;
             wait_for_write(receipt, permit)
                 .await
                 .map_err(store_status)?;
-            Ok(Response::new(S::Response::default()))
+            Ok(Response::new(S::Request::response(&report)))
         })
     }
 }

@@ -11,9 +11,8 @@ use axum::{
 use flate2::read::MultiGzDecoder;
 use http_body_util::LengthLimitError;
 use opentelemetry_proto::tonic::collector::{
-    logs::v1::{ExportLogsServiceRequest, ExportLogsServiceResponse},
-    metrics::v1::{ExportMetricsServiceRequest, ExportMetricsServiceResponse},
-    trace::v1::{ExportTraceServiceRequest, ExportTraceServiceResponse},
+    logs::v1::ExportLogsServiceRequest, metrics::v1::ExportMetricsServiceRequest,
+    trace::v1::ExportTraceServiceRequest,
 };
 use prost::Message;
 use tokio::sync::OwnedSemaphorePermit;
@@ -24,6 +23,7 @@ use super::{
     IngestState,
     policy::ValidateOtlp,
     preflight::{PreflightError, PreflightOtlp},
+    records::ScreenRecords,
     wait_for_write,
 };
 
@@ -66,36 +66,29 @@ async fn method_not_allowed() -> Response {
 }
 
 async fn export_traces(State(state): State<IngestState>, request: Request) -> Response {
-    handle::<ExportTraceServiceRequest, ExportTraceServiceResponse, _>(
-        state,
-        request,
-        |state, request| state.store.try_ingest_traces(request),
-    )
+    handle::<ExportTraceServiceRequest, _>(state, request, |state, request| {
+        state.store.try_ingest_traces(request)
+    })
     .await
 }
 
 async fn export_logs(State(state): State<IngestState>, request: Request) -> Response {
-    handle::<ExportLogsServiceRequest, ExportLogsServiceResponse, _>(
-        state,
-        request,
-        |state, request| state.store.try_ingest_logs(request),
-    )
+    handle::<ExportLogsServiceRequest, _>(state, request, |state, request| {
+        state.store.try_ingest_logs(request)
+    })
     .await
 }
 
 async fn export_metrics(State(state): State<IngestState>, request: Request) -> Response {
-    handle::<ExportMetricsServiceRequest, ExportMetricsServiceResponse, _>(
-        state,
-        request,
-        |state, request| state.store.try_ingest_metrics(request),
-    )
+    handle::<ExportMetricsServiceRequest, _>(state, request, |state, request| {
+        state.store.try_ingest_metrics(request)
+    })
     .await
 }
 
-async fn handle<Req, Resp, F>(state: IngestState, request: Request, ingest: F) -> Response
+async fn handle<Req, F>(state: IngestState, request: Request, ingest: F) -> Response
 where
-    Req: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp,
-    Resp: Message + Default,
+    Req: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp + ScreenRecords,
     F: FnOnce(&IngestState, PreparedIngest<Req>) -> anyhow::Result<AsyncWriteReceipt<usize>>,
 {
     let permit = match state.admission.clone().try_acquire_owned() {
@@ -106,7 +99,7 @@ where
     let request_timeout = state.limits.request_timeout;
     match tokio::time::timeout(
         request_timeout,
-        handle_admitted::<Req, Resp, F>(state, request, ingest, permit),
+        handle_admitted::<Req, F>(state, request, ingest, permit),
     )
     .await
     {
@@ -119,15 +112,14 @@ where
     }
 }
 
-async fn handle_admitted<Req, Resp, F>(
+async fn handle_admitted<Req, F>(
     state: IngestState,
     request: Request,
     ingest: F,
     permit: OwnedSemaphorePermit,
 ) -> Response
 where
-    Req: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp,
-    Resp: Message + Default,
+    Req: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp + ScreenRecords,
     F: FnOnce(&IngestState, PreparedIngest<Req>) -> anyhow::Result<AsyncWriteReceipt<usize>>,
 {
     let encoding = match request_encoding(request.headers()) {
@@ -157,16 +149,17 @@ where
     let decoded = tokio::task::spawn_blocking(move || {
         let body = decode_content(body.as_ref(), encoding, limits.max_decompressed_bytes)?;
         Req::preflight(body.as_ref(), &limits).map_err(HttpFailure::from_preflight)?;
-        let request = Req::decode(body.as_ref())
+        let mut request = Req::decode(body.as_ref())
             .map_err(|_| HttpFailure::bad_request("request body is not valid OTLP protobuf"))?;
         request
             .validate(&limits)
             .map_err(|err| HttpFailure::too_large(err.to_string()))?;
-        Ok::<_, HttpFailure>((PreparedIngest::prepare(request), permit))
+        let report = request.screen();
+        Ok::<_, HttpFailure>((PreparedIngest::prepare(request), report, permit))
     })
     .await;
 
-    let (request, permit) = match decoded {
+    let (request, report, permit) = match decoded {
         Ok(Ok(decoded)) => decoded,
         Ok(Err(err)) => return err.into_response(),
         Err(_) => {
@@ -183,7 +176,7 @@ where
         Err(err) => return store_error(err),
     };
     match wait_for_write(receipt, permit).await {
-        Ok(()) => protobuf_response(StatusCode::OK, Resp::default().encode_to_vec()),
+        Ok(()) => protobuf_response(StatusCode::OK, Req::response(&report).encode_to_vec()),
         Err(err) => store_error(err),
     }
 }
@@ -744,8 +737,8 @@ mod tests {
             resource_spans: vec![ResourceSpans {
                 scope_spans: vec![ScopeSpans {
                     spans: vec![Span {
-                        trace_id: vec![1],
-                        span_id: vec![2],
+                        trace_id: vec![1; 16],
+                        span_id: vec![2; 8],
                         name: "ok".into(),
                         start_time_unix_nano: now,
                         end_time_unix_nano: now + 1,

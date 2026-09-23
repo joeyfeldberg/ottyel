@@ -2,6 +2,7 @@ mod grpc;
 mod http;
 mod policy;
 mod preflight;
+mod records;
 
 use std::{net::SocketAddr, sync::Arc};
 
