@@ -408,8 +408,9 @@ bound, queued writer records, cumulative rejected records and failed requests, a
 last failed export for 60 seconds. Listener readiness, database size, and query errors
 are still missing. A query failure should leave the last good view visible.
 
-Terminal setup needs an RAII cleanup guard so an error during initialization or drawing
-cannot leave the shell in raw mode.
+A `TerminalGuard` now owns raw mode, the alternate screen, and mouse capture. It restores
+all three on every exit path, and a panic hook restores the terminal before the panic
+message prints.
 
 ### 8. Privacy And Local Security
 
@@ -647,10 +648,11 @@ Goal: create the seam required for every subsequent data fix.
   fail-closed panic handling, and drain-on-final-drop tests.
 - [x] Route all six async OTLP export handlers through direct bounded admission and async
   receipts; SQLite write and retention work run only on the dedicated owner thread.
-- [ ] Move store open/migration, the initial terminal snapshot, and every remaining
-  database call off the terminal event loop or async network workers. Add bounded reader
-  checkout instead of relying on indefinite waits. Receiver and writer shutdown now have
-  one bounded deadline.
+- [ ] Move every remaining database call off the terminal event loop or async network
+  workers, and add bounded reader checkout instead of relying on indefinite waits. Store
+  open/migration and the initial terminal snapshot now run on blocking tasks, and receiver
+  and writer shutdown have one bounded deadline. Initial detail and first-page trace
+  loads, and in-loop detail refreshes, still query synchronously.
 - [ ] Use prepared/cached statements and batch one signal export per transaction.
 - [ ] Add a typed `StoreError` classification: invalid data, busy/overloaded, unavailable,
   corruption, migration required, and internal defect.

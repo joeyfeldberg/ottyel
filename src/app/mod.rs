@@ -1,5 +1,6 @@
 mod ingest_health;
 mod input;
+mod terminal;
 mod trace_paging;
 
 use std::{
@@ -9,11 +10,7 @@ use std::{
 };
 
 use anyhow::{Context, Result};
-use crossterm::{
-    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream, KeyEventKind},
-    execute,
-    terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
-};
+use crossterm::event::{Event, EventStream, KeyEventKind};
 use futures::StreamExt;
 use ratatui::{Terminal, backend::CrosstermBackend};
 use tokio::{
@@ -33,6 +30,7 @@ use crate::{
 };
 use ingest_health::IngestHealthTracker;
 use input::InputOutcome;
+use terminal::TerminalGuard;
 use trace_paging::{TraceListPager, TracePageRefreshResult};
 
 const RENDER_FRAME_MS: u64 = 16;
@@ -113,12 +111,14 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let ingest_limits = crate::ingest::IngestLimits::try_from_args(&args)?;
     let writer_limits =
         crate::store::WriterLimits::new(args.max_otlp_writer_records, args.max_otlp_writer_bytes);
-    let store = Store::open_with_writer_limits(
-        &args.db_path,
-        args.retention_hours,
-        args.max_spans,
-        writer_limits,
-    )?;
+    // Opening can run migrations, so it stays off the async runtime's worker threads.
+    let (db_path, retention_hours, max_spans) =
+        (args.db_path.clone(), args.retention_hours, args.max_spans);
+    let store = task::spawn_blocking(move || {
+        Store::open_with_writer_limits(&db_path, retention_hours, max_spans, writer_limits)
+    })
+    .await
+    .context("store open task failed")??;
     let query = QueryService::new(store.clone(), args.page_size);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
@@ -174,23 +174,10 @@ async fn run_terminal(
     ingest_probe: &IngestProbe,
     args: &ServeArgs,
 ) -> Result<()> {
-    enable_raw_mode()?;
-    let mut stdout = io::stdout();
-    execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
-    let backend = CrosstermBackend::new(stdout);
-    let mut terminal = Terminal::new(backend)?;
+    let _guard = TerminalGuard::enter()?;
+    let mut terminal = Terminal::new(CrosstermBackend::new(io::stdout()))?;
     terminal.clear()?;
-
-    let terminal_result = terminal_loop(&mut terminal, query, ingest_probe, args).await;
-
-    disable_raw_mode()?;
-    execute!(
-        terminal.backend_mut(),
-        DisableMouseCapture,
-        LeaveAlternateScreen
-    )?;
-    terminal.show_cursor()?;
-    terminal_result
+    terminal_loop(&mut terminal, query, ingest_probe, args).await
 }
 
 async fn terminal_loop(
@@ -216,7 +203,11 @@ async fn terminal_loop(
     if let Some(theme) = args.theme {
         state.theme = theme;
     }
-    let mut snapshot = query.snapshot(&input::filters(&state, &[]))?;
+    let initial_query = query.clone();
+    let initial_filters = input::filters(&state, &[]);
+    let mut snapshot = task::spawn_blocking(move || initial_query.snapshot(&initial_filters))
+        .await
+        .context("initial snapshot task failed")??;
     let mut render_cache = RenderCache::default();
     let mut trace_detail_cache = TraceDetailCache::default();
     let mut trace_paging = TraceListPager::default();
