@@ -1,13 +1,17 @@
 use anyhow::{Context, Result, ensure};
 use rusqlite::{Connection, params};
 
-use super::{INDEXES, IndexDefinition, TABLES, TableDefinition};
+use super::{IndexDefinition, TableDefinition};
 
-fn validate(conn: &Connection, additional: &[IndexDefinition]) -> Result<()> {
-    for table in TABLES {
+fn validate(
+    conn: &Connection,
+    tables: &[&TableDefinition],
+    indexes: &[&IndexDefinition],
+) -> Result<()> {
+    for table in tables {
         validate_table(conn, table)?;
     }
-    for index in INDEXES.iter().chain(additional) {
+    for index in indexes {
         validate_index(conn, index)?;
     }
 
@@ -28,8 +32,13 @@ fn validate(conn: &Connection, additional: &[IndexDefinition]) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_strict(conn: &Connection, additional: &[IndexDefinition]) -> Result<()> {
-    validate(conn, additional)?;
+/// Validates that the database holds exactly `tables` and `indexes` and nothing else.
+pub(in crate::store::schema) fn validate_exact(
+    conn: &Connection,
+    tables: &[&TableDefinition],
+    indexes: &[&IndexDefinition],
+) -> Result<()> {
+    validate(conn, tables, indexes)?;
 
     let mut statement = conn.prepare(
         "SELECT type, name, tbl_name
@@ -46,7 +55,7 @@ pub(super) fn validate_strict(conn: &Connection, additional: &[IndexDefinition])
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let mut expected = TABLES
+    let mut expected = tables
         .iter()
         .map(|table| {
             (
@@ -55,7 +64,7 @@ pub(super) fn validate_strict(conn: &Connection, additional: &[IndexDefinition])
                 table.name.to_string(),
             )
         })
-        .chain(INDEXES.iter().chain(additional).map(|index| {
+        .chain(indexes.iter().map(|index| {
             (
                 "index".to_string(),
                 index.name.to_string(),

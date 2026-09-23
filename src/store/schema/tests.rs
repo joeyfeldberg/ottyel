@@ -230,7 +230,7 @@ fn newer_schema_version_is_rejected_before_configuration_or_schema_mutation() {
     conn.execute_batch(
         "CREATE TABLE future_data (value TEXT NOT NULL);\
          INSERT INTO future_data VALUES ('preserve me');\
-         PRAGMA user_version = 3;",
+         PRAGMA user_version = 4;",
     )
     .unwrap();
     let expected_objects = user_schema_objects(&conn);
@@ -241,16 +241,16 @@ fn newer_schema_version_is_rejected_before_configuration_or_schema_mutation() {
     let error = Store::open(&path, 24, 1_000).unwrap_err();
     let message = format!("{error:#}");
     assert!(
-        message.contains("schema version 3"),
+        message.contains("schema version 4"),
         "unexpected error: {message}"
     );
     assert!(
-        message.contains("supported version 2"),
+        message.contains("supported version 3"),
         "unexpected error: {message}"
     );
 
     let conn = Connection::open(path).unwrap();
-    assert_eq!(schema_version(&conn).unwrap(), 3);
+    assert_eq!(schema_version(&conn).unwrap(), 4);
     assert_eq!(user_schema_objects(&conn), expected_objects);
     assert_eq!(pragma_i64(&conn, "schema_version"), expected_cookie);
     assert_eq!(pragma_string(&conn, "journal_mode"), expected_mode);
@@ -420,23 +420,30 @@ fn insert_legacy_rows(conn: &Connection) {
     .unwrap();
 }
 
+/// Every telemetry row, with columns named in v1 order so snapshots compare across schema
+/// versions that reorder columns.
 fn telemetry_snapshot(conn: &Connection) -> Vec<(String, Vec<Vec<Value>>)> {
     [
-        ("spans", "trace_id, span_id"),
-        ("span_events", "id"),
-        ("span_links", "id"),
-        ("logs", "id"),
-        ("metrics", "id"),
-        ("llm_spans", "trace_id, span_id"),
+        ("spans", "*", "trace_id, span_id"),
+        ("span_events", "*", "id"),
+        ("span_links", "*", "id"),
+        ("logs", "*", "id"),
+        ("metrics", "*", "id"),
+        (
+            "llm_spans",
+            "span_id, trace_id, service_name, provider, model, operation, input_tokens, \
+             output_tokens, total_tokens, cost, latency_ms, status, raw_json",
+            "trace_id, span_id",
+        ),
     ]
     .into_iter()
-    .map(|(table, order)| (table.to_string(), table_rows(conn, table, order)))
+    .map(|(table, columns, order)| (table.to_string(), table_rows(conn, table, columns, order)))
     .collect()
 }
 
-fn table_rows(conn: &Connection, table: &str, order: &str) -> Vec<Vec<Value>> {
+fn table_rows(conn: &Connection, table: &str, columns: &str, order: &str) -> Vec<Vec<Value>> {
     let mut statement = conn
-        .prepare(&format!("SELECT * FROM {table} ORDER BY {order}"))
+        .prepare(&format!("SELECT {columns} FROM {table} ORDER BY {order}"))
         .unwrap();
     let column_count = statement.column_count();
     statement
@@ -474,7 +481,6 @@ fn expected_latest_objects() -> Vec<(String, String, String)> {
         ("table", "logs", "logs"),
         ("table", "metrics", "metrics"),
         ("table", "llm_spans", "llm_spans"),
-        ("index", "idx_spans_trace", "spans"),
         ("index", "idx_spans_service_start", "spans"),
         ("index", "idx_spans_status", "spans"),
         ("index", "idx_span_events_trace", "span_events"),
@@ -483,7 +489,6 @@ fn expected_latest_objects() -> Vec<(String, String, String)> {
         ("index", "idx_logs_trace", "logs"),
         ("index", "idx_metrics_service_time", "metrics"),
         ("index", "idx_metrics_name", "metrics"),
-        ("index", "idx_llm_trace", "llm_spans"),
         ("index", "idx_llm_service", "llm_spans"),
         ("index", "idx_logs_time", "logs"),
         ("index", "idx_metrics_time", "metrics"),
@@ -588,7 +593,7 @@ fn a_failed_copy_leaves_the_database_unmigrated() {
 }
 
 #[test]
-fn v1_database_with_data_upgrades_to_v2_after_writing_a_copy() {
+fn v1_database_with_data_upgrades_to_the_latest_schema_after_writing_a_copy() {
     let tempdir = tempdir().unwrap();
     let path = tempdir.path().join("ottyel.db");
     let conn = Connection::open(&path).unwrap();
@@ -601,10 +606,67 @@ fn v1_database_with_data_upgrades_to_v2_after_writing_a_copy() {
     drop(Store::open(&path, 24, 1_000).unwrap());
 
     let conn = Connection::open(&path).unwrap();
-    assert_eq!(schema_version(&conn).unwrap(), 2);
+    assert_eq!(schema_version(&conn).unwrap(), LATEST_SCHEMA_VERSION);
     assert_eq!(user_schema_objects(&conn), expected_latest_objects());
     assert_eq!(telemetry_snapshot(&conn), expected_rows);
     let copy = Connection::open(tempdir.path().join("ottyel.db.v1-backup")).unwrap();
     assert_eq!(schema_version(&copy).unwrap(), 1);
     assert_eq!(telemetry_snapshot(&copy), expected_rows);
+}
+
+#[test]
+fn v2_upgrade_drops_orphans_then_enforces_and_cascades_composite_keys() {
+    let tempdir = tempdir().unwrap();
+    let path = tempdir.path().join("ottyel.db");
+    let mut conn = Connection::open(&path).unwrap();
+    conn.execute_batch(HISTORICAL_V0_SCHEMA).unwrap();
+    insert_legacy_rows(&conn);
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    apply_migration(&mut conn, &MIGRATIONS[1]).unwrap();
+    assert_eq!(schema_version(&conn).unwrap(), 2);
+    let expected_rows = telemetry_snapshot(&conn);
+    conn.execute_batch(
+        "INSERT INTO span_events (trace_id, span_id, name, timestamp_unix_nano, attributes_json)
+         VALUES ('trace-gone', 'span-gone', 'orphan', 1, '{}');
+         INSERT INTO llm_spans (
+             span_id, trace_id, service_name, provider, model, operation, status, raw_json
+         ) VALUES ('span-gone', 'trace-gone', 'svc', 'p', 'm', 'op', 'OK', '{}');",
+    )
+    .unwrap();
+    drop(conn);
+
+    let store = Store::open(&path, 24, 1_000).unwrap();
+
+    let copy = Connection::open(tempdir.path().join("ottyel.db.v2-backup")).unwrap();
+    assert_eq!(schema_version(&copy).unwrap(), 2);
+    drop(copy);
+    let (rows, orphan_insert, cascaded) = store
+        .execute_write_for_test(|conn| {
+            let rows = telemetry_snapshot(conn);
+            let orphan_insert = conn
+                .execute(
+                    "INSERT INTO span_events (
+                         trace_id, span_id, name, timestamp_unix_nano, attributes_json
+                     ) VALUES ('trace-gone', 'span-gone', 'orphan', 1, '{}')",
+                    [],
+                )
+                .is_err();
+            conn.execute("DELETE FROM spans WHERE trace_id = 'trace-1'", [])?;
+            let cascaded: i64 = conn.query_row(
+                "SELECT (SELECT COUNT(*) FROM span_events)
+                      + (SELECT COUNT(*) FROM span_links)
+                      + (SELECT COUNT(*) FROM llm_spans)",
+                [],
+                |row| row.get(0),
+            )?;
+            Ok((rows, orphan_insert, cascaded))
+        })
+        .unwrap();
+
+    assert_eq!(rows, expected_rows);
+    assert!(
+        orphan_insert,
+        "foreign keys must reject an event without its span"
+    );
+    assert_eq!(cascaded, 0);
 }

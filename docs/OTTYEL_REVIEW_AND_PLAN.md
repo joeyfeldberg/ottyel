@@ -146,14 +146,14 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P0 (partially resolved 2026-07-14) | Store ownership and async database work remain incomplete | `src/store/writer.rs`, `src/store/reader_pool.rs`, `src/ingest.rs` | One named thread now owns SQLite writes behind immediate 64-command admission, queries use four physical read-only connections, and all six OTLP handlers await async receipts; startup/migration, the initial TUI snapshot, reader checkout, completion, and shutdown still lack a fully bounded worker contract |
 | P0 (resolved 2026-09-23) | Retention ran after every export | `src/store/retention.rs`, `src/store/writer/` | Retention now runs as scheduled writer maintenance, on a 30 s timer or after `max(1000, max_spans / 10)` committed records. It advances in units of at most 2,000 rows or 20 traces, each in its own transaction, and seeks on the schema v2 time indexes. At reference scale, low-rate ack p50 fell from 58 ms to 0.07 ms |
 | P0 (partially resolved 2026-09-23) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/ingest/`, `src/store/writer.rs` | One shared request gate covers both transports from pre-decode admission through commit; identity/gzip, byte limits, protobuf HTTP failures, schema-aware preallocation plus measured field-work budgets, postdecode parity, exact unary framing, client deadlines, configurable aggregate writer record/canonical-byte admission, and retry-correct capacity/lifecycle errors are covered, and adjacent exports coalesce into one writer transaction. Record-level screening now rejects invalid spans and metric points and returns OTLP partial success, and in-memory receiver statistics feed a TUI header summary. Duplicate export policy, retry hints, duplicate/dropped counts, and graceful drain remain incomplete |
-| P0 | SQLite identity is based on global `span_id` | `src/store/schema.rs` | The logical identity `(trace_id, span_id)` is not preserved; joins and upserts can corrupt colliding traces |
+| P0 (resolved 2026-09-23) | SQLite identity was based on global `span_id` | `src/store/schema/v3.rs`, `src/store/ingest.rs`, `src/store/queries.rs` | Schema v3 keys `spans` and `llm_spans` by `(trace_id, span_id)`. Events, links, and LLM rows reference their span through cascading foreign keys that the writer enforces, and every LLM join matches both columns. A span ID reused in another trace is now an independent span through ingest, detail, LLM projection, and retention |
 | P0 (resolved 2026-07-13) | There was no schema migration mechanism | `src/store/schema.rs`, `src/store/schema/` | Ordered `user_version` migrations now preserve exact legacy v0 data, validate the frozen schema, and roll back DDL, version changes, and failed post-checks together. Since 2026-09-23 every migration of a data-bearing database is preceded by a sibling `VACUUM INTO` copy with a documented manual recovery |
 | P0 | Sensitive AI content has no central policy | store, TUI, and MCP paths | Prompts, outputs, tool arguments, and raw attributes can be persisted and returned without masking or payload budgets |
 | P1 | AI operations are misclassified as LLM calls | `src/domain.rs` | OpenInference agent, tool, retrieval, evaluator, and prompt spans inflate model-call counts and show as `unknown/unknown` |
 | P1 | Current GenAI events and attributes are only partly understood | `src/domain.rs`, `src/store/ingest.rs` | Event-based inference details and evaluations are ignored; current structured messages, tool results, cache/reasoning tokens, agents, and TTFT are missing |
 | P1 | The all-tab snapshot does work that is not rendered | `src/query.rs`, `src/app/mod.rs` | Every refresh reads every signal; rollups and top calls are queried after their UI panels were removed; the first trace page is queried twice |
 | P1 (partially resolved 2026-07-11) | Log time and severity semantics were wrong and remain incomplete | `src/store/helpers.rs`, `src/store/ingest.rs`, `src/store/tests/log_semantics.rs` | Event-time fallback and empty-text numeric severity labels are corrected; the v1 schema still drops observed time, numeric severity, event name, and other fields |
-| P1 (resolved 2026-07-13) | Retention could leave corrupt-looking investigations | `src/store/ingest.rs`, `src/store/tests/retention.rs` | Time and span-cap retention now evict whole traces transactionally and remove event, link, and LLM rows by trace identity. Scheduled bounded maintenance is complete; the composite-identity schema remains open |
+| P1 (resolved 2026-07-13) | Retention could leave corrupt-looking investigations | `src/store/ingest.rs`, `src/store/tests/retention.rs` | Time and span-cap retention now evict whole traces transactionally in scheduled bounded units, and dependent rows follow by `ON DELETE CASCADE` under the v3 composite keys |
 | P1 | Startup and runtime failures are not visible in the TUI | `src/app/mod.rs` | A failed listener bind is not reported until exit; a refresh error exits the terminal loop instead of showing stale data plus an error |
 | P1 (resolved 2026-07-13) | MCP and doctor used writable store initialization | `src/app/mod.rs`, `src/store/mod.rs`, `src/store/read_only_tests.rs`, `src/mcp/tests.rs` | MCP and non-repair doctor now open a physically read-only main database, enable connection-local query-only mode, validate exact v0/v1 schemas without migration, and reject direct SQL and ingest writes; SQLite WAL/SHM coordination sidecars remain allowed so a live reader sees later commits |
 | P1 | MCP responses can be unbounded | `src/mcp/resources.rs`, `src/mcp/tools.rs` | A large trace or prompt can consume excessive time and model context; `search_llm` always computes all aggregates |
@@ -733,8 +733,10 @@ Acceptance:
 
 Goal: make every displayed trace, log, and metric result semantically defensible.
 
-- [ ] Migrate spans and related tables to composite `(trace_id, span_id)` identity and
-  cascading relations.
+- [x] Migrate spans and related tables to composite `(trace_id, span_id)` identity and
+  cascading relations. Schema v3 removes pre-existing orphans, rebuilds the four span
+  tables, and enables writer foreign-key enforcement. The upgrade is preceded by a
+  `v2-backup` copy.
 - [ ] Preserve resource, instrumentation scope, schema URL, trace state, flags, status
   message, and all dropped counts.
 - [ ] Compute duration with checked integer subtraction and retain invalid-time warnings.
@@ -1025,8 +1027,8 @@ Keep each pull request a vertical, reversible step with tests and measurements.
    field-work admission, opportunistic writer coalescing, record-level partial success,
    in-memory ingest statistics, and deadline-bounded graceful drain are also complete;
    duplicate exports remain.
-6. [ ] Ship the composite trace/log schema and materialized trace summaries. Scheduled
-   bounded whole-trace retention and its schema v2 time indexes are complete.
+6. [ ] Ship materialized trace summaries. The composite trace/span schema (v3), scheduled
+   bounded whole-trace retention, and its schema v2 time indexes are complete.
 7. [ ] Ship faithful metric streams/points and targeted metric series queries.
 8. [ ] Replace the monolithic snapshot with active-view asynchronous read models.
 9. [ ] Add the typed OTel GenAI/OpenInference operation projection and exact run/session

@@ -158,53 +158,56 @@ fn max_span_retention_evicts_oldest_whole_trace_and_cleans_dependents() {
 }
 
 #[test]
-fn retention_cleanup_correlates_dependents_by_trace_and_span() {
+fn a_span_id_shared_by_two_traces_stays_independent_through_retention() {
     let tempdir = tempdir().unwrap();
-    let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 100).unwrap();
+    // A one-span cap forces retention to evict exactly one of the two traces.
+    let store = Store::open(&tempdir.path().join("ottyel.db"), 24, 1).unwrap();
     let now = now_nanos();
     let old_trace_byte = 0xc1;
     let new_trace_byte = 0xc2;
     let shared_span_byte = 0x61;
 
-    store
-        .ingest_traces(trace_request(vec![test_span(
-            old_trace_byte,
-            shared_span_byte,
-            None,
-            now - 20_000_000,
-            now - 10_000_000,
-            true,
-        )]))
-        .unwrap();
-    store
-        .ingest_traces(trace_request(vec![test_span(
-            new_trace_byte,
-            shared_span_byte,
-            None,
-            now - 5_000_000,
-            now,
-            false,
-        )]))
-        .unwrap();
+    for (trace_byte, end) in [(old_trace_byte, now - 10_000_000), (new_trace_byte, now)] {
+        store
+            .ingest_traces(trace_request(vec![test_span(
+                trace_byte,
+                shared_span_byte,
+                None,
+                end - 5_000_000,
+                end,
+                true,
+            )]))
+            .unwrap();
+    }
+
+    for trace_byte in [old_trace_byte, new_trace_byte] {
+        let detail = store.trace_detail(&hex_id(trace_byte, 16)).unwrap();
+        assert_eq!(detail.len(), 1);
+        assert_eq!(detail[0].events.len(), 1);
+        assert_eq!(detail[0].links.len(), 1);
+    }
+    assert_eq!(dependent_row_counts(&store), (2, 2, 2));
+
     store.run_retention_pass().unwrap();
 
-    // The v1 schema keys spans globally by span_id. Until that migration lands,
-    // retention must still remove projections left under the displaced trace ID.
     assert!(
         store
             .trace_detail(&hex_id(old_trace_byte, 16))
             .unwrap()
             .is_empty()
     );
-    assert_eq!(
-        store
-            .trace_detail(&hex_id(new_trace_byte, 16))
-            .unwrap()
-            .len(),
-        1
-    );
-    assert_eq!(dependent_row_counts(&store), (0, 0, 0));
+    let survivor = store.trace_detail(&hex_id(new_trace_byte, 16)).unwrap();
+    assert_eq!(survivor.len(), 1);
+    assert_eq!(survivor[0].events.len(), 1);
+    assert_eq!(dependent_row_counts(&store), (1, 1, 1));
     assert_eq!(orphan_counts(&store), (0, 0, 0));
+    let llm = store.recent_llm(None, 10, None, None).unwrap();
+    assert_eq!(
+        llm.iter()
+            .map(|call| call.trace_id.as_str())
+            .collect::<Vec<_>>(),
+        vec![hex_id(new_trace_byte, 16)]
+    );
 }
 
 fn trace_request(spans: Vec<Span>) -> ExportTraceServiceRequest {

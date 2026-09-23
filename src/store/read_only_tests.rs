@@ -121,7 +121,7 @@ fn read_only_open_rejects_an_empty_database_without_mutation() {
 #[test]
 fn read_only_open_rejects_future_and_negative_versions_without_mutation() {
     for (version, expected_message) in [
-        (3, "schema version 3 is newer"),
+        (4, "schema version 4 is newer"),
         (-1, "schema version -1 is invalid"),
     ] {
         let tempdir = tempdir().unwrap();

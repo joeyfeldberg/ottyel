@@ -6,7 +6,7 @@ use opentelemetry_proto::tonic::{
     },
     metrics::v1::{Metric, metric},
 };
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, params};
 
 use crate::domain::{
     LlmAttributes, attributes_to_map, extract_llm_attributes, extract_service_name,
@@ -83,21 +83,6 @@ impl Store {
                         .transpose()
                         .map_err(|err| anyhow::anyhow!(err))?;
 
-                    // v1 keys spans by span_id alone, so a span can move to another trace.
-                    // Remove projections left under the trace it leaves.
-                    let displaced: Option<String> = conn
-                        .prepare_cached("SELECT trace_id FROM spans WHERE span_id = ?1")?
-                        .query_row([&span_id], |row| row.get(0))
-                        .optional()?;
-                    if let Some(previous) = displaced.filter(|previous| *previous != trace_id) {
-                        for table in ["span_events", "span_links", "llm_spans"] {
-                            conn.prepare_cached(&format!(
-                                "DELETE FROM {table} WHERE trace_id = ?1 AND span_id = ?2"
-                            ))?
-                            .execute(params![previous, span_id])?;
-                        }
-                    }
-
                     conn.execute(
                         r#"
                         INSERT INTO spans (
@@ -105,8 +90,7 @@ impl Store {
                             span_kind, status_code, start_time_unix_nano, end_time_unix_nano,
                             duration_ms, resource_attributes_json, attributes_json, llm_json
                         ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-                        ON CONFLICT(span_id) DO UPDATE SET
-                            trace_id = excluded.trace_id,
+                        ON CONFLICT(trace_id, span_id) DO UPDATE SET
                             parent_span_id = excluded.parent_span_id,
                             service_name = excluded.service_name,
                             span_name = excluded.span_name,
@@ -320,8 +304,7 @@ impl Store {
                 span_id, trace_id, service_name, provider, model, operation,
                 input_tokens, output_tokens, total_tokens, cost, latency_ms, status, raw_json
             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)
-            ON CONFLICT(span_id) DO UPDATE SET
-                trace_id = excluded.trace_id,
+            ON CONFLICT(trace_id, span_id) DO UPDATE SET
                 service_name = excluded.service_name,
                 provider = excluded.provider,
                 model = excluded.model,

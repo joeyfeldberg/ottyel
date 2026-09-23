@@ -1,13 +1,14 @@
 mod backup;
 mod v1;
 mod v2;
+mod v3;
 
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail, ensure};
 use rusqlite::{Connection, TransactionBehavior};
 
-pub(super) const LATEST_SCHEMA_VERSION: i64 = 2;
+pub(super) const LATEST_SCHEMA_VERSION: i64 = 3;
 
 #[derive(Debug)]
 pub(super) struct Migration {
@@ -18,7 +19,7 @@ pub(super) struct Migration {
     validate: fn(&Connection) -> Result<()>,
 }
 
-pub(super) const MIGRATIONS: [Migration; 2] = [
+pub(super) const MIGRATIONS: [Migration; 3] = [
     Migration {
         from_version: 0,
         to_version: 1,
@@ -32,6 +33,13 @@ pub(super) const MIGRATIONS: [Migration; 2] = [
         name: "add retention time indexes",
         sql: v2::DDL,
         validate: v2::validate_strict,
+    },
+    Migration {
+        from_version: 2,
+        to_version: 3,
+        name: "key spans and projections by trace and span",
+        sql: v3::DDL,
+        validate: v3::validate_strict,
     },
 ];
 
@@ -51,6 +59,7 @@ fn initialize_with_backup(conn: &mut Connection, backup: Backup) -> Result<()> {
         0 if holds_data => v1::validate_strict(conn)
             .context("unversioned database is incompatible with v1 schema")?,
         1 => v1::validate_strict(conn).context("version 1 database has an incompatible schema")?,
+        2 => v2::validate_strict(conn).context("version 2 database has an incompatible schema")?,
         _ => {}
     }
 
@@ -71,7 +80,7 @@ fn initialize_with_backup(conn: &mut Connection, backup: Backup) -> Result<()> {
             None => "schema migration failed and was rolled back".to_string(),
         })?;
     } else {
-        v2::validate_strict(conn).context("version 2 database has an incompatible schema")?;
+        v3::validate_strict(conn).context("version 3 database has an incompatible schema")?;
     }
 
     configure_connection(conn)
@@ -88,10 +97,12 @@ pub(super) fn validate_read_only(conn: &Connection) -> Result<()> {
         0 => {
             v1::validate_strict(conn).context("unversioned database is incompatible with v1 schema")
         }
-        // Queries need no v2 index, so a reader still opens a database an older writer owns.
+        // Queries work on every shipped schema, so a reader still opens a database an older
+        // writer owns.
         1 => v1::validate_strict(conn).context("version 1 database has an incompatible schema"),
+        2 => v2::validate_strict(conn).context("version 2 database has an incompatible schema"),
         LATEST_SCHEMA_VERSION => {
-            v2::validate_strict(conn).context("version 2 database has an incompatible schema")
+            v3::validate_strict(conn).context("version 3 database has an incompatible schema")
         }
         _ => bail!(
             "database schema version {version} requires migration to version {LATEST_SCHEMA_VERSION} and cannot be opened read-only"
@@ -215,6 +226,14 @@ fn configure_connection(conn: &Connection) -> Result<()> {
         journal_mode.eq_ignore_ascii_case("wal"),
         "SQLite rejected WAL mode and returned {journal_mode}"
     );
+
+    // v3 relies on ON DELETE CASCADE, which SQLite enforces only when enabled per connection.
+    conn.pragma_update(None, "foreign_keys", "ON")
+        .context("failed to enable SQLite foreign keys")?;
+    let foreign_keys: i64 = conn
+        .pragma_query_value(None, "foreign_keys", |row| row.get(0))
+        .context("failed to verify SQLite foreign keys")?;
+    ensure!(foreign_keys == 1, "SQLite rejected foreign key enforcement");
 
     conn.pragma_update(None, "synchronous", "NORMAL")
         .context("failed to set SQLite synchronous mode")?;

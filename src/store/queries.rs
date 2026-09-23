@@ -168,7 +168,7 @@ impl Store {
         )?;
         let llm_count: usize = conn.query_row(
             &format!(
-                "SELECT COUNT(*) FROM llm_spans INNER JOIN spans ON spans.span_id = llm_spans.span_id{}",
+                "SELECT COUNT(*) FROM llm_spans INNER JOIN spans ON spans.trace_id = llm_spans.trace_id AND spans.span_id = llm_spans.span_id{}",
                 threshold_clause("spans.end_time_unix_nano", threshold_unix_nano)
             ),
             [],
@@ -467,7 +467,7 @@ impl Store {
             SELECT llm_spans.trace_id, llm_spans.span_id, spans.start_time_unix_nano, llm_spans.service_name, spans.span_name, provider, model, operation,
                    input_tokens, output_tokens, total_tokens, cost, latency_ms, status, raw_json
             FROM llm_spans
-            INNER JOIN spans ON spans.span_id = llm_spans.span_id
+            INNER JOIN spans ON spans.trace_id = llm_spans.trace_id AND spans.span_id = llm_spans.span_id
             "#,
         );
         let mut where_clauses = Vec::new();
@@ -592,7 +592,7 @@ impl Store {
             "#
         );
         if threshold_unix_nano.is_some() {
-            sql.push_str(" INNER JOIN spans ON spans.span_id = llm_spans.span_id");
+            sql.push_str(" INNER JOIN spans ON spans.trace_id = llm_spans.trace_id AND spans.span_id = llm_spans.span_id");
         }
         let mut where_clauses = Vec::new();
         if let Some(service) = service_filter {
@@ -647,7 +647,7 @@ impl Store {
             SELECT llm_spans.service_name, provider, model, total_tokens, cost, latency_ms, status,
                    raw_json, spans.start_time_unix_nano, spans.end_time_unix_nano
             FROM llm_spans
-            INNER JOIN spans ON spans.span_id = llm_spans.span_id
+            INNER JOIN spans ON spans.trace_id = llm_spans.trace_id AND spans.span_id = llm_spans.span_id
             "#,
         );
         let mut where_clauses = Vec::new();
@@ -739,7 +739,7 @@ impl Store {
             "#,
         );
         if threshold_unix_nano.is_some() {
-            sql.push_str(" INNER JOIN spans ON spans.span_id = llm_spans.span_id");
+            sql.push_str(" INNER JOIN spans ON spans.trace_id = llm_spans.trace_id AND spans.span_id = llm_spans.span_id");
         }
         append_llm_where(&mut sql, service_filter, threshold_unix_nano, search_query);
         sql.push_str(
@@ -800,7 +800,7 @@ impl Store {
             "#,
         );
         if threshold_unix_nano.is_some() {
-            sql.push_str(" INNER JOIN spans ON spans.span_id = llm_spans.span_id");
+            sql.push_str(" INNER JOIN spans ON spans.trace_id = llm_spans.trace_id AND spans.span_id = llm_spans.span_id");
         }
         append_llm_where(&mut sql, service_filter, threshold_unix_nano, search_query);
         if kind == LlmTopCallKind::Cost {

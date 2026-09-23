@@ -12,7 +12,7 @@ CREATE INDEX idx_metrics_time ON metrics(timestamp_unix_nano);
 CREATE INDEX idx_spans_end ON spans(end_time_unix_nano);
 "#;
 
-const INDEXES: &[IndexDefinition] = &[
+pub(super) const INDEXES: &[IndexDefinition] = &[
     index("idx_logs_time", "logs", &[ascending("timestamp_unix_nano")]),
     index(
         "idx_metrics_time",

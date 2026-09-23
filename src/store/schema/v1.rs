@@ -3,8 +3,10 @@ mod validation;
 use anyhow::Result;
 use rusqlite::Connection;
 
+pub(super) use validation::validate_exact;
+
 pub(super) fn validate_strict(conn: &Connection) -> Result<()> {
-    validation::validate_strict(conn, &[])
+    validate_strict_with(conn, &[])
 }
 
 /// Validates the frozen v1 tables and indexes plus exactly the `additional` indexes.
@@ -12,7 +14,25 @@ pub(super) fn validate_strict_with(
     conn: &Connection,
     additional: &[IndexDefinition],
 ) -> Result<()> {
-    validation::validate_strict(conn, additional)
+    let tables: Vec<_> = TABLES.iter().collect();
+    let indexes: Vec<_> = INDEXES.iter().chain(additional).collect();
+    validate_exact(conn, &tables, &indexes)
+}
+
+/// Returns a frozen v1 table definition that later versions keep unchanged.
+pub(super) fn table(name: &str) -> &'static TableDefinition {
+    TABLES
+        .iter()
+        .find(|table| table.name == name)
+        .expect("v1 defines the requested table")
+}
+
+/// Returns a frozen v1 index definition that later versions keep unchanged.
+pub(super) fn index_named(name: &str) -> &'static IndexDefinition {
+    INDEXES
+        .iter()
+        .find(|index| index.name == name)
+        .expect("v1 defines the requested index")
 }
 
 // Shipped schema definitions are immutable; future changes require a new versioned migration.
@@ -106,7 +126,7 @@ CREATE INDEX IF NOT EXISTS idx_llm_service ON llm_spans(service_name);
 "#;
 
 #[derive(Debug, Clone, Copy)]
-struct ColumnDefinition {
+pub(super) struct ColumnDefinition {
     name: &'static str,
     data_type: &'static str,
     not_null: bool,
@@ -114,16 +134,16 @@ struct ColumnDefinition {
 }
 
 #[derive(Debug)]
-struct TableDefinition {
-    name: &'static str,
-    columns: &'static [ColumnDefinition],
-    autoincrement: bool,
-    create_sql: &'static str,
+pub(super) struct TableDefinition {
+    pub(super) name: &'static str,
+    pub(super) columns: &'static [ColumnDefinition],
+    pub(super) autoincrement: bool,
+    pub(super) create_sql: &'static str,
 }
 
 #[derive(Debug)]
 pub(super) struct IndexDefinition {
-    name: &'static str,
+    pub(super) name: &'static str,
     table: &'static str,
     columns: &'static [IndexColumn],
 }
@@ -347,7 +367,7 @@ const INDEXES: &[IndexDefinition] = &[
     index("idx_llm_service", "llm_spans", &[ascending("service_name")]),
 ];
 
-const fn column(
+pub(super) const fn column(
     name: &'static str,
     data_type: &'static str,
     not_null: bool,

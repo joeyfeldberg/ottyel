@@ -255,13 +255,11 @@ fn traces_over_cap(transaction: &Connection, maximum_spans: usize) -> Result<Vec
     Ok(traces)
 }
 
-/// Deletes one trace and every projection keyed to it, using the per-trace indexes.
+/// Deletes one trace; its events, links, and LLM projections follow by `ON DELETE CASCADE`.
 fn delete_trace(transaction: &Connection, trace_id: &str) -> Result<()> {
-    for table in ["span_events", "span_links", "llm_spans", "spans"] {
-        transaction
-            .prepare_cached(&format!("DELETE FROM {table} WHERE trace_id = ?1"))?
-            .execute([trace_id])?;
-    }
+    transaction
+        .prepare_cached("DELETE FROM spans WHERE trace_id = ?1")?
+        .execute([trace_id])?;
     Ok(())
 }
 
