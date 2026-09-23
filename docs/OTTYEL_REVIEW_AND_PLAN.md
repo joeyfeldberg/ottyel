@@ -4,7 +4,7 @@ Status: active implementation plan
 
 Review date: 2026-07-10
 
-Execution updated: 2026-07-23
+Execution updated: 2026-09-23
 
 Reviewed revision: `06bf94d` (`main`)
 
@@ -28,8 +28,9 @@ uses a dedicated writer owner plus four WAL readers. OTLP requests also pass thr
 shared cross-transport admission gate with transport-byte limits, compression handling,
 schema-aware preallocation and field-work budgets, a decoded-graph parity check, and a
 request deadline. SQLite writer admission now also bounds aggregate queued and executing
-OTLP work by primary records and canonical protobuf bytes. Retention still runs after
-every export. Request graph amplification and protobuf field dispatch are bounded by the
+OTLP work by primary records and canonical protobuf bytes, and the owner coalesces up to
+four already-queued exports into one transaction with one retention pass. Retention
+still runs once per transaction, so an isolated export still pays a full scan. Request graph amplification and protobuf field dispatch are bounded by the
 pinned-schema preflight, but exact heap bytes and accepted-work completion remain open;
 UI caches likewise mask remaining aggregate and retention cost under small loads without
 removing it.
@@ -202,9 +203,16 @@ Each admitted trace, log, or metric export now:
    Prost-encoded length on the blocking pool;
 4. atomically reserves writer record/byte capacity and command-queue admission, then
    waits in the bounded storage queue if the owner is active;
-5. writes and commits one signal transaction on the owner thread;
-6. runs the existing retention transaction on the same owner before the next command;
+5. writes inside its own savepoint of a shared transaction on the owner thread, which also
+   takes any exports that are already queued, up to four exports, 10,000 primary records,
+   4 MiB of canonical bytes, or 25 ms of transaction age checked between exports;
+6. runs retention once inside that transaction and commits the group;
 7. releases writer weight, returns the receipt, and then releases request capacity.
+
+An ordinary export failure rolls back only its savepoint. A retention or commit failure
+rolls back and fails the whole group, so a retention error no longer accompanies
+already-committed rows. A panic fails every group member closed as outcome-unknown.
+Exclusive non-OTLP writer work never joins a group and keeps FIFO order.
 
 Deterministic tests prove FIFO serialization, exact two-axis boundaries, active-job
 charging, atomic Full/disconnect rollback, arithmetic overflow, ordinary-error recovery,
@@ -243,7 +251,7 @@ before/after distributions are in `docs/performance.md`.
 A deadline response can still be outcome-unknown if accepted storage work commits after
 the client times out, which makes duplicate export handling mandatory. Reader checkout,
 store open/migration, the first terminal snapshot, and final owner join still lack
-bounded completion. Retention still scans after every export.
+bounded completion. Retention still scans once per coalesced transaction.
 
 ### 2. Query Cost And Incorrect Read Models
 
@@ -370,7 +378,7 @@ bytes or end-to-end CPU. The remaining protocol contract must also:
 - validate record invariants and return per-signal partial success for mixed-validity
   requests where the OTLP data model permits it;
 - define retransmission and duplicate handling for deadline-unknown outcomes;
-- add bounded coalescing, retry hints, and consistent transient SQLite classification;
+- add retry hints and consistent transient SQLite classification;
 - expose accepted, committed, rejected, duplicate, dropped, queued, and latency health by
   signal and transport;
 - stop intake and drain or reject accepted work within a shutdown deadline;
@@ -665,8 +673,9 @@ Goal: behave predictably under malformed, compressed, concurrent, and excessive 
 - [x] Benchmark near-limit scalar/unknown-field protobufs on two clean release runs and,
   after the predeclared gate triggered, add an independent 2,000,000-unit preflight
   field/message/packed-element budget with accepted-boundary headroom coverage.
-- [ ] Coalesce adjacent batches within a small time/size budget without delaying low-rate
-  local development traffic.
+- [x] Coalesce adjacent batches within a small time/size budget without delaying low-rate
+  local development traffic. The owner takes only already-queued exports, never waits,
+  and passed the predeclared two-run reference gate in `docs/performance.md`.
 - [x] Configure identity/gzip for every signal on both transports and enforce HTTP
   wire/decompressed limits plus Tonic's documented single gRPC message limit.
 - [x] Validate HTTP binary content types and encode binary OTLP success and
@@ -985,8 +994,8 @@ Keep each pull request a vertical, reversible step with tests and measurements.
    preallocation budgets plus postdecode parity, identity/gzip, exact unary framing, a
    client response deadline, protocol error envelopes, and retry-correct capacity/lifecycle
    failures. Configurable writer record/canonical-byte admission and measured protobuf
-   field-work admission are also complete; batching, partial success, duplicate exports,
-   health, and drain remain.
+   field-work admission and opportunistic writer coalescing are also complete; partial
+   success, duplicate exports, health, and drain remain.
 6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled
    bounded whole-trace retention.
 7. [ ] Ship faithful metric streams/points and targeted metric series queries.

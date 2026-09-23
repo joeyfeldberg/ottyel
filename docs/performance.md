@@ -214,6 +214,68 @@ Rejected measurements report a null p50 throughput because early rejection is no
 completed-input throughput. Preserve both complete JSON reports when changing the policy,
 fixtures, pinned protobuf schema, compiler, or machine.
 
+## Writer Coalescing Benchmark
+
+`benches/writer_coalescing.rs` measures what adjacent OTLP exports cost on the SQLite
+writer. It needs the `benchmark-support` feature, which exposes hidden writer-parking and
+counter hooks that compile away in normal builds:
+
+```sh
+cargo bench --features benchmark-support --bench writer_coalescing -- --profile smoke
+```
+
+```sh
+cargo bench --features benchmark-support --bench writer_coalescing -- --profile reference \
+  --machine-label "replace-with-stable-machine-name" \
+  --cpu "replace-with-exact-cpu-model" \
+  --memory-gib 32 \
+  --storage-label "replace-with-storage-class" \
+  --output target/performance/writer-coalescing-reference.json
+```
+
+It seeds the same store as the reference profile above. Each burst sample parks the writer
+on an uncounted command and admits four prepared 250-span trace exports through the same
+asynchronous path HTTP and gRPC use. It then releases the writer and times each receipt
+from release. Low-rate samples submit one single-span export to an idle writer. Every
+sample checks writer counters and persisted span rows against the current policy's
+structural contract, so a run fails instead of reporting numbers for the wrong shape. A
+report is reference-eligible only from a clean optimized build with complete machine
+identity.
+
+The gate was pinned in `1e8ab6b` before the implementation existed. It required at least
+87.5% fewer burst SQLite commits, 75% fewer retention invocations, a 50% lower median
+retention time per burst, and 1.25 times the median burst records per second. It also
+allowed at most a 5% burst ack p95 regression and a low-rate ack p95 increase of at most
+max(1 ms, 10% of baseline), across two clean runs on each side.
+
+Machine `joey-mbp` (Apple M3 Pro, 12 logical CPUs, 18 GiB, `internal-ssd`, Rust 1.96.0).
+Baseline is clean `1e8ab6b` (one export per transaction plus a separate retention
+transaction). Candidate is clean `d6227c6` (`opportunistic_adjacent_otlp` v1).
+
+| Metric | Baseline runs 1 / 2 | Candidate runs 1 / 2 |
+| --- | ---: | ---: |
+| SQLite commits per four-export burst | 8 / 8 | 1 / 1 |
+| Retention invocations per burst | 4 / 4 | 1 / 1 |
+| Burst makespan p50 | 979.5 ms / 1015.6 ms | 264.6 ms / 198.3 ms |
+| Burst makespan p95 | 1624.3 ms / 1354.1 ms | 372.4 ms / 412.9 ms |
+| Burst records per second p50 | 941.9 / 980.9 | 3751.1 / 5022.9 |
+| Retention time per burst p50 | 962.5 ms / 997.9 ms | 249.1 ms / 182.2 ms |
+| Burst release-to-ack p95 | 1463.9 ms / 1151.9 ms | 372.4 ms / 412.9 ms |
+| Low-rate ack p50 | 265.8 ms / 218.3 ms | 191.8 ms / 185.8 ms |
+| Low-rate ack p95 | 856.3 ms / 424.2 ms | 383.8 ms / 397.2 ms |
+
+Every baseline/candidate pairing passes every criterion. The weakest margin is low-rate
+p95 for baseline run 2 against candidate run 1: 40.3 ms faster, where up to a 42.4 ms
+increase was allowed. The low-rate p95 is noisy on this machine. The two baselines differ
+by 2x, and a provisional dirty-tree candidate run measured 570 ms, which would have failed
+against baseline run 2. That run was ineligible and is not evidence, but the tail should
+be re-measured before anyone treats low-rate latency as settled.
+
+Coalescing does not make retention cheaper. At reference scale, about 1M logs and 1M
+metric points, one retention pass still costs roughly 180 to 250 ms. A lone export
+therefore still waits on a full scan. Scheduled, bounded retention remains the fix for
+that.
+
 ## Store Report Schema
 
 The pretty-printed JSON has a versioned, stable field layout. It records:
