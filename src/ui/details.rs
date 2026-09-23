@@ -759,13 +759,26 @@ fn build_metric_detail_lines(series: &[MetricSummary], palette: Palette) -> Vec<
         Line::raw(""),
         style::section("Recent points", palette),
     ];
-    for metric in series.iter().rev().take(12) {
+    let recent: Vec<_> = series.iter().rev().take(12).collect();
+    let time_width = recent
+        .iter()
+        .map(|metric| {
+            format::local_time(metric.timestamp_unix_nano)
+                .chars()
+                .count()
+        })
+        .max()
+        .unwrap_or_default();
+    for metric in recent {
         let value = metric
             .value
             .map_or_else(|| metric.summary.clone(), format::number);
         lines.push(Line::from(vec![
             style::muted(
-                format!("{:<19}  ", format::local_time(metric.timestamp_unix_nano)),
+                format!(
+                    "{:<time_width$}  ",
+                    format::local_time(metric.timestamp_unix_nano)
+                ),
                 palette,
             ),
             style::plain(value, palette),

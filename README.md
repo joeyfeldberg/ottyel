@@ -31,18 +31,35 @@ remote infrastructure. `ottyel` is meant to be a serious local workstation:
 
 ## Screenshots
 
+<p>
+  <img src="docs/screenshots/overview.png" alt="Overview with ingest totals, per-service latency and errors, a needs-attention feed of failing traces and error logs, slowest traces, and LLM usage by model" />
+  <br /><strong>Overview</strong>: what is arriving, what is failing, and what is slow, at a glance.
+</p>
+
 <table>
   <tr>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/llm-inspector.png" alt="LLM Inspector showing model rollups, sessions, top calls, and detailed prompt and output inspection" />
-      <p><strong>LLM Inspector</strong><br />Model rollups, top calls, session summaries, and prompt and output inspection in one view.</p>
+      <img src="docs/screenshots/traces.png" alt="Trace Explorer showing a nested checkout trace with waterfall timing, hot-path and error highlighting, and span detail with events" />
+      <p><strong>Trace Explorer</strong><br />Nested trace trees with waterfall timing, hot-path and error highlighting, and full span detail.</p>
     </td>
     <td width="50%" valign="top">
-      <img src="docs/screenshots/llm-inspector2.png" alt="Trace Explorer showing deep nested spans, waterfall timing bars, and hot-path highlighting" />
-      <p><strong>Trace Explorer</strong><br />Deep trace trees with waterfall timing, hot-path highlighting, and span-level drilldown.</p>
+      <img src="docs/screenshots/llm.png" alt="LLM Inspector showing model and session rollups, a call feed, and prompt and output inspection with a timeline" />
+      <p><strong>LLM Inspector</strong><br />Model and session rollups, every call with tokens and latency, and prompt and output inspection.</p>
+    </td>
+  </tr>
+  <tr>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/metrics.png" alt="Metrics tab listing series with sparklines, a line chart of the selected series, and its statistics" />
+      <p><strong>Metrics</strong><br />Series with inline sparklines, a trend chart, and min, max, and average for the selection.</p>
+    </td>
+    <td width="50%" valign="top">
+      <img src="docs/screenshots/logs.png" alt="Logs tab with a severity-colored feed and structured log detail" />
+      <p><strong>Logs</strong><br />Severity-colored feed with trace correlation and structured, pretty-printed detail.</p>
     </td>
   </tr>
 </table>
+
+Screenshots are rendered from a demo workload by `scripts/readme-screenshots.sh`.
 
 ## Install
 

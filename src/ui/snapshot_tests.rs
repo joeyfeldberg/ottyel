@@ -225,7 +225,7 @@ fn write_color_previews() {
     fs::write(directory.join("index.html"), index).unwrap();
 }
 
-fn buffer_html(buffer: &Buffer) -> String {
+pub(super) fn buffer_html(buffer: &Buffer) -> String {
     use ratatui::style::{Color, Modifier};
     let css = |color: Color, fallback: &str| match color {
         Color::Rgb(r, g, b) => format!("#{r:02x}{g:02x}{b:02x}"),
