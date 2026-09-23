@@ -327,6 +327,16 @@ indexes existed. `8dd83f5`, which adds the indexes but still runs retention per 
 measured 58 ms and 73 ms. That comparison crosses a schema change and was not a predeclared
 gate, so treat it as an observation only.
 
+### Schema v3 Sanity Run
+
+One clean reference run of `c887aa4` checks what the v3 composite keys and writer
+foreign-key enforcement cost. It measured 16.414 ms burst makespan p50, 21.394 ms p95, 60,903
+records per second p50, and a 0.085 ms / 0.133 ms low-rate ack p50 / p95. Throughput is
+about 4% below the two `6716ea7` candidate runs and low-rate p50 is about 0.01 ms higher,
+consistent with a parent-key lookup per inserted event, link, and LLM row. It is one run
+with no predeclared gate, but every retention gate criterion still holds against the
+`8dd83f5` baselines.
+
 ## Store Report Schema
 
 The pretty-printed JSON has a versioned, stable field layout. It records:
