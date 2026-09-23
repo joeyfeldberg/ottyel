@@ -276,6 +276,30 @@ metric points, one retention pass still costs roughly 180 to 250 ms. A lone expo
 therefore still waits on a full scan. Scheduled, bounded retention remains the fix for
 that.
 
+## Scheduled Retention Gate (Predeclared)
+
+This gate was committed before any scheduled-retention code or measurement existed. The
+baseline is two clean `writer_coalescing` reference runs of the commit that adds this
+section. That commit already has the schema v2 retention indexes, but it still runs
+retention inside every coalesced ingest transaction. The candidate is two clean reference
+runs of the scheduled-retention implementation on the same machine, storage class, and
+Rust toolchain. The paths below are the same in report schema v1 and v2.
+
+Every baseline/candidate pairing must satisfy all of these:
+
+| Metric path | Requirement |
+| --- | --- |
+| `measurements.low_rate.submission_attempt_to_completion_ack.p50_ns` | candidate <= 10% of baseline |
+| `measurements.low_rate.submission_attempt_to_completion_ack.p95_ns` | candidate <= 25% of baseline |
+| `measurements.burst.release_to_completion_ack.p95_ns` | candidate <= baseline |
+| `measurements.burst.records_per_second.p50` | candidate >= 2x baseline |
+
+Structurally, no candidate ingest transaction may contain retention work. Maintenance runs
+in its own transactions, and the report records its chunk count and elapsed time within
+the measured samples. The fixture's future timestamps mean nothing expires, so this gate
+measures the per-export cost that scheduling removes. It does not measure chunked deletion
+throughput under real expiry, which unit tests bound structurally instead.
+
 ## Store Report Schema
 
 The pretty-printed JSON has a versioned, stable field layout. It records:
