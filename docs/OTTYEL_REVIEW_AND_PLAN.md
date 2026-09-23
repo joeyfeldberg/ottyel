@@ -29,8 +29,9 @@ shared cross-transport admission gate with transport-byte limits, compression ha
 schema-aware preallocation and field-work budgets, a decoded-graph parity check, and a
 request deadline. SQLite writer admission now also bounds aggregate queued and executing
 OTLP work by primary records and canonical protobuf bytes, and the owner coalesces up to
-four already-queued exports into one transaction with one retention pass. Retention
-still runs once per transaction, so an isolated export still pays a full scan. Request graph amplification and protobuf field dispatch are bounded by the
+four already-queued exports into one transaction. Retention is scheduled writer
+maintenance that runs in bounded, index-backed units between exports, so no export pays
+for it. Request graph amplification and protobuf field dispatch are bounded by the
 pinned-schema preflight, but exact heap bytes and accepted-work completion remain open;
 UI caches likewise mask remaining aggregate and retention cost under small loads without
 removing it.
@@ -143,7 +144,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P0 (resolved 2026-07-10) | Trace filters produced partial summaries | `src/store/queries.rs`, `src/store/tests.rs` | Candidate trace IDs are now selected before complete-trace aggregation; regressions cover error-only, service, text, time, and cursor paging |
 | P0 | Metric streams are conflated and lossy | `src/store/ingest.rs`, `src/ui/details.rs` | Different attribute sets are charted together; histogram buckets, quantiles, temporality details, exemplars, unit, and description are lost |
 | P0 (partially resolved 2026-07-14) | Store ownership and async database work remain incomplete | `src/store/writer.rs`, `src/store/reader_pool.rs`, `src/ingest.rs` | One named thread now owns SQLite writes behind immediate 64-command admission, queries use four physical read-only connections, and all six OTLP handlers await async receipts; startup/migration, the initial TUI snapshot, reader checkout, completion, and shutdown still lack a fully bounded worker contract |
-| P0 | Retention runs after every export | `src/store/ingest.rs` | Sustained ingest pays repeated table scans and delete transactions even when nothing expires |
+| P0 (resolved 2026-09-23) | Retention ran after every export | `src/store/retention.rs`, `src/store/writer/` | Retention now runs as scheduled writer maintenance, on a 30 s timer or after `max(1000, max_spans / 10)` committed records. It advances in units of at most 2,000 rows or 20 traces, each in its own transaction, and seeks on the schema v2 time indexes. At reference scale, low-rate ack p50 fell from 58 ms to 0.07 ms |
 | P0 (partially resolved 2026-09-23) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/ingest/`, `src/store/writer.rs` | One shared request gate covers both transports from pre-decode admission through commit; identity/gzip, byte limits, protobuf HTTP failures, schema-aware preallocation plus measured field-work budgets, postdecode parity, exact unary framing, client deadlines, configurable aggregate writer record/canonical-byte admission, and retry-correct capacity/lifecycle errors are covered, and adjacent exports coalesce into one writer transaction. Record-level screening now rejects invalid spans and metric points and returns OTLP partial success, and in-memory receiver statistics feed a TUI header summary. Duplicate export policy, retry hints, duplicate/dropped counts, and graceful drain remain incomplete |
 | P0 | SQLite identity is based on global `span_id` | `src/store/schema.rs` | The logical identity `(trace_id, span_id)` is not preserved; joins and upserts can corrupt colliding traces |
 | P0 (resolved 2026-07-13) | There was no schema migration mechanism | `src/store/schema.rs`, `src/store/schema/` | Ordered `user_version` migrations now preserve exact legacy v0 data, validate the frozen schema, and roll back DDL, version changes, and failed post-checks together. Since 2026-09-23 every migration of a data-bearing database is preceded by a sibling `VACUUM INTO` copy with a documented manual recovery |
@@ -152,7 +153,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P1 | Current GenAI events and attributes are only partly understood | `src/domain.rs`, `src/store/ingest.rs` | Event-based inference details and evaluations are ignored; current structured messages, tool results, cache/reasoning tokens, agents, and TTFT are missing |
 | P1 | The all-tab snapshot does work that is not rendered | `src/query.rs`, `src/app/mod.rs` | Every refresh reads every signal; rollups and top calls are queried after their UI panels were removed; the first trace page is queried twice |
 | P1 (partially resolved 2026-07-11) | Log time and severity semantics were wrong and remain incomplete | `src/store/helpers.rs`, `src/store/ingest.rs`, `src/store/tests/log_semantics.rs` | Event-time fallback and empty-text numeric severity labels are corrected; the v1 schema still drops observed time, numeric severity, event name, and other fields |
-| P1 (resolved 2026-07-13) | Retention could leave corrupt-looking investigations | `src/store/ingest.rs`, `src/store/tests/retention.rs` | Time and span-cap retention now evict whole traces transactionally and remove event, link, and LLM orphans by trace/span identity; scheduled maintenance and the v2 composite schema remain open |
+| P1 (resolved 2026-07-13) | Retention could leave corrupt-looking investigations | `src/store/ingest.rs`, `src/store/tests/retention.rs` | Time and span-cap retention now evict whole traces transactionally and remove event, link, and LLM rows by trace identity. Scheduled bounded maintenance is complete; the composite-identity schema remains open |
 | P1 | Startup and runtime failures are not visible in the TUI | `src/app/mod.rs` | A failed listener bind is not reported until exit; a refresh error exits the terminal loop instead of showing stale data plus an error |
 | P1 (resolved 2026-07-13) | MCP and doctor used writable store initialization | `src/app/mod.rs`, `src/store/mod.rs`, `src/store/read_only_tests.rs`, `src/mcp/tests.rs` | MCP and non-repair doctor now open a physically read-only main database, enable connection-local query-only mode, validate exact v0/v1 schemas without migration, and reject direct SQL and ingest writes; SQLite WAL/SHM coordination sidecars remain allowed so a live reader sees later commits |
 | P1 | MCP responses can be unbounded | `src/mcp/resources.rs`, `src/mcp/tools.rs` | A large trace or prompt can consume excessive time and model context; `search_llm` always computes all aggregates |
@@ -206,12 +207,12 @@ Each admitted trace, log, or metric export now:
 5. writes inside its own savepoint of a shared transaction on the owner thread, which also
    takes any exports that are already queued, up to four exports, 10,000 primary records,
    4 MiB of canonical bytes, or 25 ms of transaction age checked between exports;
-6. runs retention once inside that transaction and commits the group;
+6. commits the group; retention runs later as separate bounded maintenance units;
 7. releases writer weight, returns the receipt, and then releases request capacity.
 
-An ordinary export failure rolls back only its savepoint. A retention or commit failure
-rolls back and fails the whole group, so a retention error no longer accompanies
-already-committed rows. A panic fails every group member closed as outcome-unknown.
+An ordinary export failure rolls back only its savepoint. A commit failure rolls back and
+fails the whole group. A failed retention unit rolls back only itself, is counted in the
+writer backlog and header health, and never fails an export. A panic fails every group member closed as outcome-unknown.
 Exclusive non-OTLP writer work never joins a group and keeps FIFO order.
 
 Deterministic tests prove FIFO serialization, exact two-axis boundaries, active-job
@@ -251,7 +252,7 @@ before/after distributions are in `docs/performance.md`.
 A deadline response can still be outcome-unknown if accepted storage work commits after
 the client times out, which makes duplicate export handling mandatory. Reader checkout,
 store open/migration, the first terminal snapshot, and final owner join still lack
-bounded completion. Retention still scans once per coalesced transaction.
+bounded completion.
 
 ### 2. Query Cost And Incorrect Read Models
 
@@ -366,7 +367,7 @@ contract:
 - gRPC accepts exactly one unary export message and performs preflight plus Prost work on
   the blocking pool after Tonic's framing, gzip, and message-size checks;
 - decoded requests reserve configurable aggregate writer capacity by exact primary
-  records and canonical Prost bytes until write plus retention completion;
+  records and canonical Prost bytes until the write commits;
 - invalid or individually oversized requests are non-retryable, while aggregate
   capacity, timeout, and writer lifecycle failures use retryable HTTP/gRPC statuses;
 - client wait has a configurable deadline; accepted SQLite work continues and retains
@@ -392,10 +393,12 @@ bytes or end-to-end CPU. The remaining protocol contract must also:
 
 ### 7. Retention And Lifecycle
 
-Retention must be maintenance work, not request work. It should operate on whole traces,
-delete all related rows through composite foreign keys/cascades, and cap logs, metric
-points, AI events, database bytes, and WAL size in addition to spans. Maintenance should
-run on a timer or accepted-record threshold and delete bounded chunks.
+Retention must be maintenance work, not request work. Since 2026-09-23 it is: the writer
+runs it on a timer or accepted-record threshold, one bounded unit per transaction,
+interleaved one unit per queued job. It deletes whole traces only when no span is fresh,
+and keeps the exact oldest-latest-end span-cap order. It should still delete related rows
+through composite foreign keys and cascades, and cap logs, metric points, AI events,
+database bytes, and WAL size in addition to spans.
 
 Since 2026-09-23 startup binds both listeners before entering the TUI, so a port conflict
 is reported on a normal terminal. Quitting stops intake, gives in-flight requests and
@@ -1022,8 +1025,8 @@ Keep each pull request a vertical, reversible step with tests and measurements.
    field-work admission, opportunistic writer coalescing, record-level partial success,
    in-memory ingest statistics, and deadline-bounded graceful drain are also complete;
    duplicate exports remain.
-6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled
-   bounded whole-trace retention.
+6. [ ] Ship the composite trace/log schema and materialized trace summaries. Scheduled
+   bounded whole-trace retention and its schema v2 time indexes are complete.
 7. [ ] Ship faithful metric streams/points and targeted metric series queries.
 8. [ ] Replace the monolithic snapshot with active-view asynchronous read models.
 9. [ ] Add the typed OTel GenAI/OpenInference operation projection and exact run/session

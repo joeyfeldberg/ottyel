@@ -300,6 +300,33 @@ the measured samples. The fixture's future timestamps mean nothing expires, so t
 measures the per-export cost that scheduling removes. It does not measure chunked deletion
 throughput under real expiry, which unit tests bound structurally instead.
 
+### Scheduled Retention Results
+
+Report schema v2 renames the writer counters to ingest-group and maintenance transactions;
+the gate's four metric paths are unchanged. Machine `joey-mbp` (Apple M3 Pro, 18 GiB,
+`internal-ssd`, Rust 1.96.0). The baseline is clean `8dd83f5` and the candidate is clean
+`6716ea7`.
+
+| Metric | Baseline runs 1 / 2 | Candidate runs 1 / 2 | Gate |
+| --- | ---: | ---: | --- |
+| Low-rate ack p50 | 58.382 ms / 58.774 ms | 0.069 ms / 0.075 ms | <= 10% |
+| Low-rate ack p95 | 58.847 ms / 59.957 ms | 0.096 ms / 0.101 ms | <= 25% |
+| Burst release-to-ack p95 | 78.505 ms / 78.728 ms | 19.633 ms / 19.696 ms | <= baseline |
+| Burst records per second p50 | 13,661 / 13,620 | 63,160 / 63,876 | >= 2x |
+
+Every pairing passes. The candidate's low-rate p50 is 0.12% to 0.13% of the baseline, and its
+burst throughput is 4.6 to 4.7 times higher. No maintenance unit ran inside a measured
+sample: the 30 s interval and the benchmark's reserved span capacity kept passes outside
+the sampled windows. These runs therefore measure the per-export cost that scheduling
+removed, not the cost of a pass. That cost is bounded structurally: a unit deletes at most
+2,000 rows or examines at most 2,000 spans, and unit tests pin those bounds.
+
+The baseline itself shows the schema v2 indexes working. The coalescing candidate `d6227c6`
+measured 186 ms to 192 ms low-rate p50 and 198 ms to 265 ms burst makespan p50 before the
+indexes existed. `8dd83f5`, which adds the indexes but still runs retention per export,
+measured 58 ms and 73 ms. That comparison crosses a schema change and was not a predeclared
+gate, so treat it as an observation only.
+
 ## Store Report Schema
 
 The pretty-printed JSON has a versioned, stable field layout. It records:
