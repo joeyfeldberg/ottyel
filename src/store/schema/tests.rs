@@ -11,7 +11,7 @@ use crate::store::Store;
 const HISTORICAL_V0_SCHEMA: &str = include_str!("fixtures/v0_schema.sql");
 
 #[test]
-fn fresh_database_creates_the_v1_schema_and_connection_configuration() {
+fn fresh_database_creates_the_latest_schema_and_connection_configuration() {
     let tempdir = tempdir().unwrap();
     let path = tempdir.path().join("ottyel.db");
 
@@ -30,7 +30,7 @@ fn fresh_database_creates_the_v1_schema_and_connection_configuration() {
         state,
         (
             LATEST_SCHEMA_VERSION,
-            expected_v1_objects(),
+            expected_latest_objects(),
             "wal".to_string(),
             1
         )
@@ -230,7 +230,7 @@ fn newer_schema_version_is_rejected_before_configuration_or_schema_mutation() {
     conn.execute_batch(
         "CREATE TABLE future_data (value TEXT NOT NULL);\
          INSERT INTO future_data VALUES ('preserve me');\
-         PRAGMA user_version = 2;",
+         PRAGMA user_version = 3;",
     )
     .unwrap();
     let expected_objects = user_schema_objects(&conn);
@@ -241,16 +241,16 @@ fn newer_schema_version_is_rejected_before_configuration_or_schema_mutation() {
     let error = Store::open(&path, 24, 1_000).unwrap_err();
     let message = format!("{error:#}");
     assert!(
-        message.contains("schema version 2"),
+        message.contains("schema version 3"),
         "unexpected error: {message}"
     );
     assert!(
-        message.contains("supported version 1"),
+        message.contains("supported version 2"),
         "unexpected error: {message}"
     );
 
     let conn = Connection::open(path).unwrap();
-    assert_eq!(schema_version(&conn).unwrap(), 2);
+    assert_eq!(schema_version(&conn).unwrap(), 3);
     assert_eq!(user_schema_objects(&conn), expected_objects);
     assert_eq!(pragma_i64(&conn, "schema_version"), expected_cookie);
     assert_eq!(pragma_string(&conn, "journal_mode"), expected_mode);
@@ -466,7 +466,7 @@ fn user_schema_objects(conn: &Connection) -> Vec<(String, String, String)> {
         .unwrap()
 }
 
-fn expected_v1_objects() -> Vec<(String, String, String)> {
+fn expected_latest_objects() -> Vec<(String, String, String)> {
     let mut objects = vec![
         ("table", "spans", "spans"),
         ("table", "span_events", "span_events"),
@@ -485,6 +485,9 @@ fn expected_v1_objects() -> Vec<(String, String, String)> {
         ("index", "idx_metrics_name", "metrics"),
         ("index", "idx_llm_trace", "llm_spans"),
         ("index", "idx_llm_service", "llm_spans"),
+        ("index", "idx_logs_time", "logs"),
+        ("index", "idx_metrics_time", "metrics"),
+        ("index", "idx_spans_end", "spans"),
     ]
     .into_iter()
     .map(|(kind, name, table)| (kind.to_string(), name.to_string(), table.to_string()))
@@ -582,4 +585,26 @@ fn a_failed_copy_leaves_the_database_unmigrated() {
     );
     assert_eq!(schema_version(&conn).unwrap(), 0);
     assert_eq!(telemetry_snapshot(&conn), expected_rows);
+}
+
+#[test]
+fn v1_database_with_data_upgrades_to_v2_after_writing_a_copy() {
+    let tempdir = tempdir().unwrap();
+    let path = tempdir.path().join("ottyel.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch(HISTORICAL_V0_SCHEMA).unwrap();
+    insert_legacy_rows(&conn);
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    let expected_rows = telemetry_snapshot(&conn);
+    drop(conn);
+
+    drop(Store::open(&path, 24, 1_000).unwrap());
+
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(schema_version(&conn).unwrap(), 2);
+    assert_eq!(user_schema_objects(&conn), expected_latest_objects());
+    assert_eq!(telemetry_snapshot(&conn), expected_rows);
+    let copy = Connection::open(tempdir.path().join("ottyel.db.v1-backup")).unwrap();
+    assert_eq!(schema_version(&copy).unwrap(), 1);
+    assert_eq!(telemetry_snapshot(&copy), expected_rows);
 }

@@ -61,6 +61,8 @@ fn cold_wal_read_preserves_main_database_and_only_creates_coordination_sidecars(
         .unwrap();
     assert_eq!(expected.journal_mode, "wal");
     drop(writer);
+    // Upgrading the v1 fixture leaves a pre-migration copy, which is not a reader sidecar.
+    std::fs::remove_file(tempdir.path().join("ottyel.db.v1-backup")).unwrap();
 
     // This is intentionally the first filesystem observer after the WAL writer closes.
     let before = filesystem_snapshot(tempdir.path());
@@ -119,7 +121,7 @@ fn read_only_open_rejects_an_empty_database_without_mutation() {
 #[test]
 fn read_only_open_rejects_future_and_negative_versions_without_mutation() {
     for (version, expected_message) in [
-        (2, "schema version 2 is newer"),
+        (3, "schema version 3 is newer"),
         (-1, "schema version -1 is invalid"),
     ] {
         let tempdir = tempdir().unwrap();
@@ -400,4 +402,21 @@ fn pragma_string(conn: &Connection, name: &str) -> String {
 fn pragma_i64(conn: &Connection, name: &str) -> i64 {
     conn.pragma_query_value(None, name, |row| row.get(0))
         .unwrap()
+}
+
+#[test]
+fn read_only_open_accepts_a_v1_database_owned_by_an_older_writer() {
+    let tempdir = tempdir().unwrap();
+    let path = tempdir.path().join("ottyel.db");
+    let conn = create_compatible_database(&path, 1);
+    let expected = logical_state(&conn);
+    drop(conn);
+
+    let reader = Store::open_read_only(&path).unwrap();
+    assert_eq!(reader.counts(None).unwrap().0, 1);
+    drop(reader);
+
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(logical_state(&conn).user_version, 1);
+    assert_eq!(logical_state(&conn).spans, expected.spans);
 }

@@ -3,11 +3,11 @@ use rusqlite::{Connection, params};
 
 use super::{INDEXES, IndexDefinition, TABLES, TableDefinition};
 
-fn validate(conn: &Connection) -> Result<()> {
+fn validate(conn: &Connection, additional: &[IndexDefinition]) -> Result<()> {
     for table in TABLES {
         validate_table(conn, table)?;
     }
-    for index in INDEXES {
+    for index in INDEXES.iter().chain(additional) {
         validate_index(conn, index)?;
     }
 
@@ -28,8 +28,8 @@ fn validate(conn: &Connection) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn validate_strict(conn: &Connection) -> Result<()> {
-    validate(conn)?;
+pub(super) fn validate_strict(conn: &Connection, additional: &[IndexDefinition]) -> Result<()> {
+    validate(conn, additional)?;
 
     let mut statement = conn.prepare(
         "SELECT type, name, tbl_name
@@ -55,7 +55,7 @@ pub(super) fn validate_strict(conn: &Connection) -> Result<()> {
                 table.name.to_string(),
             )
         })
-        .chain(INDEXES.iter().map(|index| {
+        .chain(INDEXES.iter().chain(additional).map(|index| {
             (
                 "index".to_string(),
                 index.name.to_string(),

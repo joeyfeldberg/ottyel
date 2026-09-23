@@ -4,7 +4,15 @@ use anyhow::Result;
 use rusqlite::Connection;
 
 pub(super) fn validate_strict(conn: &Connection) -> Result<()> {
-    validation::validate_strict(conn)
+    validation::validate_strict(conn, &[])
+}
+
+/// Validates the frozen v1 tables and indexes plus exactly the `additional` indexes.
+pub(super) fn validate_strict_with(
+    conn: &Connection,
+    additional: &[IndexDefinition],
+) -> Result<()> {
+    validation::validate_strict(conn, additional)
 }
 
 // Shipped schema definitions are immutable; future changes require a new versioned migration.
@@ -114,14 +122,14 @@ struct TableDefinition {
 }
 
 #[derive(Debug)]
-struct IndexDefinition {
+pub(super) struct IndexDefinition {
     name: &'static str,
     table: &'static str,
     columns: &'static [IndexColumn],
 }
 
 #[derive(Debug)]
-struct IndexColumn {
+pub(super) struct IndexColumn {
     name: &'static str,
     descending: bool,
     collation: &'static str,
@@ -353,7 +361,7 @@ const fn column(
     }
 }
 
-const fn index(
+pub(super) const fn index(
     name: &'static str,
     table: &'static str,
     columns: &'static [IndexColumn],
@@ -365,7 +373,7 @@ const fn index(
     }
 }
 
-const fn ascending(name: &'static str) -> IndexColumn {
+pub(super) const fn ascending(name: &'static str) -> IndexColumn {
     IndexColumn {
         name,
         descending: false,
