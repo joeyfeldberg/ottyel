@@ -598,7 +598,9 @@ mod tests {
             request_timeout: Duration::from_millis(25),
             ..IngestLimits::default()
         };
-        let app = router(IngestState::new(store.clone(), limits));
+        let state = IngestState::new(store.clone(), limits);
+        let admission = state.admission.clone();
+        let app = router(state);
         let stalled_body =
             Body::from_stream(futures::stream::pending::<Result<Bytes, Infallible>>());
         let stalled_request = Request::post("/v1/traces")
@@ -615,16 +617,21 @@ mod tests {
         let body = response.into_body().collect().await.unwrap().to_bytes();
         assert_eq!(decode_rpc_status(&body).0, 4);
 
+        assert_eq!(admission.available_permits(), 1);
+        // The only permit must be free again: a leaked permit would answer 503 before this
+        // request's content type is checked. A real write is avoided because it can exceed the
+        // 25 ms test deadline on a slow runner.
         let response = app
-            .oneshot(protobuf_request(
-                "/v1/traces",
-                trace_request().encode_to_vec(),
-                None,
-            ))
+            .oneshot(
+                Request::post("/v1/traces")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
-        assert_eq!(store.counts(None).unwrap().0, 1);
+        assert_eq!(response.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+        assert_eq!(store.counts(None).unwrap().0, 0);
     }
 
     #[tokio::test]

@@ -19,8 +19,8 @@
 └──────────────────────────────────────────────────────────────────────────────────────┘│                                                                      │
 ┌LLM Inspector [sort: time]────────────────────────────────────────────────────────────┐│prompt                                                                │
 │time                prompt               provider model       op       tokens  ms     ││Recommend two add-ons for a premium checkout customer.                │
-│2023-11-14 17:13:20 Recommend Add-ons    openai   gpt-4.1-min chat     1008    500.0  ││                                                                      │
-│2023-11-14 17:13:00 Summarize Cart       openai   gpt-4o-mini chat     360     612.4  ││output                                                                │
+│2023-11-14 22:13:20 Recommend Add-ons    openai   gpt-4.1-min chat     1008    500.0  ││                                                                      │
+│2023-11-14 22:13:00 Summarize Cart       openai   gpt-4o-mini chat     360     612.4  ││output                                                                │
 │                                                                                      ││Offer expedited shipping and warranty coverage.                       │
 │                                                                                      ││                                                                      │
 │                                                                                      ││                                                                      │

@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::{DateTime, Local, Utc};
+use chrono::{DateTime, FixedOffset, Utc};
 use ratatui::{
     Frame,
     layout::{Constraint, Rect},
@@ -159,6 +159,15 @@ pub(crate) fn render(
     );
 }
 
+/// Converts to the machine's local zone. Tests use UTC so checked-in UI snapshots render the
+/// same on every machine and CI runner.
+fn display_zone(utc: DateTime<Utc>) -> DateTime<FixedOffset> {
+    #[cfg(not(test))]
+    return utc.with_timezone(&chrono::Local).fixed_offset();
+    #[cfg(test)]
+    return utc.fixed_offset();
+}
+
 pub(crate) fn format_trace_timestamp(started_at_unix_nano: i64) -> String {
     format_machine_local_time(started_at_unix_nano)
 }
@@ -168,8 +177,8 @@ pub(crate) fn format_machine_local_time(unix_nano: i64) -> String {
     let nanos = unix_nano.rem_euclid(1_000_000_000) as u32;
     match DateTime::<Utc>::from_timestamp(seconds, nanos) {
         Some(utc) => {
-            let local = utc.with_timezone(&Local);
-            if local.date_naive() == Local::now().date_naive() {
+            let local = display_zone(utc);
+            if local.date_naive() == display_zone(Utc::now()).date_naive() {
                 local.format("%H:%M:%S").to_string()
             } else {
                 local.format("%Y-%m-%d %H:%M:%S").to_string()
