@@ -531,3 +531,81 @@ fn aggregate_arithmetic_overflow_is_retryable_overload() {
     release_sender.send(()).unwrap();
     futures::executor::block_on(active.wait()).unwrap();
 }
+
+#[test]
+fn close_and_drain_finishes_admitted_work_and_closes_admission() {
+    let owner = WriterOwner::start_with_capacity(Connection::open_in_memory().unwrap(), 8).unwrap();
+    let (entered_sender, entered_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel();
+    let parked = owner
+        .try_execute_async(move |_| {
+            entered_sender.send(()).unwrap();
+            release_receiver.recv().unwrap();
+            Ok(0)
+        })
+        .unwrap();
+    entered_receiver.recv_timeout(WAIT).unwrap();
+    let queued: Vec<_> = (1..=3)
+        .map(|value| owner.try_execute_async(move |_| Ok(value)).unwrap())
+        .collect();
+    let releaser = thread::spawn(move || {
+        thread::sleep(Duration::from_millis(20));
+        release_sender.send(()).unwrap();
+    });
+
+    let drain = owner.close_and_drain(WAIT);
+    releaser.join().unwrap();
+
+    assert_eq!(
+        drain,
+        super::WriterDrain {
+            completed: true,
+            unacknowledged_records: 0,
+        }
+    );
+    assert_eq!(futures::executor::block_on(parked.wait()).unwrap(), 0);
+    let results: Vec<_> = queued
+        .into_iter()
+        .map(|receipt| futures::executor::block_on(receipt.wait()).unwrap())
+        .collect();
+    assert_eq!(results, vec![1, 2, 3]);
+    let later = owner.execute(|_| Ok(4)).unwrap_err();
+    assert!(matches!(
+        later.downcast_ref(),
+        Some(StoreWriteError::Unavailable)
+    ));
+    assert!(owner.worker_finished_for_test());
+}
+
+#[test]
+fn close_and_drain_detaches_a_stuck_owner_at_the_deadline() {
+    let owner = WriterOwner::start_with_capacity(Connection::open_in_memory().unwrap(), 8).unwrap();
+    let (entered_sender, entered_receiver) = mpsc::channel();
+    let (release_sender, release_receiver) = mpsc::channel::<()>();
+    let parked = owner
+        .try_execute_async(move |_| {
+            entered_sender.send(()).unwrap();
+            let _ = release_receiver.recv();
+            Ok(())
+        })
+        .unwrap();
+    entered_receiver.recv_timeout(WAIT).unwrap();
+    let queued = owner
+        .try_execute_async_weighted(weight(5, 50), |_| Ok(()))
+        .unwrap();
+
+    let drain = owner.close_and_drain(Duration::from_millis(30));
+
+    assert_eq!(
+        drain,
+        super::WriterDrain {
+            completed: false,
+            unacknowledged_records: 5,
+        }
+    );
+    // The final drop must not join the detached owner, or this test would hang.
+    drop(owner);
+    release_sender.send(()).unwrap();
+    futures::executor::block_on(parked.wait()).unwrap();
+    futures::executor::block_on(queued.wait()).unwrap();
+}

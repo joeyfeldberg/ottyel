@@ -20,7 +20,7 @@ use reader_pool::{ReaderLease, ReaderPool};
 use rusqlite::Connection;
 pub(crate) use writer::AsyncWriteReceipt;
 use writer::WriterOwner;
-pub use writer::{StoreWriteError, WriterBacklog, WriterLimitDimension, WriterLimits};
+pub use writer::{StoreWriteError, WriterBacklog, WriterDrain, WriterLimitDimension, WriterLimits};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RetentionPolicy {
@@ -106,6 +106,15 @@ impl Store {
         match &self.access {
             StoreAccess::ReadWrite { writer } => Ok(writer),
             StoreAccess::ReadOnly => bail!("cannot ingest telemetry through a read-only store"),
+        }
+    }
+
+    /// Closes writer admission for every clone of this store and waits up to `deadline` for
+    /// already-admitted writes. Returns `None` for a read-only store. Reads keep working.
+    pub fn close_writer(&self, deadline: std::time::Duration) -> Option<WriterDrain> {
+        match &self.access {
+            StoreAccess::ReadWrite { writer } => Some(writer.close_and_drain(deadline)),
+            StoreAccess::ReadOnly => None,
         }
     }
 

@@ -388,7 +388,6 @@ bytes or end-to-end CPU. The remaining protocol contract must also:
 - expose duplicate and dropped counts once duplicate handling and drain exist. Accepted,
   rejected, failed-by-class, queued, and bucketed acknowledgement-latency statistics by
   signal and transport are complete in `src/ingest/stats.rs`;
-- stop intake and drain or reject accepted work within a shutdown deadline;
 - optionally add OTLP/JSON only after the binary and compressed paths are conformant.
 
 ### 7. Retention And Lifecycle
@@ -398,8 +397,11 @@ delete all related rows through composite foreign keys/cascades, and cap logs, m
 points, AI events, database bytes, and WAL size in addition to spans. Maintenance should
 run on a timer or accepted-record threshold and delete bounded chunks.
 
-Startup should pre-bind both listeners or wait for a readiness result before entering
-the TUI. The header should show HTTP/gRPC health, last accepted time, recent rates,
+Since 2026-09-23 startup binds both listeners before entering the TUI, so a port conflict
+is reported on a normal terminal. Quitting stops intake, gives in-flight requests and
+admitted writes one `--shutdown-timeout-ms` budget (default 10 s) in total, closes writer
+admission, and prints what it abandoned if the budget expires. A timed-out writer thread
+is detached instead of joined forever. The header should show HTTP/gRPC health, last accepted time, recent rates,
 queue depth, database size, rejected records, and the last ingest/query error. Since
 2026-09-23 it shows the one-second accepted-record rate, the p95 acknowledgement bucket
 bound, queued writer records, cumulative rejected records and failed requests, and the
@@ -647,7 +649,8 @@ Goal: create the seam required for every subsequent data fix.
   receipts; SQLite write and retention work run only on the dedicated owner thread.
 - [ ] Move store open/migration, the initial terminal snapshot, and every remaining
   database call off the terminal event loop or async network workers. Add bounded reader
-  checkout and shutdown deadlines instead of relying on indefinite waits.
+  checkout instead of relying on indefinite waits. Receiver and writer shutdown now have
+  one bounded deadline.
 - [ ] Use prepared/cached statements and batch one signal export per transaction.
 - [ ] Add a typed `StoreError` classification: invalid data, busy/overloaded, unavailable,
   corruption, migration required, and internal defect.
@@ -698,8 +701,11 @@ Goal: behave predictably under malformed, compressed, concurrent, and excessive 
 - [x] Add HTTP and gRPC coverage for all signals, identity/gzip, exact/oversized envelopes,
   preflight and postdecode policy limits, malformed wire, extra unary frames, overload,
   and timeout.
-- [ ] Complete the conformance matrix for mixed-validity records, raw corrupt gRPC frames,
-  cross-transport contention, duplicate exports, and graceful shutdown.
+- [x] Stop intake on shutdown, drain admitted writes within one configured deadline, and
+  report abandoned requests and unacknowledged records.
+- [ ] Complete the conformance matrix for raw corrupt gRPC frames, cross-transport
+  contention, and duplicate exports. Mixed-validity records and graceful shutdown are
+  covered.
 - [ ] Add optional OTLP/JSON only after binary protobuf conformance is covered.
 - [x] Expose in-memory accepted/rejected/rate/queue/latency statistics by signal. Both
   transports record every export outcome, including gRPC admission and Tonic decode
@@ -1009,7 +1015,8 @@ Keep each pull request a vertical, reversible step with tests and measurements.
    client response deadline, protocol error envelopes, and retry-correct capacity/lifecycle
    failures. Configurable writer record/canonical-byte admission and measured protobuf
    field-work admission, opportunistic writer coalescing, record-level partial success,
-   and in-memory ingest statistics are also complete; duplicate exports and drain remain.
+   in-memory ingest statistics, and deadline-bounded graceful drain are also complete;
+   duplicate exports remain.
 6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled
    bounded whole-trace retention.
 7. [ ] Ship faithful metric streams/points and targeted metric series queries.

@@ -124,15 +124,31 @@ async fn serve(args: ServeArgs) -> Result<()> {
 
     let receiver = crate::ingest::Receiver::new(store, ingest_limits);
     let ingest_probe = receiver.probe();
-    let http_bind = args.http_bind.clone();
-    let grpc_bind = args.grpc_bind.clone();
-    let server =
-        tokio::spawn(async move { receiver.serve(&http_bind, &grpc_bind, shutdown_rx).await });
+    // Bind before entering the TUI so a port conflict is reported on a normal terminal.
+    let receiver = receiver.bind(&args.http_bind, &args.grpc_bind).await?;
+    let server = tokio::spawn(receiver.serve(shutdown_rx));
 
     let ui_result = run_terminal(&query, &ingest_probe, &args).await;
     let _ = shutdown_tx.send(true);
-    server.await.context("ingest task join failure")??;
+    let report = server.await.context("ingest task join failure")??;
+    if !report.is_clean() {
+        eprintln!("ottyel: {}", shutdown_summary(&report));
+    }
     ui_result
+}
+
+fn shutdown_summary(report: &crate::ingest::ShutdownReport) -> String {
+    let mut parts = Vec::new();
+    if report.requests_abandoned {
+        parts.push("in-flight OTLP requests were cut off at the shutdown deadline".to_string());
+    }
+    if let Some(writer) = report.writer.filter(|writer| !writer.completed) {
+        parts.push(format!(
+            "{} admitted OTLP records were not acknowledged before the deadline",
+            writer.unacknowledged_records
+        ));
+    }
+    parts.join("; ")
 }
 
 fn doctor(args: DoctorArgs) -> Result<()> {

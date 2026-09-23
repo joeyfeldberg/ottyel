@@ -100,6 +100,10 @@ pub struct ServeArgs {
     /// least twice the decompressed request limit.
     #[arg(long, default_value_t = NonZeroUsize::new(16 * 1024 * 1024).unwrap())]
     pub max_otlp_writer_bytes: NonZeroUsize,
+    /// Maximum milliseconds after quitting to finish in-flight OTLP requests and admitted
+    /// SQLite writes. Unfinished work is reported and abandoned when it expires.
+    #[arg(long, default_value_t = NonZeroU64::new(10_000).unwrap())]
+    pub shutdown_timeout_ms: NonZeroU64,
 }
 
 impl Default for ServeArgs {
@@ -125,6 +129,7 @@ impl Default for ServeArgs {
             max_otlp_value_bytes: NonZeroUsize::new(1024 * 1024).unwrap(),
             max_otlp_writer_records: NonZeroUsize::new(40_000).unwrap(),
             max_otlp_writer_bytes: NonZeroUsize::new(16 * 1024 * 1024).unwrap(),
+            shutdown_timeout_ms: NonZeroU64::new(10_000).unwrap(),
         }
     }
 }
@@ -257,6 +262,7 @@ mod tests {
         assert_eq!(args.max_otlp_in_flight.get(), 4);
         assert_eq!(args.max_otlp_wire_bytes, args.max_otlp_decompressed_bytes);
         assert_eq!(args.otlp_request_timeout_ms.get(), 30_000);
+        assert_eq!(args.shutdown_timeout_ms.get(), 10_000);
         assert_eq!(args.max_otlp_work_units.get(), 2_000_000);
         assert_eq!(args.max_otlp_writer_records.get(), 40_000);
         assert_eq!(args.max_otlp_writer_bytes.get(), 16 * 1024 * 1024);

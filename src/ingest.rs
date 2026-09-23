@@ -2,12 +2,13 @@ mod grpc;
 mod http;
 mod policy;
 mod preflight;
+mod receiver;
 mod records;
 pub mod stats;
 
-use std::{net::SocketAddr, sync::Arc};
+use std::sync::Arc;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio_stream::wrappers::TcpListenerStream;
 use tonic::{Status, service::interceptor::InterceptedService, transport::Server};
@@ -15,6 +16,7 @@ use tonic::{Status, service::interceptor::InterceptedService, transport::Server}
 use crate::store::{AsyncWriteReceipt, Store, StoreWriteError};
 
 pub use policy::IngestLimits;
+pub use receiver::{BoundReceiver, Receiver, ShutdownReport};
 use stats::{IngestProbe, IngestStats, Signal};
 
 #[derive(Clone)]
@@ -44,56 +46,6 @@ impl IngestState {
             self.store.clone(),
         )
     }
-}
-
-/// The OTLP HTTP and gRPC receiver for one store.
-pub struct Receiver {
-    state: IngestState,
-}
-
-impl Receiver {
-    pub fn new(store: Store, limits: IngestLimits) -> Self {
-        Self {
-            state: IngestState::new(store, limits),
-        }
-    }
-
-    /// Returns a handle that samples receiver statistics while [`Self::serve`] runs.
-    pub fn probe(&self) -> IngestProbe {
-        self.state.probe()
-    }
-
-    pub async fn serve(
-        self,
-        http_bind: &str,
-        grpc_bind: &str,
-        shutdown: watch::Receiver<bool>,
-    ) -> Result<()> {
-        serve(http_bind, grpc_bind, self.state, shutdown).await
-    }
-}
-
-async fn serve(
-    http_bind: &str,
-    grpc_bind: &str,
-    state: IngestState,
-    shutdown: watch::Receiver<bool>,
-) -> Result<()> {
-    let http_addr: SocketAddr = http_bind
-        .parse()
-        .with_context(|| format!("invalid HTTP bind addr {http_bind}"))?;
-    let grpc_addr: SocketAddr = grpc_bind
-        .parse()
-        .with_context(|| format!("invalid gRPC bind addr {grpc_bind}"))?;
-
-    let http_listener = tokio::net::TcpListener::bind(http_addr).await?;
-    let grpc_listener = tokio::net::TcpListener::bind(grpc_addr).await?;
-
-    tokio::try_join!(
-        serve_http_listener(http_listener, state.clone(), shutdown.clone()),
-        serve_grpc_listener(grpc_listener, state, shutdown),
-    )?;
-    Ok(())
 }
 
 async fn serve_http_listener(

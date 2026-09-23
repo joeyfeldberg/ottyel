@@ -1079,6 +1079,7 @@ mod tests {
             max_wire_bytes: 1_000_000,
             max_decompressed_bytes: 1_000_000,
             request_timeout: Duration::from_secs(30),
+            shutdown_timeout: Duration::from_secs(10),
             max_records: 1_000,
             max_attributes: 1_000,
             max_structures: 10_000,

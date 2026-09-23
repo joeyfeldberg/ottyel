@@ -10,6 +10,7 @@ use std::{
         mpsc::{self, SyncSender, TrySendError},
     },
     thread::{self, JoinHandle},
+    time::{Duration, Instant},
 };
 
 use anyhow::{Result, anyhow};
@@ -20,6 +21,7 @@ use thiserror::Error;
 use super::{ingest_weight::IngestWeight, write_observer::WriteObserver};
 
 const WRITER_QUEUE_CAPACITY: usize = 64;
+const DRAIN_POLL: Duration = Duration::from_millis(5);
 const DEFAULT_MAX_PRIMARY_RECORDS: usize = 40_000;
 const DEFAULT_MAX_CANONICAL_BYTES: usize = 16 * 1024 * 1024;
 
@@ -132,6 +134,15 @@ impl Default for WriterLimits {
     }
 }
 
+/// The outcome of closing the writer against a shutdown deadline.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WriterDrain {
+    /// Whether every admitted write finished before the deadline.
+    pub completed: bool,
+    /// OTLP primary records still admitted but unacknowledged when the deadline passed.
+    pub unacknowledged_records: usize,
+}
+
 /// OTLP work admitted to the writer but not yet acknowledged, with the configured limits.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct WriterBacklog {
@@ -200,7 +211,7 @@ pub(super) struct WriterOwner {
 
 struct WriterOwnerInner {
     admission: Arc<Mutex<AdmissionState>>,
-    worker: Option<JoinHandle<()>>,
+    worker: Mutex<Option<JoinHandle<()>>>,
     #[cfg(any(test, feature = "benchmark-support"))]
     observer: WriteObserver,
 }
@@ -316,7 +327,7 @@ impl WriterOwner {
         Ok(Self {
             inner: Arc::new(WriterOwnerInner {
                 admission,
-                worker: Some(worker),
+                worker: Mutex::new(Some(worker)),
                 #[cfg(any(test, feature = "benchmark-support"))]
                 observer,
             }),
@@ -527,10 +538,56 @@ impl WriterOwner {
         }
     }
 
+    /// Stops admission, lets the owner finish every already-admitted job, and waits for it
+    /// until `deadline`. On timeout the owner thread is detached so no later drop blocks on it;
+    /// its unfinished work stays unacknowledged.
+    pub(super) fn close_and_drain(&self, deadline: Duration) -> WriterDrain {
+        let sender = {
+            let mut admission = self
+                .inner
+                .admission
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            admission.accepting = false;
+            admission.sender.take()
+        };
+        // Dropping the only sender lets the owner exit once the queue is empty.
+        drop(sender);
+
+        let started = Instant::now();
+        loop {
+            let mut worker = self
+                .inner
+                .worker
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            if worker.as_ref().is_none_or(JoinHandle::is_finished) {
+                if let Some(worker) = worker.take() {
+                    let _ = worker.join();
+                }
+                return WriterDrain {
+                    completed: true,
+                    unacknowledged_records: 0,
+                };
+            }
+            if started.elapsed() >= deadline {
+                drop(worker.take());
+                return WriterDrain {
+                    completed: false,
+                    unacknowledged_records: self.backlog().primary_records,
+                };
+            }
+            drop(worker);
+            thread::sleep(DRAIN_POLL);
+        }
+    }
+
     #[cfg(test)]
     fn worker_finished_for_test(&self) -> bool {
         self.inner
             .worker
+            .lock()
+            .unwrap()
             .as_ref()
             .is_none_or(JoinHandle::is_finished)
     }
@@ -644,7 +701,12 @@ impl Drop for WriterOwnerInner {
             .sender
             .take();
         drop(sender);
-        if let Some(worker) = self.worker.take()
+        let worker = self
+            .worker
+            .get_mut()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        if let Some(worker) = worker
             && worker.thread().id() != thread::current().id()
         {
             let _ = worker.join();
