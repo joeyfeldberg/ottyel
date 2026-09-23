@@ -1,7 +1,12 @@
+mod ingest_health;
 mod input;
 mod trace_paging;
 
-use std::{cmp::Ordering, io, time::Duration};
+use std::{
+    cmp::Ordering,
+    io,
+    time::{Duration, SystemTime},
+};
 
 use anyhow::{Context, Result};
 use crossterm::{
@@ -20,16 +25,19 @@ use tokio::{
 use crate::{
     config::{Cli, Command, DoctorArgs, McpArgs, ServeArgs},
     domain::{DashboardSnapshot, LlmTimelineItem, SpanDetail, TraceSummary},
+    ingest::stats::IngestProbe,
     preferences::UserPreferences,
     query::{QueryFilters, QueryService},
     store::Store,
     ui::{LlmSortMode, RenderCache, Tab, TraceViewMode, UiState},
 };
+use ingest_health::IngestHealthTracker;
 use input::InputOutcome;
 use trace_paging::{TraceListPager, TracePageRefreshResult};
 
 const RENDER_FRAME_MS: u64 = 16;
 const MIN_SNAPSHOT_REFRESH_MS: u64 = 3_000;
+const INGEST_HEALTH_SAMPLE_MS: u64 = 1_000;
 
 #[derive(Debug, Default)]
 struct TraceDetailCache {
@@ -114,13 +122,14 @@ async fn serve(args: ServeArgs) -> Result<()> {
     let query = QueryService::new(store.clone(), args.page_size);
     let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+    let receiver = crate::ingest::Receiver::new(store, ingest_limits);
+    let ingest_probe = receiver.probe();
     let http_bind = args.http_bind.clone();
     let grpc_bind = args.grpc_bind.clone();
-    let server = tokio::spawn(async move {
-        crate::ingest::serve(&http_bind, &grpc_bind, store, ingest_limits, shutdown_rx).await
-    });
+    let server =
+        tokio::spawn(async move { receiver.serve(&http_bind, &grpc_bind, shutdown_rx).await });
 
-    let ui_result = run_terminal(&query, &args).await;
+    let ui_result = run_terminal(&query, &ingest_probe, &args).await;
     let _ = shutdown_tx.send(true);
     server.await.context("ingest task join failure")??;
     ui_result
@@ -144,7 +153,11 @@ fn mcp(args: McpArgs) -> Result<()> {
     crate::mcp::serve_stdio(query)
 }
 
-async fn run_terminal(query: &QueryService, args: &ServeArgs) -> Result<()> {
+async fn run_terminal(
+    query: &QueryService,
+    ingest_probe: &IngestProbe,
+    args: &ServeArgs,
+) -> Result<()> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen, EnableMouseCapture)?;
@@ -152,7 +165,7 @@ async fn run_terminal(query: &QueryService, args: &ServeArgs) -> Result<()> {
     let mut terminal = Terminal::new(backend)?;
     terminal.clear()?;
 
-    let terminal_result = terminal_loop(&mut terminal, query, args).await;
+    let terminal_result = terminal_loop(&mut terminal, query, ingest_probe, args).await;
 
     disable_raw_mode()?;
     execute!(
@@ -167,9 +180,13 @@ async fn run_terminal(query: &QueryService, args: &ServeArgs) -> Result<()> {
 async fn terminal_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     query: &QueryService,
+    ingest_probe: &IngestProbe,
     args: &ServeArgs,
 ) -> Result<()> {
     let mut events = EventStream::new();
+    let mut ingest_health_tick = interval(Duration::from_millis(INGEST_HEALTH_SAMPLE_MS));
+    ingest_health_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+    let mut ingest_health = IngestHealthTracker::default();
     let mut render_tick = interval(Duration::from_millis(RENDER_FRAME_MS));
     render_tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
     let mut snapshot_tick = interval(Duration::from_millis(snapshot_refresh_interval_ms(
@@ -243,6 +260,13 @@ async fn terminal_loop(
 
         tokio::select! {
             _ = render_tick.tick() => render_ready = true,
+            _ = ingest_health_tick.tick() => {
+                let view = ingest_health.update(ingest_probe.sample(), SystemTime::now());
+                if state.ingest_health.as_ref() != Some(&view) {
+                    state.ingest_health = Some(view);
+                    needs_redraw = true;
+                }
+            }
             _ = snapshot_tick.tick(), if !refresh_in_flight => {
                 refresh_in_flight = true;
                 next_refresh_request_id = next_refresh_request_id.saturating_add(1);

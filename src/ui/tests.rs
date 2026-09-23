@@ -13,10 +13,11 @@ use crate::{
 };
 
 use super::{
-    LayoutPreset, LlmFocus, Palette, Tab, TraceFocus, TraceViewMode, UiState,
+    IngestHealthView, LayoutPreset, LlmFocus, Palette, RecentIngestFailure, Tab, TraceFocus,
+    TraceViewMode, UiState,
     chrome::{
         command_palette_window, context_help_lines, context_help_title, footer_text,
-        global_status_text, help_lines, help_title,
+        global_status_text, help_lines, help_title, ingest_health_text,
     },
     details::{
         build_log_detail_lines, format_log_body, llm_detail_lines, llm_timeline_panel_lines,
@@ -534,6 +535,46 @@ fn global_status_owns_service_and_time_key_hints() {
 
     state.search_query = "latency".to_string();
     assert!(global_status_text(&snapshot, &state).contains("search=latency"));
+
+    assert!(!global_status_text(&snapshot, &state).contains("ingest"));
+    state.ingest_health = Some(IngestHealthView {
+        records_per_second: 0.0,
+        recent_ack_p95: None,
+        rejected_records: 0,
+        failed_requests: 0,
+        queued_records: 0,
+        last_failure: None,
+    });
+    assert!(global_status_text(&snapshot, &state).ends_with(" | ingest idle"));
+}
+
+#[test]
+fn ingest_health_text_shows_only_nonzero_signals() {
+    let busy = IngestHealthView {
+        records_per_second: 12_345.0,
+        recent_ack_p95: Some(std::time::Duration::from_millis(25)),
+        rejected_records: 3,
+        failed_requests: 2,
+        queued_records: 250,
+        last_failure: Some(RecentIngestFailure {
+            label: "unavailable grpc/logs".to_string(),
+            age: std::time::Duration::from_secs(4),
+        }),
+    };
+    assert_eq!(
+        ingest_health_text(&busy),
+        "ingest 12.3k/s ack<=25ms queued=250 rejected=3 failed=2 last: unavailable grpc/logs 4s ago"
+    );
+
+    let steady = IngestHealthView {
+        records_per_second: 42.4,
+        recent_ack_p95: Some(std::time::Duration::from_millis(5)),
+        rejected_records: 0,
+        failed_requests: 0,
+        queued_records: 0,
+        last_failure: None,
+    };
+    assert_eq!(ingest_health_text(&steady), "ingest 42/s ack<=5ms");
 }
 
 #[test]

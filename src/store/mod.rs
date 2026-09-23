@@ -20,7 +20,7 @@ use reader_pool::{ReaderLease, ReaderPool};
 use rusqlite::Connection;
 pub(crate) use writer::AsyncWriteReceipt;
 use writer::WriterOwner;
-pub use writer::{StoreWriteError, WriterLimitDimension, WriterLimits};
+pub use writer::{StoreWriteError, WriterBacklog, WriterLimitDimension, WriterLimits};
 
 #[derive(Debug, Clone, Copy)]
 pub(super) struct RetentionPolicy {
@@ -106,6 +106,14 @@ impl Store {
         match &self.access {
             StoreAccess::ReadWrite { writer } => Ok(writer),
             StoreAccess::ReadOnly => bail!("cannot ingest telemetry through a read-only store"),
+        }
+    }
+
+    /// Returns queued and executing OTLP writer weight, or `None` for a read-only store.
+    pub fn writer_backlog(&self) -> Option<WriterBacklog> {
+        match &self.access {
+            StoreAccess::ReadWrite { writer } => Some(writer.backlog()),
+            StoreAccess::ReadOnly => None,
         }
     }
 

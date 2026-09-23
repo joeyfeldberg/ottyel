@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, time::Duration};
 
 use ratatui::prelude::Color;
 use serde::{Deserialize, Serialize};
@@ -187,6 +187,29 @@ pub struct UiState {
     pub log_pinned_trace_id: Option<String>,
     pub log_pinned_span_id: Option<String>,
     pub log_tail: bool,
+    /// Receiver health for the header; `None` when no receiver runs in this process.
+    pub ingest_health: Option<IngestHealthView>,
+}
+
+/// Receiver activity summarized for the header over the most recent sampling window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct IngestHealthView {
+    pub records_per_second: f64,
+    /// Bucket upper bound for the window's 95th-percentile acknowledgement, if any request
+    /// was accepted in a bounded bucket.
+    pub recent_ack_p95: Option<Duration>,
+    pub rejected_records: u64,
+    pub failed_requests: u64,
+    pub queued_records: usize,
+    pub last_failure: Option<RecentIngestFailure>,
+}
+
+/// A failure recent enough to call out in the header.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecentIngestFailure {
+    /// For example `unavailable grpc/logs`.
+    pub label: String,
+    pub age: Duration,
 }
 
 impl Default for UiState {
@@ -246,6 +269,7 @@ impl Default for UiState {
             log_pinned_trace_id: None,
             log_pinned_span_id: None,
             log_tail: false,
+            ingest_health: None,
         }
     }
 }

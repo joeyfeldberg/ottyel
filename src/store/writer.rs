@@ -132,6 +132,15 @@ impl Default for WriterLimits {
     }
 }
 
+/// OTLP work admitted to the writer but not yet acknowledged, with the configured limits.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WriterBacklog {
+    pub primary_records: usize,
+    pub canonical_bytes: usize,
+    pub max_primary_records: usize,
+    pub max_canonical_bytes: usize,
+}
+
 /// The writer-admission budget exceeded by one OTLP request.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum WriterLimitDimension {
@@ -483,6 +492,20 @@ impl WriterOwner {
                 drop(job);
                 Err(StoreWriteError::Unavailable.into())
             }
+        }
+    }
+
+    pub(super) fn backlog(&self) -> WriterBacklog {
+        let admission = self
+            .inner
+            .admission
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        WriterBacklog {
+            primary_records: admission.primary_records,
+            canonical_bytes: admission.canonical_bytes,
+            max_primary_records: admission.limits.max_primary_records,
+            max_canonical_bytes: admission.limits.max_canonical_bytes,
         }
     }
 

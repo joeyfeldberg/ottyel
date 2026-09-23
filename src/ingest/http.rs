@@ -24,6 +24,7 @@ use super::{
     policy::ValidateOtlp,
     preflight::{PreflightError, PreflightOtlp},
     records::ScreenRecords,
+    stats::{Failure, Signal, Transport},
     wait_for_write,
 };
 
@@ -66,27 +67,61 @@ async fn method_not_allowed() -> Response {
 }
 
 async fn export_traces(State(state): State<IngestState>, request: Request) -> Response {
-    handle::<ExportTraceServiceRequest, _>(state, request, |state, request| {
+    handle::<ExportTraceServiceRequest, _>(state, request, Signal::Traces, |state, request| {
         state.store.try_ingest_traces(request)
     })
     .await
 }
 
 async fn export_logs(State(state): State<IngestState>, request: Request) -> Response {
-    handle::<ExportLogsServiceRequest, _>(state, request, |state, request| {
+    handle::<ExportLogsServiceRequest, _>(state, request, Signal::Logs, |state, request| {
         state.store.try_ingest_logs(request)
     })
     .await
 }
 
 async fn export_metrics(State(state): State<IngestState>, request: Request) -> Response {
-    handle::<ExportMetricsServiceRequest, _>(state, request, |state, request| {
+    handle::<ExportMetricsServiceRequest, _>(state, request, Signal::Metrics, |state, request| {
         state.store.try_ingest_metrics(request)
     })
     .await
 }
 
-async fn handle<Req, F>(state: IngestState, request: Request, ingest: F) -> Response
+/// An accepted export's stored and rejected record counts plus whether it carried warnings.
+type AcceptedExport = (u64, u64, bool);
+
+/// The failure message behind a protobuf error response, for receiver statistics.
+#[derive(Clone)]
+struct FailureMessage(String);
+
+async fn handle<Req, F>(state: IngestState, request: Request, signal: Signal, ingest: F) -> Response
+where
+    Req: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp + ScreenRecords,
+    F: FnOnce(&IngestState, PreparedIngest<Req>) -> anyhow::Result<AsyncWriteReceipt<usize>>,
+{
+    let pending = state.stats.pending(signal, Transport::Http);
+    let mut accepted = None;
+    let response = respond::<Req, F>(state, request, ingest, &mut accepted).await;
+    match accepted {
+        Some((records, rejected, warned)) => pending.accepted(records, rejected, warned),
+        None => {
+            let failure = Failure::from_http(response.status()).unwrap_or(Failure::Internal);
+            let message = response.extensions().get::<FailureMessage>().map_or_else(
+                || response.status().to_string(),
+                |message| message.0.clone(),
+            );
+            pending.failed(failure, message);
+        }
+    }
+    response
+}
+
+async fn respond<Req, F>(
+    state: IngestState,
+    request: Request,
+    ingest: F,
+    accepted: &mut Option<AcceptedExport>,
+) -> Response
 where
     Req: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp + ScreenRecords,
     F: FnOnce(&IngestState, PreparedIngest<Req>) -> anyhow::Result<AsyncWriteReceipt<usize>>,
@@ -99,7 +134,7 @@ where
     let request_timeout = state.limits.request_timeout;
     match tokio::time::timeout(
         request_timeout,
-        handle_admitted::<Req, F>(state, request, ingest, permit),
+        handle_admitted::<Req, F>(state, request, ingest, permit, accepted),
     )
     .await
     {
@@ -117,6 +152,7 @@ async fn handle_admitted<Req, F>(
     request: Request,
     ingest: F,
     permit: OwnedSemaphorePermit,
+    accepted: &mut Option<AcceptedExport>,
 ) -> Response
 where
     Req: Message + Default + MeasureIngest + ValidateOtlp + PreflightOtlp + ScreenRecords,
@@ -176,7 +212,10 @@ where
         Err(err) => return store_error(err),
     };
     match wait_for_write(receipt, permit).await {
-        Ok(()) => protobuf_response(StatusCode::OK, Req::response(&report).encode_to_vec()),
+        Ok(records) => {
+            *accepted = Some((records as u64, report.rejected(), report.warned()));
+            protobuf_response(StatusCode::OK, Req::response(&report).encode_to_vec())
+        }
         Err(err) => store_error(err),
     }
 }
@@ -292,14 +331,17 @@ fn protobuf_response(status: StatusCode, body: Vec<u8>) -> Response {
 }
 
 fn protobuf_error(status: StatusCode, code: i32, message: impl Into<String>) -> Response {
-    protobuf_response(
+    let message = message.into();
+    let mut response = protobuf_response(
         status,
         RpcStatus {
             code,
-            message: message.into(),
+            message: message.clone(),
         }
         .encode_to_vec(),
-    )
+    );
+    response.extensions_mut().insert(FailureMessage(message));
+    response
 }
 
 #[derive(Debug)]

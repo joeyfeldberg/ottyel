@@ -144,7 +144,7 @@ These are foundations. They should be migrated, not replaced with a separate pro
 | P0 | Metric streams are conflated and lossy | `src/store/ingest.rs`, `src/ui/details.rs` | Different attribute sets are charted together; histogram buckets, quantiles, temporality details, exemplars, unit, and description are lost |
 | P0 (partially resolved 2026-07-14) | Store ownership and async database work remain incomplete | `src/store/writer.rs`, `src/store/reader_pool.rs`, `src/ingest.rs` | One named thread now owns SQLite writes behind immediate 64-command admission, queries use four physical read-only connections, and all six OTLP handlers await async receipts; startup/migration, the initial TUI snapshot, reader checkout, completion, and shutdown still lack a fully bounded worker contract |
 | P0 | Retention runs after every export | `src/store/ingest.rs` | Sustained ingest pays repeated table scans and delete transactions even when nothing expires |
-| P0 (partially resolved 2026-09-23) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/ingest/`, `src/store/writer.rs` | One shared request gate covers both transports from pre-decode admission through commit; identity/gzip, byte limits, protobuf HTTP failures, schema-aware preallocation plus measured field-work budgets, postdecode parity, exact unary framing, client deadlines, configurable aggregate writer record/canonical-byte admission, and retry-correct capacity/lifecycle errors are covered, and adjacent exports coalesce into one writer transaction. Record-level screening now rejects invalid spans and metric points and returns OTLP partial success. Duplicate export policy, retry hints, health, and graceful drain remain incomplete |
+| P0 (partially resolved 2026-09-23) | OTLP overload and failure behavior is incomplete | `src/ingest.rs`, `src/ingest/`, `src/store/writer.rs` | One shared request gate covers both transports from pre-decode admission through commit; identity/gzip, byte limits, protobuf HTTP failures, schema-aware preallocation plus measured field-work budgets, postdecode parity, exact unary framing, client deadlines, configurable aggregate writer record/canonical-byte admission, and retry-correct capacity/lifecycle errors are covered, and adjacent exports coalesce into one writer transaction. Record-level screening now rejects invalid spans and metric points and returns OTLP partial success, and in-memory receiver statistics feed a TUI header summary. Duplicate export policy, retry hints, duplicate/dropped counts, and graceful drain remain incomplete |
 | P0 | SQLite identity is based on global `span_id` | `src/store/schema.rs` | The logical identity `(trace_id, span_id)` is not preserved; joins and upserts can corrupt colliding traces |
 | P0 (resolved 2026-07-13) | There was no schema migration mechanism | `src/store/schema.rs`, `src/store/schema/` | Ordered `user_version` migrations now preserve exact legacy v0 data, validate the frozen schema, and roll back DDL, version changes, and failed post-checks together; backup and recovery for the first non-trivial v2 migration remain open |
 | P0 | Sensitive AI content has no central policy | store, TUI, and MCP paths | Prompts, outputs, tool arguments, and raw attributes can be persisted and returned without masking or payload budgets |
@@ -385,8 +385,9 @@ bytes or end-to-end CPU. The remaining protocol contract must also:
 
 - define retransmission and duplicate handling for deadline-unknown outcomes;
 - add retry hints and consistent transient SQLite classification;
-- expose accepted, committed, rejected, duplicate, dropped, queued, and latency health by
-  signal and transport;
+- expose duplicate and dropped counts once duplicate handling and drain exist. Accepted,
+  rejected, failed-by-class, queued, and bucketed acknowledgement-latency statistics by
+  signal and transport are complete in `src/ingest/stats.rs`;
 - stop intake and drain or reject accepted work within a shutdown deadline;
 - optionally add OTLP/JSON only after the binary and compressed paths are conformant.
 
@@ -399,8 +400,11 @@ run on a timer or accepted-record threshold and delete bounded chunks.
 
 Startup should pre-bind both listeners or wait for a readiness result before entering
 the TUI. The header should show HTTP/gRPC health, last accepted time, recent rates,
-queue depth, database size, rejected records, and the last ingest/query error. A query
-failure should leave the last good view visible.
+queue depth, database size, rejected records, and the last ingest/query error. Since
+2026-09-23 it shows the one-second accepted-record rate, the p95 acknowledgement bucket
+bound, queued writer records, cumulative rejected records and failed requests, and the
+last failed export for 60 seconds. Listener readiness, database size, and query errors
+are still missing. A query failure should leave the last good view visible.
 
 Terminal setup needs an RAII cleanup guard so an error during initialization or drawing
 cannot leave the shell in raw mode.
@@ -697,7 +701,10 @@ Goal: behave predictably under malformed, compressed, concurrent, and excessive 
 - [ ] Complete the conformance matrix for mixed-validity records, raw corrupt gRPC frames,
   cross-transport contention, duplicate exports, and graceful shutdown.
 - [ ] Add optional OTLP/JSON only after binary protobuf conformance is covered.
-- [ ] Expose in-memory accepted/rejected/rate/queue/latency statistics by signal.
+- [x] Expose in-memory accepted/rejected/rate/queue/latency statistics by signal. Both
+  transports record every export outcome, including gRPC admission and Tonic decode
+  failures and exports dropped by a deadline or client cancellation. The TUI header
+  summarizes a one-second window.
 
 Acceptance:
 
@@ -1001,8 +1008,8 @@ Keep each pull request a vertical, reversible step with tests and measurements.
    preallocation budgets plus postdecode parity, identity/gzip, exact unary framing, a
    client response deadline, protocol error envelopes, and retry-correct capacity/lifecycle
    failures. Configurable writer record/canonical-byte admission and measured protobuf
-   field-work admission, opportunistic writer coalescing, and record-level partial
-   success are also complete; duplicate exports, health, and drain remain.
+   field-work admission, opportunistic writer coalescing, record-level partial success,
+   and in-memory ingest statistics are also complete; duplicate exports and drain remain.
 6. [ ] Ship the v2 composite trace/log schema, materialized trace summaries, and scheduled
    bounded whole-trace retention.
 7. [ ] Ship faithful metric streams/points and targeted metric series queries.

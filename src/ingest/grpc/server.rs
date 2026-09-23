@@ -35,7 +35,11 @@ use crate::store::{AsyncWriteReceipt, MeasureIngest, PreparedIngest};
 
 use super::prepare_raw_request;
 use crate::ingest::{
-    IngestState, policy::ValidateOtlp, preflight::PreflightOtlp, records::ScreenRecords,
+    IngestState,
+    policy::ValidateOtlp,
+    preflight::PreflightOtlp,
+    records::ScreenRecords,
+    stats::{self, Transport},
     store_status, wait_for_write,
 };
 
@@ -50,6 +54,7 @@ pub(crate) trait Signal: Send + Sync + 'static {
 
     const NAME: &'static str;
     const PATH: &'static str;
+    const SIGNAL: stats::Signal;
 
     fn ingest(
         state: &IngestState,
@@ -66,6 +71,7 @@ impl Signal for Traces {
     type Response = ExportTraceServiceResponse;
     const NAME: &'static str = TRACE_SERVICE_NAME;
     const PATH: &'static str = "/opentelemetry.proto.collector.trace.v1.TraceService/Export";
+    const SIGNAL: stats::Signal = stats::Signal::Traces;
 
     fn ingest(
         state: &IngestState,
@@ -80,6 +86,7 @@ impl Signal for Logs {
     type Response = ExportLogsServiceResponse;
     const NAME: &'static str = LOGS_SERVICE_NAME;
     const PATH: &'static str = "/opentelemetry.proto.collector.logs.v1.LogsService/Export";
+    const SIGNAL: stats::Signal = stats::Signal::Logs;
 
     fn ingest(
         state: &IngestState,
@@ -94,6 +101,7 @@ impl Signal for Metrics {
     type Response = ExportMetricsServiceResponse;
     const NAME: &'static str = METRICS_SERVICE_NAME;
     const PATH: &'static str = "/opentelemetry.proto.collector.metrics.v1.MetricsService/Export";
+    const SIGNAL: stats::Signal = stats::Signal::Metrics;
 
     fn ingest(
         state: &IngestState,
@@ -178,13 +186,28 @@ impl<S: Signal> UnaryService<Bytes> for ExportService<S> {
     fn call(&mut self, request: Request<Bytes>) -> Self::Future {
         let state = self.state.clone();
         Box::pin(async move {
-            let (request, report, permit) =
-                prepare_raw_request::<S::Request>(request, state.limits.clone()).await?;
-            let receipt = S::ingest(&state, request.into_inner()).map_err(store_status)?;
-            wait_for_write(receipt, permit)
-                .await
-                .map_err(store_status)?;
-            Ok(Response::new(S::Request::response(&report)))
+            let pending = state.stats.pending(S::SIGNAL, Transport::Grpc);
+            let exported = async {
+                let (request, report, permit) =
+                    prepare_raw_request::<S::Request>(request, state.limits.clone()).await?;
+                let receipt = S::ingest(&state, request.into_inner()).map_err(store_status)?;
+                let records = wait_for_write(receipt, permit)
+                    .await
+                    .map_err(store_status)?;
+                Ok::<_, Status>((records, report))
+            }
+            .await;
+            match exported {
+                Ok((records, report)) => {
+                    pending.accepted(records as u64, report.rejected(), report.warned());
+                    Ok(Response::new(S::Request::response(&report)))
+                }
+                Err(status) => {
+                    // ExportStatusLayer records every failed status, including earlier ones.
+                    pending.dismiss();
+                    Err(status)
+                }
+            }
         })
     }
 }

@@ -3,6 +3,7 @@ mod http;
 mod policy;
 mod preflight;
 mod records;
+pub mod stats;
 
 use std::{net::SocketAddr, sync::Arc};
 
@@ -14,12 +15,14 @@ use tonic::{Status, service::interceptor::InterceptedService, transport::Server}
 use crate::store::{AsyncWriteReceipt, Store, StoreWriteError};
 
 pub use policy::IngestLimits;
+use stats::{IngestProbe, IngestStats, Signal};
 
 #[derive(Clone)]
 struct IngestState {
     store: Store,
     limits: Arc<IngestLimits>,
     admission: Arc<Semaphore>,
+    stats: IngestStats,
 }
 
 impl IngestState {
@@ -29,15 +32,51 @@ impl IngestState {
             store,
             limits: Arc::new(limits),
             admission: Arc::new(Semaphore::new(max_in_flight)),
+            stats: IngestStats::default(),
         }
+    }
+
+    fn probe(&self) -> IngestProbe {
+        IngestProbe::new(
+            self.stats.clone(),
+            self.admission.clone(),
+            self.limits.max_in_flight,
+            self.store.clone(),
+        )
     }
 }
 
-pub async fn serve(
+/// The OTLP HTTP and gRPC receiver for one store.
+pub struct Receiver {
+    state: IngestState,
+}
+
+impl Receiver {
+    pub fn new(store: Store, limits: IngestLimits) -> Self {
+        Self {
+            state: IngestState::new(store, limits),
+        }
+    }
+
+    /// Returns a handle that samples receiver statistics while [`Self::serve`] runs.
+    pub fn probe(&self) -> IngestProbe {
+        self.state.probe()
+    }
+
+    pub async fn serve(
+        self,
+        http_bind: &str,
+        grpc_bind: &str,
+        shutdown: watch::Receiver<bool>,
+    ) -> Result<()> {
+        serve(http_bind, grpc_bind, self.state, shutdown).await
+    }
+}
+
+async fn serve(
     http_bind: &str,
     grpc_bind: &str,
-    store: Store,
-    limits: IngestLimits,
+    state: IngestState,
     shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let http_addr: SocketAddr = http_bind
@@ -46,7 +85,6 @@ pub async fn serve(
     let grpc_addr: SocketAddr = grpc_bind
         .parse()
         .with_context(|| format!("invalid gRPC bind addr {grpc_bind}"))?;
-    let state = IngestState::new(store, limits);
 
     let http_listener = tokio::net::TcpListener::bind(http_addr).await?;
     let grpc_listener = tokio::net::TcpListener::bind(grpc_addr).await?;
@@ -82,11 +120,11 @@ async fn serve_grpc_listener(
         grpc::server::OtlpService::<grpc::server::Traces>::new(state.clone(), message_limit);
     let traces =
         InterceptedService::new(traces, grpc::admission_interceptor(state.admission.clone()));
-    let traces = grpc::NormalizeTonicSizeError::new(traces);
+    let traces = grpc::ExportStatusLayer::new(traces, state.stats.clone(), Signal::Traces);
 
     let logs = grpc::server::OtlpService::<grpc::server::Logs>::new(state.clone(), message_limit);
     let logs = InterceptedService::new(logs, grpc::admission_interceptor(state.admission.clone()));
-    let logs = grpc::NormalizeTonicSizeError::new(logs);
+    let logs = grpc::ExportStatusLayer::new(logs, state.stats.clone(), Signal::Logs);
 
     let metrics =
         grpc::server::OtlpService::<grpc::server::Metrics>::new(state.clone(), message_limit);
@@ -94,7 +132,7 @@ async fn serve_grpc_listener(
         metrics,
         grpc::admission_interceptor(state.admission.clone()),
     );
-    let metrics = grpc::NormalizeTonicSizeError::new(metrics);
+    let metrics = grpc::ExportStatusLayer::new(metrics, state.stats.clone(), Signal::Metrics);
 
     Server::builder()
         .timeout(request_timeout)
@@ -121,11 +159,11 @@ fn store_status(err: anyhow::Error) -> Status {
 async fn wait_for_write(
     receipt: AsyncWriteReceipt<usize>,
     permit: OwnedSemaphorePermit,
-) -> anyhow::Result<()> {
+) -> anyhow::Result<usize> {
     // The detached waiter preserves both the write acknowledgement and admission permit if the
     // transport request is cancelled or times out after SQLite has accepted the operation.
     let waiter = tokio::spawn(async move {
-        let result = receipt.wait().await.map(|_| ());
+        let result = receipt.wait().await;
         drop(permit);
         result
     });

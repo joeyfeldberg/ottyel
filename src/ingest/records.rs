@@ -97,9 +97,13 @@ impl RecordReport {
         *total = total.saturating_add(count);
     }
 
-    #[cfg(test)]
     pub(super) fn rejected(&self) -> u64 {
         self.rejected
+    }
+
+    /// Whether any record was normalized rather than rejected.
+    pub(super) fn warned(&self) -> bool {
+        self.issues.keys().any(|issue| !issue.rejects())
     }
 
     /// Returns `None` for a clean export, which OTLP requires to leave `partial_success` unset.

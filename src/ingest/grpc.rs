@@ -16,6 +16,7 @@ use super::{
     policy::ValidateOtlp,
     preflight::{PreflightError, PreflightOtlp},
     records::{RecordReport, ScreenRecords},
+    stats::{Failure, IngestStats, Signal, Transport},
 };
 use crate::store::{MeasureIngest, PreparedIngest};
 
@@ -78,18 +79,27 @@ where
     .map_err(|_| Status::internal("request decoder task failed"))?
 }
 
+/// The outermost gRPC export layer. It maps Tonic's transport statuses onto OTLP retry
+/// semantics and records every failed export, including admission and decode failures that
+/// never reach the export service.
 #[derive(Clone)]
-pub(super) struct NormalizeTonicSizeError<S> {
+pub(super) struct ExportStatusLayer<S> {
     inner: S,
+    stats: IngestStats,
+    signal: Signal,
 }
 
-impl<S> NormalizeTonicSizeError<S> {
-    pub(super) fn new(inner: S) -> Self {
-        Self { inner }
+impl<S> ExportStatusLayer<S> {
+    pub(super) fn new(inner: S, stats: IngestStats, signal: Signal) -> Self {
+        Self {
+            inner,
+            stats,
+            signal,
+        }
     }
 }
 
-impl<S, ReqBody, ResBody> Service<http::Request<ReqBody>> for NormalizeTonicSizeError<S>
+impl<S, ReqBody, ResBody> Service<http::Request<ReqBody>> for ExportStatusLayer<S>
 where
     S: Service<http::Request<ReqBody>, Response = http::Response<ResBody>> + Send + Clone + 'static,
     S::Future: Send + 'static,
@@ -107,15 +117,22 @@ where
 
     fn call(&mut self, request: http::Request<ReqBody>) -> Self::Future {
         let future = self.inner.call(request);
+        let stats = self.stats.clone();
+        let signal = self.signal;
         Box::pin(async move {
             let mut response = future.await?;
             normalize_status(&mut response);
+            if let Some(status) = response.extensions().get::<Status>()
+                && let Some(failure) = Failure::from_grpc(status.code())
+            {
+                stats.failed(signal, Transport::Grpc, failure, status.message());
+            }
             Ok(response)
         })
     }
 }
 
-impl<S> tonic::server::NamedService for NormalizeTonicSizeError<S>
+impl<S> tonic::server::NamedService for ExportStatusLayer<S>
 where
     S: tonic::server::NamedService,
 {

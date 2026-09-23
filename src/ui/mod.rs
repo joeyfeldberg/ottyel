@@ -7,8 +7,8 @@ mod state;
 mod traces;
 
 pub use state::{
-    LayoutPreset, LlmFocus, LlmSortMode, Palette, PaneFocus, Tab, TraceFocus, TraceViewMode,
-    UiState,
+    IngestHealthView, LayoutPreset, LlmFocus, LlmSortMode, Palette, PaneFocus, RecentIngestFailure,
+    Tab, TraceFocus, TraceViewMode, UiState,
 };
 pub(crate) use traces::{
     first_llm_trace_index, next_error_trace_index, parent_trace_index, previous_error_trace_index,

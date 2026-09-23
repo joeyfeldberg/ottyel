@@ -12,7 +12,10 @@ use crate::{
     query::{LogCorrelationFilter, LogSeverityFilter},
 };
 
-use super::{LlmFocus, Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState, geometry};
+use super::{
+    IngestHealthView, LlmFocus, Palette, PaneFocus, Tab, TraceFocus, TraceViewMode, UiState,
+    geometry,
+};
 
 pub(crate) const COMMAND_PALETTE_VISIBLE_ROWS: usize = 8;
 
@@ -183,7 +186,46 @@ pub(crate) fn global_status_text(snapshot: &DashboardSnapshot, state: &UiState) 
         snapshot.overview.metric_count,
         snapshot.overview.llm_count,
     ));
+    if let Some(health) = &state.ingest_health {
+        parts.push(ingest_health_text(health));
+    }
     parts.join(" | ")
+}
+
+pub(crate) fn ingest_health_text(health: &IngestHealthView) -> String {
+    let mut text = if health.records_per_second < 0.5 && health.queued_records == 0 {
+        "ingest idle".to_string()
+    } else {
+        format!("ingest {}/s", compact_rate(health.records_per_second))
+    };
+    if let Some(p95) = health.recent_ack_p95 {
+        text.push_str(&format!(" ack<={}ms", p95.as_millis()));
+    }
+    if health.queued_records > 0 {
+        text.push_str(&format!(" queued={}", health.queued_records));
+    }
+    if health.rejected_records > 0 {
+        text.push_str(&format!(" rejected={}", health.rejected_records));
+    }
+    if health.failed_requests > 0 {
+        text.push_str(&format!(" failed={}", health.failed_requests));
+    }
+    if let Some(failure) = &health.last_failure {
+        text.push_str(&format!(
+            " last: {} {}s ago",
+            failure.label,
+            failure.age.as_secs()
+        ));
+    }
+    text
+}
+
+fn compact_rate(rate: f64) -> String {
+    if rate >= 1_000.0 {
+        format!("{:.1}k", rate / 1_000.0)
+    } else {
+        format!("{rate:.0}")
+    }
 }
 
 pub(crate) fn footer_text(state: &UiState) -> String {
