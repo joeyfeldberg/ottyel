@@ -25,10 +25,10 @@ use super::{
     },
     geometry::trace_tree_scroll_offset,
     traces::{
-        first_llm_trace_index, format_duration_compact, format_machine_local_time,
-        format_trace_timestamp, next_error_trace_index, parent_trace_index,
-        previous_error_trace_index, root_trace_index, selected_trace_row, trace_row_badges,
-        trace_row_display_name, trace_tree_rows, trace_window, waterfall_bar,
+        build_trace_tree_lines, first_llm_trace_index, format_duration_compact,
+        format_machine_local_time, format_trace_timestamp, next_error_trace_index,
+        parent_trace_index, previous_error_trace_index, root_trace_index, selected_trace_row,
+        trace_row_badges, trace_row_display_name, trace_tree_rows, trace_window, waterfall_bar,
     },
 };
 
@@ -1210,4 +1210,53 @@ fn span_with_parent(
         links: Vec::new(),
         llm: None,
     }
+}
+
+#[test]
+fn long_llm_badges_shrink_without_moving_the_waterfall_or_dropping_durations() {
+    let mut spans = vec![
+        span_with_parent("trace", "root", "", "Search Orchestrator", 0, 7_260),
+        span_with_parent("trace", "qu", "root", "Query Understanding", 10, 940),
+        span_with_parent("trace", "hier", "qu", "QU - Hierarchy Detection", 20, 311),
+    ];
+    let mut llm = span_with_parent(
+        "trace",
+        "llm",
+        "hier",
+        "DASv2 Category Generation Completion",
+        40,
+        300,
+    );
+    llm.llm = Some(LlmAttributes {
+        model: Some(
+            "litellm_proxy/vllm-s1/query_understanding-cq_category-generation-v4-with-a-very-long-suffix"
+                .to_string(),
+        ),
+        ..LlmAttributes::default()
+    });
+    spans.push(llm);
+    let rows = trace_tree_rows(&spans, &HashSet::new());
+    let line_width = 100;
+
+    let rendered: Vec<String> = build_trace_tree_lines(
+        &rows,
+        0,
+        true,
+        trace_window(&spans),
+        line_width,
+        Palette::from_theme(Theme::Ember),
+    )
+    .into_iter()
+    .map(|line| line.to_string())
+    .collect();
+
+    for line in &rendered {
+        assert_eq!(line.chars().count(), line_width, "{line:?}");
+        assert!(line.ends_with("ms") || line.ends_with('s'), "{line:?}");
+    }
+    let llm_line = &rendered[3];
+    assert!(llm_line.contains("DASv2 Category"), "{llm_line:?}");
+    assert!(llm_line.contains("[LLM query_unders…]"), "{llm_line:?}");
+    assert!(!llm_line.contains("litellm_proxy"), "{llm_line:?}");
+    assert!(llm_line.ends_with("260.0ms"), "{llm_line:?}");
 }

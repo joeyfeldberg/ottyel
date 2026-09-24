@@ -470,7 +470,7 @@ impl TraceTreeRow {
     }
 }
 
-fn build_trace_tree_lines(
+pub(crate) fn build_trace_tree_lines(
     rows: &[TraceTreeRow],
     selected_index: usize,
     tree_focused: bool,
@@ -528,15 +528,22 @@ fn build_trace_tree_lines(
             } else {
                 name_style
             };
+            // The name and badges share what the waterfall and duration leave. The name keeps
+            // most of it; badges shrink first so the waterfall column never moves.
+            let budget = line_width
+                .saturating_sub(prefix.chars().count() + timeline_width + duration_width + 2);
+            let name_length = display_name.chars().count();
+            let wanted_badges = badges
+                .iter()
+                .map(|badge| badge.label.chars().count() + 3)
+                .sum::<usize>();
+            let name_width =
+                name_length.min(budget.saturating_sub(wanted_badges).max(budget * 3 / 5));
+            let badges = fit_badges(badges, budget.saturating_sub(name_width));
             let badge_width = badges
                 .iter()
                 .map(|badge| badge.label.chars().count() + 3)
                 .sum::<usize>();
-            let name_width = line_width
-                .saturating_sub(
-                    prefix.chars().count() + timeline_width + duration_width + badge_width + 2,
-                )
-                .max(8);
             let name = truncate(&display_name, name_width);
             let rendered_width = prefix.chars().count()
                 + name.chars().count()
@@ -595,6 +602,28 @@ pub(crate) struct TraceRowBadge {
     pub(crate) label: String,
 }
 
+/// Keeps badges in order within `width` columns, truncating the first that does not fit and
+/// dropping the rest.
+fn fit_badges(badges: Vec<TraceRowBadge>, width: usize) -> Vec<TraceRowBadge> {
+    let mut remaining = width;
+    let mut fitted = Vec::new();
+    for badge in badges {
+        let needed = badge.label.chars().count() + 3;
+        if needed <= remaining {
+            remaining -= needed;
+            fitted.push(badge);
+        } else {
+            if remaining >= 8 {
+                fitted.push(TraceRowBadge {
+                    label: truncate(&badge.label, remaining - 3),
+                });
+            }
+            break;
+        }
+    }
+    fitted
+}
+
 fn render_badges(
     badges: &[TraceRowBadge],
     selection_style: Style,
@@ -645,7 +674,9 @@ pub(crate) fn trace_row_badges(span: &SpanDetail) -> Vec<TraceRowBadge> {
     if let Some(llm) = &span.llm {
         if let Some(model) = llm.model.as_deref().filter(|model| !model.is_empty()) {
             badges.push(TraceRowBadge {
-                label: format!("LLM {model}"),
+                // Proxy routes like `litellm_proxy/vllm/<model>` keep only the model; the span
+                // detail shows the full ID.
+                label: format!("LLM {}", model.rsplit('/').next().unwrap_or(model)),
             });
         } else if !is_low_signal_wrapper_span(span) {
             badges.push(TraceRowBadge {
